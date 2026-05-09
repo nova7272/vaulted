@@ -11,6 +11,7 @@ mod sync;
 mod transfers;
 mod users;
 mod vault;
+mod xaman;
 
 use axum::{
     routing::{delete, get, post, put},
@@ -74,6 +75,12 @@ fn api_v1_routes(auth_rate_limiter: RateLimiter) -> Router<AppState> {
         // Auth - protected
         .route("/auth/logout", post(auth::logout))
         .route("/auth/me", get(auth::get_me))
+
+        // Xaman payload proxy.
+        // Public because SignIn/claim QR creation happens before Oracle JWT exists.
+        // Protected by auth rate limiter at the outer auth route group in a later step.
+        .route("/xaman/payload", post(xaman::create_payload))
+        .route("/xaman/payload/:uuid", get(xaman::get_payload))
 
         // User key management - protected (HIGH-06)
         .route("/users/update-key", put(users::update_public_key))

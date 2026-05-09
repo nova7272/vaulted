@@ -41,6 +41,12 @@ pub struct Config {
     pub public_url: Option<String>,
     /// Shared secret for storage node authentication (register/heartbeat)
     pub node_secret: Option<String>,
+    /// Xaman API key. Backend-only.
+    pub xaman_api_key: Option<String>,
+    /// Xaman API secret. Backend-only; must never be bundled into desktop-client.
+    pub xaman_api_secret: Option<String>,
+    /// Forced Xaman network, for example TESTNET or MAINNET.
+    pub xaman_force_network: Option<String>,
     /// Path to file containing XRPL wallet seed (CRIT-03: preferred over env var)
     /// File must have permissions 0600 (owner read/write only)
     pub xrpl_wallet_seed_file: Option<String>,
@@ -105,6 +111,9 @@ impl Config {
             db_encryption_key: env::var("DB_ENCRYPTION_KEY").ok(),
             public_url: env::var("ORACLE_PUBLIC_URL").ok(),
             node_secret: env::var("NODE_SECRET").ok(),
+            xaman_api_key: env::var("XAMAN_API_KEY").ok(),
+            xaman_api_secret: env::var("XAMAN_API_SECRET").ok(),
+            xaman_force_network: env::var("XAMAN_FORCE_NETWORK").ok(),
             xrpl_wallet_seed_file: env::var("XRPL_WALLET_SEED_FILE").ok(),
             // HIGH-01: Trusted proxy IPs (comma-separated)
             // Example: TRUSTED_PROXIES=10.0.0.1,10.0.0.2,172.17.0.1
