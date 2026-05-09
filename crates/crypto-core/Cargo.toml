@@ -1,0 +1,51 @@
+[package]
+name = "xrpl-vault-crypto-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Cryptographic primitives for XRPL Vault: AES-GCM, ECIES, and Proxy Re-Encryption"
+
+[dependencies]
+# AES-256-GCM для шифрования файлов
+aes-gcm.workspace = true
+
+# Proxy Re-Encryption
+umbral-pre = { version = "0.11", features = ["default-serialization"] }
+
+# Генерация случайных чисел
+rand.workspace = true
+
+# Хеширование
+sha2.workspace = true
+blake3.workspace = true
+
+# Key derivation
+hkdf = "0.12"
+
+# Кодирование
+hex.workspace = true
+base64.workspace = true
+
+# Сериализация
+serde.workspace = true
+serde_bytes = "0.11"
+serde_json.workspace = true
+bincode.workspace = true
+
+# Обработка ошибок
+thiserror.workspace = true
+
+# Zeroize для безопасного удаления ключей из памяти
+zeroize = { version = "1.8", features = ["derive"] }
+
+# Constant-time comparison (MED-01: prevents timing attacks)
+subtle = "2.5"
+
+[dev-dependencies]
+proptest.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[features]
+default = []
+aes-ni = []

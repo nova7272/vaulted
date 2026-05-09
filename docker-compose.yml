@@ -1,0 +1,91 @@
+version: '3.8'
+
+services:
+  # ============================================
+  # PostgreSQL - основная база данных
+  # ============================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: xrpl-vault-postgres
+    environment:
+      POSTGRES_USER: xrpl_vault
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dev_password_change_me}
+      POSTGRES_DB: xrpl_vault
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # init.sql применяет сам oracle через embedded migrations
+      # - ./migrations/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U xrpl_vault -d xrpl_vault"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - xrpl-vault-network
+
+  # ============================================
+  # Redis - кэширование и очереди
+  # ============================================
+  redis:
+    image: redis:7-alpine
+    container_name: xrpl-vault-redis
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru --requirepass ${REDIS_PASSWORD:-dev_redis_password_change_me}
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - xrpl-vault-network
+
+  # ============================================
+  # Adminer - веб-интерфейс для PostgreSQL (dev only)
+  # ============================================
+  adminer:
+    image: adminer:latest
+    container_name: xrpl-vault-adminer
+    ports:
+      - "8080:8080"
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - xrpl-vault-network
+    profiles:
+      - dev-tools
+
+  # ============================================
+  # Redis Commander - веб-интерфейс для Redis (dev only)
+  # ============================================
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: xrpl-vault-redis-commander
+    environment:
+      REDIS_HOSTS: local:redis:6379
+    ports:
+      - "8081:8081"
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - xrpl-vault-network
+    profiles:
+      - dev-tools
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  xrpl-vault-network:
+    driver: bridge

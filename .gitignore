@@ -1,0 +1,53 @@
+# Rust
+/target
+**/target
+
+# Node / frontend
+/node_modules
+**/node_modules
+**/dist
+**/.vite
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.seed
+*.seed.enc
+*.salt
+*.secure
+*.pem
+*.key
+*.crt
+*.p12
+
+# Local data / storage
+/data
+data/
+crates/desktop-client/data/
+crates/storage-node/data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+logs/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.Zone.Identifier
+*:Zone.Identifier
+
+# Rust/compiler/temp junk
+*.tmp
+*.bak
+*.orig
+*:[0-9]*
+
+# Accidental CLI artifacts
+crates/desktop-client/vite
+crates/desktop-client/ui@*

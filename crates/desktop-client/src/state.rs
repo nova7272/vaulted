@@ -1,0 +1,572 @@
+//! Состояние приложения
+//!
+//! Хранит текущую сессию, ключи и конфигурацию.
+//!
+//! PRE ключи хранятся ТОЛЬКО в памяти (сессионно).
+//! При закрытии приложения ключи удаляются.
+//! При следующем входе требуется повторная подпись в Xaman.
+
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use xrpl_vault_crypto_core::pre::{PreKeyPair, PrePublicKey, ProxyReEncryption};
+
+use crate::{
+    auth::Session,
+    error::{ClientError, Result},
+};
+
+/// Конфигурация приложения
+#[derive(Debug, Clone)]
+pub struct AppConfig {
+    /// URL Oracle сервера
+    pub oracle_url: String,
+    /// URL XRPL ноды (WebSocket)
+    pub xrpl_node_url: String,
+    /// Xaman API Key
+    pub xaman_api_key: String,
+    /// Xaman API Secret
+    pub xaman_api_secret: String,
+    /// Максимальный размер файла (bytes)
+    pub max_file_size: u64,
+    /// Размер фрагмента (bytes)
+    pub fragment_size: usize,
+    /// URL Storage Node
+    pub storage_node_url: String,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            oracle_url: "http://localhost:3000".to_string(),
+            xrpl_node_url: "https://clio.altnet.rippletest.net:51234".to_string(),
+            xaman_api_key: String::new(),
+            xaman_api_secret: String::new(),
+            max_file_size: 100 * 1024 * 1024, // 100MB
+            fragment_size: 1024 * 1024,        // 1MB
+            storage_node_url: "http://localhost:9001".to_string(),
+        }
+    }
+}
+
+impl AppConfig {
+    /// Загружает конфигурацию из переменных окружения
+    pub fn from_env() -> Self {
+        Self {
+            oracle_url: std::env::var("ORACLE_URL")
+                .unwrap_or_else(|_| "http://localhost:3000".to_string()),
+            xrpl_node_url: std::env::var("XRPL_NODE_URL")
+                .unwrap_or_else(|_| "https://clio.altnet.rippletest.net:51234".to_string()),
+            xaman_api_key: std::env::var("XAMAN_API_KEY").unwrap_or_default(),
+            xaman_api_secret: std::env::var("XAMAN_API_SECRET").unwrap_or_default(),
+            max_file_size: std::env::var("MAX_FILE_SIZE")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(100 * 1024 * 1024),
+            fragment_size: std::env::var("FRAGMENT_SIZE")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1024 * 1024),
+            storage_node_url: std::env::var("STORAGE_NODE_URL")
+                .unwrap_or_else(|_| "http://localhost:9001".to_string()),
+        }
+    }
+}
+
+/// Состояние приложения (thread-safe)
+pub struct AppState {
+    /// Конфигурация
+    pub config: AppConfig,
+    /// Текущая сессия пользователя
+    session: RwLock<Option<Session>>,
+    /// PRE контекст (thread-safe)
+    pre: ProxyReEncryption,
+    /// PRE keypair - хранится ТОЛЬКО в памяти (сессионно)
+    keypair: RwLock<Option<PreKeyPair>>,
+    /// HTTP клиент
+    http_client: reqwest::Client,
+    /// Device fingerprint (unique per app instance, persisted)
+    device_fingerprint: String,
+}
+
+impl AppState {
+    /// Создаёт новое состояние приложения
+    pub fn new(config: AppConfig) -> Result<Arc<Self>> {
+        let http_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()?;
+
+        let device_fingerprint = Self::load_or_generate_fingerprint();
+
+        Ok(Arc::new(Self {
+            config,
+            session: RwLock::new(None),
+            pre: ProxyReEncryption::new(),
+            keypair: RwLock::new(None),
+            http_client,
+            device_fingerprint,
+        }))
+    }
+
+    /// Generate or load persistent device fingerprint
+    fn load_or_generate_fingerprint() -> String {
+        use sha2::{Sha256, Digest};
+
+        // Try to load saved fingerprint
+        if let Some(project_dirs) = directories::ProjectDirs::from("com", "xrplvault", "xrplvault") {
+            let fp_path = project_dirs.data_dir().join("device.fingerprint");
+            let obfuscation_key = Self::derive_obfuscation_key(project_dirs.data_dir());
+
+            if let Ok(raw_bytes) = std::fs::read(&fp_path) {
+                // Deobfuscate: XOR with machine-specific key
+                let fp_bytes: Vec<u8> = raw_bytes.iter()
+                    .zip(obfuscation_key.iter().cycle())
+                    .map(|(a, b)| a ^ b)
+                    .collect();
+                if let Ok(fp) = String::from_utf8(fp_bytes) {
+                    let fp = fp.trim().to_string();
+                    if fp.len() == 64 && fp.chars().all(|c| c.is_ascii_hexdigit()) {
+                        tracing::debug!("Loaded device fingerprint: {}...", &fp[..8]);
+                        return fp;
+                    }
+                }
+            }
+
+            // Generate new fingerprint from system info
+            let mut hasher = Sha256::new();
+
+            // Hostname
+            if let Ok(hostname) = hostname::get() {
+                hasher.update(hostname.to_string_lossy().as_bytes());
+            }
+
+            // OS info
+            hasher.update(std::env::consts::OS.as_bytes());
+            hasher.update(std::env::consts::ARCH.as_bytes());
+
+            // Persistent random component (survives reboots)
+            let random_component = uuid::Uuid::new_v4().to_string();
+            hasher.update(random_component.as_bytes());
+
+            // Data directory path (unique per user/OS install)
+            hasher.update(project_dirs.data_dir().to_string_lossy().as_bytes());
+
+            let fp = hex::encode(hasher.finalize());
+
+            // Save obfuscated (XOR with machine key) + restrictive permissions
+            let _ = std::fs::create_dir_all(project_dirs.data_dir());
+            let obfuscated: Vec<u8> = fp.as_bytes().iter()
+                .zip(obfuscation_key.iter().cycle())
+                .map(|(a, b)| a ^ b)
+                .collect();
+            let _ = std::fs::write(&fp_path, &obfuscated);
+
+            // Set restrictive permissions (Unix: owner read/write only)
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&fp_path, std::fs::Permissions::from_mode(0o600));
+            }
+
+            tracing::info!("Generated new device fingerprint: {}...", &fp[..8]);
+            return fp;
+        }
+
+        // Fallback: random per session
+        let fp = hex::encode(uuid::Uuid::new_v4().as_bytes());
+        tracing::warn!("Using ephemeral device fingerprint (no persistent storage)");
+        fp
+    }
+
+    /// Derive a machine-specific obfuscation key for fingerprint storage
+    fn derive_obfuscation_key(data_dir: &std::path::Path) -> Vec<u8> {
+        use sha2::{Sha256, Digest};
+        let mut hasher = Sha256::new();
+        hasher.update(b"xrpl-vault-dfp-obfuscation-v1");
+        hasher.update(data_dir.to_string_lossy().as_bytes());
+        if let Ok(hostname) = hostname::get() {
+            hasher.update(hostname.to_string_lossy().as_bytes());
+        }
+        hasher.finalize().to_vec()
+    }
+
+    /// Returns device fingerprint
+    pub fn device_fingerprint(&self) -> &str {
+        &self.device_fingerprint
+    }
+
+    /// Возвращает PRE контекст
+    pub fn pre(&self) -> &ProxyReEncryption {
+        &self.pre
+    }
+
+    /// Возвращает HTTP клиент
+    pub fn http(&self) -> &reqwest::Client {
+        &self.http_client
+    }
+
+    /// Проверяет наличие активной сессии
+    pub async fn is_authenticated(&self) -> bool {
+        let session = self.session.read().await;
+        session
+            .as_ref()
+            .map(|s| !s.is_expired())
+            .unwrap_or(false)
+    }
+
+    /// Возвращает текущую сессию
+    pub async fn get_session(&self) -> Result<Session> {
+        let session = self.session.read().await;
+        match session.as_ref() {
+            Some(s) if !s.is_expired() => Ok(s.clone()),
+            Some(_) => Err(ClientError::SessionExpired),
+            None => Err(ClientError::NoSession),
+        }
+    }
+
+    /// Устанавливает сессию после авторизации
+    pub async fn set_session(&self, session: Session) {
+        let mut guard = self.session.write().await;
+        *guard = Some(session);
+    }
+
+    /// Очищает сессию (logout)
+    pub async fn clear_session(&self) {
+        let mut session_guard = self.session.write().await;
+        *session_guard = None;
+        let mut keypair_guard = self.keypair.write().await;
+        *keypair_guard = None;
+        tracing::info!("Session and PRE keypair cleared from memory");
+    }
+
+    /// Возвращает адрес кошелька текущего пользователя
+    pub async fn wallet_address(&self) -> Result<String> {
+        let session = self.get_session().await?;
+        Ok(session.wallet_address)
+    }
+
+    /// Инициализирует PRE ключи из seed (деривированного из подписи)
+    ///
+    /// Keypair хранится ТОЛЬКО в памяти - не сохраняется на диск!
+    /// При закрытии приложения ключ удаляется.
+    /// Seed зануляется сразу после создания keypair.
+    pub async fn init_keypair_from_seed(&self, wallet_address: &str, mut seed: [u8; 32]) -> Result<()> {
+        // Генерируем keypair из seed
+        let keypair = self.pre.generate_keypair_from_seed(&seed)?;
+
+        // Зануляем seed немедленно после использования
+        use zeroize::Zeroize;
+        seed.zeroize();
+
+        // Сохраняем ТОЛЬКО в памяти
+        let mut guard = self.keypair.write().await;
+        *guard = Some(keypair);
+
+        tracing::info!(
+            "PRE keypair initialized in memory for {} (session-only, not persisted to disk)", 
+            wallet_address
+        );
+        Ok(())
+    }
+
+    /// Проверяет есть ли keypair в памяти
+    pub async fn has_keypair(&self) -> bool {
+        let guard = self.keypair.read().await;
+        guard.is_some()
+    }
+
+    /// Возвращает keypair из памяти (клонируется)
+    pub async fn get_keypair(&self) -> Result<PreKeyPair> {
+        let guard = self.keypair.read().await;
+        guard.clone().ok_or_else(|| ClientError::Auth(
+            "PRE keypair not initialized. Please sign in again with Xaman.".to_string()
+        ))
+    }
+
+    /// Возвращает публичный ключ PRE в hex формате
+    pub async fn get_public_key_hex(&self) -> Result<String> {
+        let keypair = self.get_keypair().await?;
+        Ok(hex::encode(keypair.export_public_key_bytes()))
+    }
+
+    /// Возвращает публичный ключ PRE
+    pub async fn get_public_key(&self) -> Result<PrePublicKey> {
+        let keypair = self.get_keypair().await?;
+        Ok(keypair.public_key())
+    }
+
+    /// Returns Oracle JWT token for API authentication
+    pub async fn get_oracle_token(&self) -> Result<String> {
+        let session = self.get_session().await?;
+        session.oracle_token.ok_or_else(|| ClientError::Auth(
+            "Oracle token not available. Please sign in again.".to_string()
+        ))
+    }
+
+    /// Sets Oracle token in current session
+    pub async fn set_oracle_token(&self, token: String) -> Result<()> {
+        let mut guard = self.session.write().await;
+        if let Some(ref mut session) = *guard {
+            session.set_oracle_token(token);
+            Ok(())
+        } else {
+            Err(ClientError::NoSession)
+        }
+    }
+
+    /// Sets Oracle token with custom expiry (in seconds)
+    pub async fn set_oracle_token_with_expiry(&self, token: String, expires_in_secs: i64) -> Result<()> {
+        let mut guard = self.session.write().await;
+        if let Some(ref mut session) = *guard {
+            session.set_oracle_token_with_expiry(token, expires_in_secs);
+            Ok(())
+        } else {
+            Err(ClientError::NoSession)
+        }
+    }
+
+    /// Saves complete token response (access + refresh + device_fingerprint + role)
+    pub async fn save_oracle_tokens(
+        &self,
+        access_token: String,
+        expires_in: i64,
+        refresh_token: Option<String>,
+        role: Option<String>,
+    ) -> Result<()> {
+        let mut guard = self.session.write().await;
+        if let Some(ref mut session) = *guard {
+            session.set_oracle_token_with_expiry(access_token, expires_in);
+            if let Some(rt) = refresh_token {
+                session.set_refresh_token(rt);
+            }
+            if let Some(r) = role {
+                session.set_role(r);
+            }
+            // Always save device fingerprint
+            session.set_device_fingerprint(self.device_fingerprint.clone());
+            Ok(())
+        } else {
+            Err(ClientError::NoSession)
+        }
+    }
+
+    /// Attempt to refresh the Oracle token using stored refresh token
+    pub async fn try_refresh_oracle_token(&self) -> Result<bool> {
+        let refresh_tok = {
+            let session = self.session.read().await;
+            match session.as_ref() {
+                Some(s) => s.refresh_token.clone(),
+                None => return Err(ClientError::NoSession),
+            }
+        };
+
+        let refresh_tok = match refresh_tok {
+            Some(rt) => rt,
+            None => return Err(ClientError::Auth("No refresh token available".into())),
+        };
+
+        match self.refresh_oracle_token_internal(&refresh_tok).await {
+            Ok((new_access, new_refresh, expires_in, role)) => {
+                let mut guard = self.session.write().await;
+                if let Some(ref mut s) = *guard {
+                    s.update_tokens(new_access, new_refresh, expires_in, role);
+                }
+                tracing::info!("Oracle token refreshed successfully");
+                Ok(true)
+            }
+            Err(e) => {
+                tracing::warn!("Token refresh failed: {}", e);
+                Err(ClientError::Auth(format!("Token refresh failed: {}", e)))
+            }
+        }
+    }
+
+    /// Returns Authorization header value for Oracle API
+    pub async fn get_auth_header(&self) -> Result<String> {
+        let token = self.get_oracle_token().await?;
+        Ok(format!("Bearer {}", token))
+    }
+
+    /// Creates an HTTP client with Authorization header pre-configured
+    /// Falls back to a plain client if no Oracle token is available
+    pub async fn create_authed_client(&self) -> reqwest::Client {
+        let mut headers = reqwest::header::HeaderMap::new();
+        if let Ok(auth) = self.get_auth_header().await {
+            if let Ok(val) = reqwest::header::HeaderValue::from_str(&auth) {
+                headers.insert(reqwest::header::AUTHORIZATION, val);
+            }
+        }
+        if let Ok(dfp) = self.device_fingerprint_header() {
+            if let Ok(val) = reqwest::header::HeaderValue::from_str(&dfp) {
+                headers.insert("X-Device-Fingerprint", val);
+            }
+        }
+        reqwest::Client::builder()
+            .default_headers(headers)
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    }
+
+    fn device_fingerprint_header(&self) -> Result<String> {
+        Ok(self.device_fingerprint.clone())
+    }
+
+    /// Check if we have a valid Oracle token
+    pub async fn has_oracle_token(&self) -> bool {
+        if let Ok(session) = self.get_session().await {
+            session.oracle_token.is_some() && !session.oracle_token_is_expired()
+        } else {
+            false
+        }
+    }
+
+    /// Check if Oracle token needs refresh (expires in < 5 minutes)
+    pub async fn oracle_token_needs_refresh(&self) -> bool {
+        if let Ok(session) = self.get_session().await {
+            session.oracle_token_needs_refresh()
+        } else {
+            false
+        }
+    }
+
+    /// Creates OracleClient with auth token (if available)
+    pub async fn get_oracle_client(&self) -> Result<crate::oracle::OracleClient> {
+        self.get_oracle_client_with_timeout(60).await
+    }
+
+    /// Creates OracleClient with custom timeout and auth token (if available)
+    /// Auto-refreshes token if it's about to expire (< 5 minutes)
+    pub async fn get_oracle_client_with_timeout(&self, timeout_secs: u64) -> Result<crate::oracle::OracleClient> {
+        let config = crate::oracle::OracleConfig {
+            base_url: self.config.oracle_url.clone(),
+            timeout_secs,
+            ..Default::default()
+        };
+        let mut client = crate::oracle::OracleClient::new(config)?;
+
+        // Set device fingerprint for all requests
+        client.set_device_fingerprint(self.device_fingerprint.clone());
+
+        // Check token status and auto-refresh if needed
+        if let Ok(session) = self.get_session().await {
+            if let Some(ref token) = session.oracle_token {
+                if session.oracle_token_is_expired() {
+                    // Token expired — try refresh
+                    if let Some(ref refresh_tok) = session.refresh_token {
+                        tracing::info!("Access token expired, attempting refresh...");
+                        match self.refresh_oracle_token_internal(refresh_tok).await {
+                            Ok((new_access, new_refresh, expires_in, role)) => {
+                                // Update session
+                                let mut session_guard = self.session.write().await;
+                                if let Some(ref mut s) = *session_guard {
+                                    s.update_tokens(new_access.clone(), new_refresh, expires_in, role);
+                                }
+                                client.set_auth_token(new_access);
+                                tracing::info!("Token refreshed successfully");
+                            }
+                            Err(e) => {
+                                tracing::warn!("Token refresh failed: {} — clearing session", e);
+                                // Clear tokens so has_oracle_token() returns false
+                                let mut session_guard = self.session.write().await;
+                                if let Some(ref mut s) = *session_guard {
+                                    s.oracle_token = None;
+                                    s.oracle_token_expires_at = None;
+                                    s.refresh_token = None;
+                                }
+                                return Err(ClientError::Auth("Token expired and refresh failed. Please sign in again.".to_string()));
+                            }
+                        }
+                    } else {
+                        // No refresh token — clear expired access token
+                        let mut session_guard = self.session.write().await;
+                        if let Some(ref mut s) = *session_guard {
+                            s.oracle_token = None;
+                            s.oracle_token_expires_at = None;
+                        }
+                        return Err(ClientError::Auth("Oracle token expired. Please sign in again.".to_string()));
+                    }
+                } else if session.oracle_token_needs_refresh() {
+                    // Token expires soon — refresh in background, use current token
+                    if let Some(ref refresh_tok) = session.refresh_token {
+                        let refresh_tok = refresh_tok.clone();
+                        tracing::info!("Token expires soon, refreshing proactively...");
+                        match self.refresh_oracle_token_internal(&refresh_tok).await {
+                            Ok((new_access, new_refresh, expires_in, role)) => {
+                                let mut session_guard = self.session.write().await;
+                                if let Some(ref mut s) = *session_guard {
+                                    s.update_tokens(new_access.clone(), new_refresh, expires_in, role);
+                                }
+                                client.set_auth_token(new_access);
+                                tracing::info!("Token proactively refreshed");
+                            }
+                            Err(e) => {
+                                tracing::warn!("Proactive refresh failed: {} — clearing refresh token to stop retries", e);
+                                // Clear refresh token so we don't keep hammering the server
+                                {
+                                    let mut session_guard = self.session.write().await;
+                                    if let Some(ref mut s) = *session_guard {
+                                        s.refresh_token = None;
+                                    }
+                                }
+                                // Still use current access token if not expired
+                                if !session.oracle_token_is_expired() {
+                                    client.set_auth_token(token.clone());
+                                } else {
+                                    // Access token also expired — clear everything
+                                    let mut session_guard = self.session.write().await;
+                                    if let Some(ref mut s) = *session_guard {
+                                        s.oracle_token = None;
+                                        s.oracle_token_expires_at = None;
+                                    }
+                                    return Err(ClientError::Auth("Session expired. Please sign in again.".to_string()));
+                                }
+                            }
+                        }
+                    } else {
+                        client.set_auth_token(token.clone());
+                    }
+                } else {
+                    client.set_auth_token(token.clone());
+                }
+            }
+        }
+
+        Ok(client)
+    }
+
+    /// Internal: call Oracle /auth/refresh endpoint
+    async fn refresh_oracle_token_internal(
+        &self,
+        refresh_token: &str,
+    ) -> std::result::Result<(String, Option<String>, i64, Option<String>), String> {
+        let url = format!("{}/api/v1/auth/refresh", self.config.oracle_url);
+
+        let response = self.http_client
+            .post(&url)
+            .header("X-Device-Fingerprint", &self.device_fingerprint)
+            .json(&serde_json::json!({
+                "refresh_token": refresh_token
+            }))
+            .send()
+            .await
+            .map_err(|e| format!("HTTP error: {}", e))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(format!("Refresh failed: HTTP {} — {}", status, body));
+        }
+
+        let data: serde_json::Value = response.json().await
+            .map_err(|e| format!("JSON parse error: {}", e))?;
+
+        let access_token = data["access_token"].as_str()
+            .ok_or("Missing access_token in refresh response")?
+            .to_string();
+        let new_refresh = data["refresh_token"].as_str()
+            .map(|s| s.to_string());
+        let expires_in = data["expires_in"].as_i64().unwrap_or(3600);
+        let role = data["role"].as_str().map(|s| s.to_string());
+
+        Ok((access_token, new_refresh, expires_in, role))
+    }
+}
