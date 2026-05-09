@@ -67,7 +67,7 @@ impl ProgressEvent {
 pub async fn start_xaman_auth(state: State<'_, Arc<AppState>>) -> Result<XamanPayload> {
     let xaman = XamanAuth::new(
         state.config.xaman_api_key.clone(),
-        state.config.xaman_api_secret.clone(),
+        String::new(),
     );
     xaman.create_sign_in_request().await
 }
@@ -84,7 +84,7 @@ pub async fn wait_for_auth(
 ) -> Result<Session> {
     let xaman = XamanAuth::new(
         state.config.xaman_api_key.clone(),
-        state.config.xaman_api_secret.clone(),
+        String::new(),
     );
 
     let payload = XamanPayload {
@@ -1307,8 +1307,7 @@ pub async fn create_transfer_offer(
 
     let api_key = std::env::var("XAMAN_API_KEY")
         .map_err(|_| ClientError::Auth("XAMAN_API_KEY not set".into()))?;
-    let api_secret = std::env::var("XAMAN_API_SECRET")
-        .map_err(|_| ClientError::Auth("XAMAN_API_SECRET not set".into()))?;
+    let api_secret = String::new();
 
     let xaman = crate::auth::xaman::XamanAuth::new(api_key, api_secret);
     let payload = xaman.create_payload(serde_json::json!({"txjson": tx_json})).await?;
@@ -1327,8 +1326,7 @@ pub async fn wait_for_transfer_offer(
 ) -> Result<TransferOfferResult> {
     let api_key = std::env::var("XAMAN_API_KEY")
         .map_err(|_| ClientError::Auth("XAMAN_API_KEY not set".into()))?;
-    let api_secret = std::env::var("XAMAN_API_SECRET")
-        .map_err(|_| ClientError::Auth("XAMAN_API_SECRET not set".into()))?;
+    let api_secret = String::new();
 
     let xaman = crate::auth::xaman::XamanAuth::new(api_key, api_secret);
 
@@ -1453,8 +1451,7 @@ pub async fn claim_nft(
 
     let api_key = std::env::var("XAMAN_API_KEY")
         .map_err(|_| ClientError::Auth("XAMAN_API_KEY not set".into()))?;
-    let api_secret = std::env::var("XAMAN_API_SECRET")
-        .map_err(|_| ClientError::Auth("XAMAN_API_SECRET not set".into()))?;
+    let api_secret = String::new();
 
     let xaman = crate::auth::xaman::XamanAuth::new(api_key, api_secret);
     let payload_request = serde_json::json!({"txjson": tx_json});
@@ -1481,8 +1478,7 @@ pub async fn wait_for_claim(
 ) -> Result<ClaimResult> {
     let api_key = std::env::var("XAMAN_API_KEY")
         .map_err(|_| ClientError::Auth("XAMAN_API_KEY not set".into()))?;
-    let api_secret = std::env::var("XAMAN_API_SECRET")
-        .map_err(|_| ClientError::Auth("XAMAN_API_SECRET not set".into()))?;
+    let api_secret = String::new();
     let xaman = crate::auth::xaman::XamanAuth::new(api_key, api_secret);
 
     let payload = crate::auth::xaman::XamanPayload {
@@ -1919,8 +1915,7 @@ pub async fn burn_nft(
 
     let api_key = std::env::var("XAMAN_API_KEY")
         .map_err(|_| ClientError::Auth("XAMAN_API_KEY not set".into()))?;
-    let api_secret = std::env::var("XAMAN_API_SECRET")
-        .map_err(|_| ClientError::Auth("XAMAN_API_SECRET not set".into()))?;
+    let api_secret = String::new();
 
     let xaman = crate::auth::xaman::XamanAuth::new(api_key, api_secret);
     let payload = xaman.create_payload(serde_json::json!({"txjson": tx_json})).await?;
@@ -1938,8 +1933,7 @@ pub async fn wait_for_burn(
 ) -> Result<BurnNftResult> {
     let api_key = std::env::var("XAMAN_API_KEY")
         .map_err(|_| ClientError::Auth("XAMAN_API_KEY not set".into()))?;
-    let api_secret = std::env::var("XAMAN_API_SECRET")
-        .map_err(|_| ClientError::Auth("XAMAN_API_SECRET not set".into()))?;
+    let api_secret = String::new();
 
     let xaman = crate::auth::xaman::XamanAuth::new(api_key, api_secret);
 
@@ -2541,8 +2535,7 @@ pub async fn oracle_login_start(
     // Create Xaman SignIn payload
     let api_key = std::env::var("XAMAN_API_KEY")
         .map_err(|_| ClientError::Auth("XAMAN_API_KEY not set".into()))?;
-    let api_secret = std::env::var("XAMAN_API_SECRET")
-        .map_err(|_| ClientError::Auth("XAMAN_API_SECRET not set".into()))?;
+    let api_secret = String::new();
 
     let xaman = crate::auth::xaman::XamanAuth::new(api_key, api_secret);
 
@@ -2629,8 +2622,7 @@ pub async fn oracle_login_wait(
     // Wait for Xaman signature
     let api_key = std::env::var("XAMAN_API_KEY")
         .map_err(|_| ClientError::Auth("XAMAN_API_KEY not set".into()))?;
-    let api_secret = std::env::var("XAMAN_API_SECRET")
-        .map_err(|_| ClientError::Auth("XAMAN_API_SECRET not set".into()))?;
+    let api_secret = String::new();
 
     let xaman = crate::auth::xaman::XamanAuth::new(api_key, api_secret);
 

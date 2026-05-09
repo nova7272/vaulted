@@ -25,7 +25,6 @@ pub struct AppConfig {
     /// Xaman API Key
     pub xaman_api_key: String,
     /// Xaman API Secret
-    pub xaman_api_secret: String,
     /// Максимальный размер файла (bytes)
     pub max_file_size: u64,
     /// Размер фрагмента (bytes)
@@ -40,7 +39,6 @@ impl Default for AppConfig {
             oracle_url: "http://localhost:3000".to_string(),
             xrpl_node_url: "https://clio.altnet.rippletest.net:51234".to_string(),
             xaman_api_key: String::new(),
-            xaman_api_secret: String::new(),
             max_file_size: 100 * 1024 * 1024, // 100MB
             fragment_size: 1024 * 1024,        // 1MB
             storage_node_url: "http://localhost:9001".to_string(),
@@ -56,9 +54,7 @@ impl AppConfig {
                 .unwrap_or_else(|_| "http://localhost:3000".to_string()),
             xrpl_node_url: std::env::var("XRPL_NODE_URL")
                 .unwrap_or_else(|_| "https://clio.altnet.rippletest.net:51234".to_string()),
-            xaman_api_key: std::env::var("XAMAN_API_KEY").unwrap_or_default(),
-            xaman_api_secret: std::env::var("XAMAN_API_SECRET").unwrap_or_default(),
-            max_file_size: std::env::var("MAX_FILE_SIZE")
+            xaman_api_key: std::env::var("XAMAN_API_KEY").unwrap_or_default(),            max_file_size: std::env::var("MAX_FILE_SIZE")
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(100 * 1024 * 1024),
