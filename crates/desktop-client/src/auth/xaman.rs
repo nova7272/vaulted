@@ -18,23 +18,26 @@ use xrpl_vault_crypto_core::KeyDerivation;
 use crate::error::{ClientError, Result};
 use super::Session;
 
-/// Xaman API endpoints
-const XAMAN_API_URL: &str = "https://xumm.app/api/v1";
+/// Default local Oracle URL for the Xaman proxy.
+const DEFAULT_ORACLE_URL: &str = "http://127.0.0.1:3000";
 
 /// Клиент для работы с Xaman API
 pub struct XamanAuth {
     http_client: Client,
-    api_key: String,
-    api_secret: String,
+    oracle_url: String,
 }
 
 impl XamanAuth {
     /// Создаёт новый клиент Xaman
-    pub fn new(api_key: String, api_secret: String) -> Self {
+    pub fn new(_api_key: String, _api_secret: String) -> Self {
+        let oracle_url = std::env::var("ORACLE_URL")
+            .unwrap_or_else(|_| DEFAULT_ORACLE_URL.to_string())
+            .trim_end_matches('/')
+            .to_string();
+
         Self {
             http_client: Client::new(),
-            api_key,
-            api_secret,
+            oracle_url,
         }
     }
 
@@ -88,9 +91,7 @@ impl XamanAuth {
 
         let response = self
             .http_client
-            .post(format!("{}/platform/payload", XAMAN_API_URL))
-            .header("X-API-Key", &self.api_key)
-            .header("X-API-Secret", &self.api_secret)
+            .post(format!("{}/api/v1/xaman/payload", self.oracle_url))
             .header("Content-Type", "application/json")
             .json(&request)
             .send()
@@ -238,9 +239,7 @@ impl XamanAuth {
     async fn get_payload_result(&self, uuid: &str) -> Result<PayloadResult> {
         let response = self
             .http_client
-            .get(format!("{}/platform/payload/{}", XAMAN_API_URL, uuid))
-            .header("X-API-Key", &self.api_key)
-            .header("X-API-Secret", &self.api_secret)
+            .get(format!("{}/api/v1/xaman/payload/{}", self.oracle_url, uuid))
             .send()
             .await?;
 
@@ -341,9 +340,7 @@ impl XamanAuth {
 
         let response = self
             .http_client
-            .post(format!("{}/platform/payload", XAMAN_API_URL))
-            .header("X-API-Key", &self.api_key)
-            .header("X-API-Secret", &self.api_secret)
+            .post(format!("{}/api/v1/xaman/payload", self.oracle_url))
             .header("Content-Type", "application/json")
             .json(&request_value)
             .send()
