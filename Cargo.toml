@@ -40,7 +40,7 @@ tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "trace"] }
 
 # Database
-sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "uuid", "chrono"] }
 
 # XRPL (используем свою реализацию через WebSocket)
 xrpl-rust = "1.0"  # Раскомментировать если нужна официальная библиотека
