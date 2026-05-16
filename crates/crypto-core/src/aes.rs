@@ -21,7 +21,7 @@
 //! ```
 
 use aes_gcm::{
-    aead::{Aead, KeyInit, OsRng},
+    aead::{Aead, KeyInit, OsRng, Payload},
     Aes256Gcm, Key, Nonce,
 };
 use rand::RngCore;
@@ -99,6 +99,55 @@ impl AesKey {
             nonce_bytes.to_vec(),
             ciphertext,
         ))
+    }
+
+    /// Шифрует данные с AAD (associated authenticated data) для привязки ciphertext к контексту.
+    pub fn encrypt_with_aad(&self, plaintext: &[u8], aad: &[u8]) -> Result<EncryptedData> {
+        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&self.key));
+
+        let mut nonce_bytes = [0u8; AES_NONCE_SIZE];
+        OsRng.fill_bytes(&mut nonce_bytes);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+
+        let ciphertext = cipher
+            .encrypt(
+                nonce,
+                Payload {
+                    msg: plaintext,
+                    aad,
+                },
+            )
+            .map_err(|e| CryptoError::AesEncryption(e.to_string()))?;
+
+        Ok(EncryptedData::new(
+            CRYPTO_VERSION,
+            nonce_bytes.to_vec(),
+            ciphertext,
+        ))
+    }
+
+    /// Расшифровывает данные с AAD и проверкой authentication tag.
+    pub fn decrypt_with_aad(&self, encrypted: &EncryptedData, aad: &[u8]) -> Result<Vec<u8>> {
+        if encrypted.version != CRYPTO_VERSION {
+            return Err(CryptoError::UnsupportedVersion(encrypted.version));
+        }
+        if encrypted.nonce.len() != AES_NONCE_SIZE {
+            return Err(CryptoError::InvalidNonceSize {
+                expected: AES_NONCE_SIZE,
+                actual: encrypted.nonce.len(),
+            });
+        }
+        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&self.key));
+        let nonce = Nonce::from_slice(&encrypted.nonce);
+        cipher
+            .decrypt(
+                nonce,
+                Payload {
+                    msg: encrypted.ciphertext.as_ref(),
+                    aad,
+                },
+            )
+            .map_err(|_| CryptoError::AesDecryption("Authentication failed".to_string()))
     }
 
     /// Расшифровывает данные
@@ -218,6 +267,25 @@ mod tests {
         let bytes = [42u8; AES_KEY_SIZE];
         let key = AesKey::from_bytes(&bytes).unwrap();
         assert_eq!(key.as_bytes(), &bytes);
+    }
+
+    #[test]
+    fn test_nonce_uniqueness_for_generated_chunks() {
+        let key = AesKey::generate();
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..256u16 {
+            let encrypted = key.encrypt_with_aad(b"chunk", &i.to_be_bytes()).unwrap();
+            assert!(seen.insert(encrypted.nonce));
+        }
+    }
+
+    #[test]
+    fn test_aad_tamper_verification_fails() {
+        let key = AesKey::generate();
+        let encrypted = key.encrypt_with_aad(b"secret", b"vault:1:chunk:0").unwrap();
+        assert!(key
+            .decrypt_with_aad(&encrypted, b"vault:1:chunk:1")
+            .is_err());
     }
 
     #[test]
