@@ -1,145 +1,114 @@
-# XRPL Vault
+# Vaulted
 
-Децентрализованное зашифрованное хранилище файлов с NFT-based access control на блокчейне XRPL.
+Vaulted is an encrypted file vault built around a first-party Vaulted seed, local XRPL wallet signing, deterministic NFT metadata, and recipient-bound `KeyEnvelope` sharing.
 
-## Архитектура
+## Current architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Desktop Client (Tauri)                    │
-│  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────────────┐ │
-│  │  Auth   │  │ Crypto  │  │  XRPL   │  │  Oracle Client  │ │
-│  │ (Xaman) │  │AES+ECIES│  │  Client │  │    (HTTP)       │ │
-│  └────┬────┘  └────┬────┘  └────┬────┘  └────────┬────────┘ │
-│       │            │            │                 │          │
-│  🔒 Приватные ключи НИКОГДА не покидают устройство!         │
-└───────┼────────────┼────────────┼─────────────────┼──────────┘
-        │            │            │                 │
-        │ QR Auth    │            │ NFT mint        │ Encrypted
-        ▼            │            ▼                 ▼ files
-┌───────────────┐    │    ┌───────────────┐  ┌─────────────────┐
-│ Xaman Wallet  │    │    │     XRPL      │  │  Oracle Server  │
-│   (Mobile)    │    │    │  (XLS-20 NFT) │  │   (PRE Proxy)   │
-└───────────────┘    │    └───────────────┘  └────────┬────────┘
-                     │                                │
-                     │                                ▼
-                     │                       ┌─────────────────┐
-                     │                       │ Storage Nodes   │
-                     │                       │  (Distributed)  │
-                     │                       └─────────────────┘
-                     │
-            Шифрование происходит ТОЛЬКО здесь
+```text
+Vaulted seed phrase
+├─ Vaulted encryption identity
+├─ Vaulted signing identity
+├─ Vaulted XRPL wallet keypair
+├─ file keys
+├─ recipient-bound KeyEnvelopes
+└─ signed manifests
 ```
 
-## Ключевые принципы безопасности
+```text
+Desktop Client (Tauri)
+├─ encrypts/decrypts files locally
+├─ derives identity and XRPL wallet locally from the Vaulted seed
+├─ signs XRPL NFT mint transactions locally
+├─ renders QR approval requests for device pairing, XRPL signing, and file grants
+└─ talks to Oracle and storage nodes over HTTP
 
-1. **Шифрование на клиенте** — AES-ключ генерируется локально, файлы шифруются до отправки
-2. **Приватные ключи не покидают устройство** — Oracle никогда не видит приватные ключи
-3. **Proxy Re-Encryption** — при передаче NFT Oracle перешифровывает, не видя содержимого
-4. **NFT = Access Control** — владение NFT = право на расшифровку файлов
+Oracle
+├─ registry / index / auth service
+├─ validates client-generated manifests and metadata
+├─ verifies XRPL ledger state before finalizing vault objects
+├─ stores grant and device state
+└─ issues signed storage access tokens
 
-## Структура проекта
-
+Storage Nodes
+└─ store encrypted fragments only
 ```
+
+Private seed material, file keys, and decrypted file content never leave the client.
+
+## Key security principles
+
+1. **Client-side encryption** — file keys are generated locally and files are encrypted before upload.
+2. **Vaulted seed identity** — identity, encryption, signing, and XRPL wallet material derive from the user-controlled Vaulted seed.
+3. **Local XRPL signing** — the client builds and signs XRPL transactions locally, then submits `tx_blob` for ledger verification.
+4. **Recipient-bound sharing** — grants use `KeyEnvelope` objects sealed to the recipient identity encryption key.
+5. **QR trust model** — device pairing, XRPL signing approval, and file grant approval use signed canonical QR payloads.
+6. **Oracle cannot decrypt files** — Oracle indexes manifests, verifies ledger state, and gates storage access, but does not receive plaintext file keys.
+
+## Project structure
+
+```text
 xrpl-vault/
 ├── crates/
-│   ├── crypto-core/       # Shared криптографические примитивы
-│   │   ├── aes.rs         # AES-256-GCM
-│   │   ├── pre.rs         # Proxy Re-Encryption
-│   │   └── hash.rs        # SHA-256, BLAKE3
-│   │
-│   ├── desktop-client/    # Tauri приложение (клиент)
-│   │   ├── src/
-│   │   │   ├── auth/      # Xaman QR авторизация
-│   │   │   ├── crypto/    # Шифрование/расшифровка файлов
-│   │   │   ├── xrpl/      # XRPL WebSocket, NFT операции
-│   │   │   ├── oracle/    # HTTP клиент к Oracle
-│   │   │   └── storage/   # Keystore (безопасное хранение ключей)
-│   │   └── ui/            # Frontend (Svelte/Vue/React)
-│   │
-│   ├── oracle/            # Сервер-оракул (Axum)
-│   │   └── src/           # PRE proxy, metadata, storage manager
-│   │
-│   └── storage-node/      # Серверы хранения
-│
-├── migrations/            # SQL схема
-├── docker-compose.yml     # PostgreSQL + Redis
-└── Makefile              # Dev commands
+│   ├── crypto-core/       # AES, identity derivation, KeyEnvelope, QR payloads, XRPL signing
+│   ├── desktop-client/    # Tauri app, local wallet/signing, file decrypt/open flows, React UI
+│   ├── oracle/            # registry, auth, manifest, QR, grants, device, and XRPL verification service
+│   └── storage-node/      # encrypted fragment storage
+├── migrations/            # PostgreSQL schema and compatibility migrations
+├── docker-compose.yml     # local PostgreSQL + Redis
+└── scripts/               # developer helpers
 ```
 
-## Быстрый старт
+Legacy PRE and external-wallet compatibility code can still exist in migrations and old transfer paths, but new sharing is based on `KeyEnvelope` grants and Vaulted identities.
+
+## Quick start
 
 ```bash
-# Клонировать репозиторий
-git clone https://github.com/your-org/xrpl-vault.git
-cd xrpl-vault
+# Start infrastructure
+make dev
 
-# Запустить dev environment
-docker-compose up -d
+# Run Oracle
+make oracle
 
-# Собрать проект
-cargo build
+# Run storage node
+make storage
 
-# Запустить тесты
-cargo test
-
-# Запустить oracle (dev mode)
-cargo run -p xrpl-vault-oracle
+# Run workspace tests
+cargo test --workspace
 ```
 
-## Пример использования крипто-модуля
+Desktop UI checks:
 
-```rust
-use xrpl_vault_crypto::{
-    aes::AesKey,
-    pre::{PreKeyPair, ProxyReEncryption},
-};
-
-fn main() {
-    let pre = ProxyReEncryption::new();
-    
-    // Генерируем ключи Alice и Bob
-    let alice = PreKeyPair::generate(&pre);
-    let bob = PreKeyPair::generate(&pre);
-    
-    // Alice шифрует файл
-    let aes_key = AesKey::generate();
-    let encrypted_file = aes_key.encrypt(b"secret document").unwrap();
-    
-    // Alice шифрует AES-ключ для себя
-    let encrypted_aes = pre.encrypt(&alice.public_key(), aes_key.as_bytes()).unwrap();
-    
-    // При передаче NFT: Alice генерирует re-encryption key
-    let re_key = pre.generate_re_key(&alice, &bob.public_key()).unwrap();
-    
-    // Oracle перешифровывает (не видя AES-ключа!)
-    let re_encrypted = pre.re_encrypt(&re_key, &encrypted_aes).unwrap();
-    
-    // Bob расшифровывает AES-ключ
-    let bob_aes_bytes = pre.decrypt_re_encrypted(&bob, &re_encrypted).unwrap();
-    let bob_aes_key = AesKey::from_bytes(&bob_aes_bytes).unwrap();
-    
-    // Bob расшифровывает файл
-    let decrypted = bob_aes_key.decrypt(&encrypted_file).unwrap();
-    assert_eq!(b"secret document".as_slice(), decrypted.as_slice());
-}
+```bash
+cd crates/desktop-client/ui
+npm ci
+npm run lint
+npx tsc --noEmit --project tsconfig.json
+npm run build
 ```
 
-## Конфигурация
+## Environment variables
 
-### Переменные окружения
-
-| Переменная | Описание | По умолчанию |
-|------------|----------|--------------|
-| `DATABASE_URL` | PostgreSQL connection string | - |
-| `REDIS_URL` | Redis connection string | - |
+| Variable | Description | Default |
+| --- | --- | --- |
+| `DATABASE_URL` | PostgreSQL connection string | required for Oracle |
+| `REDIS_URL` | Redis connection string | optional/dev dependent |
 | `XRPL_NODE_URL` | XRPL WebSocket URL | `wss://s.altnet.rippletest.net:51233` |
-| `RUST_LOG` | Уровень логирования | `info` |
+| `ORACLE_SIGNING_KEY` | Ed25519 signing key for JWT/storage tokens | generated in dev |
+| `RUST_LOG` | Rust logging level | `info` |
 
-## Лицензия
+## Validation commands
+
+```bash
+cargo check --workspace
+cargo test --workspace
+
+cd crates/desktop-client/ui
+npm ci
+npm run lint
+npx tsc --noEmit --project tsconfig.json
+npm run build
+```
+
+## License
 
 MIT
-
-## Contributing
-
-См. [CONTRIBUTING.md](CONTRIBUTING.md)

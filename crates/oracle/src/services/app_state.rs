@@ -1,12 +1,12 @@
 //! Состояние приложения Oracle
 
-use std::sync::Arc;
-use std::collections::HashMap;
-use std::time::Instant;
 use ed25519_dalek::SigningKey;
 use sqlx::PgPool;
-use uuid::Uuid;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::RwLock;
+use uuid::Uuid;
 
 use crate::config::Config;
 use crate::xrpl::{XrplConfig, XrplService};
@@ -47,7 +47,9 @@ impl AppState {
             XrplService::with_wallet(xrpl_config)
                 .expect("Failed to create XRPL service with wallet")
         } else {
-            let node_url = config.xrpl_node_url.as_deref()
+            let node_url = config
+                .xrpl_node_url
+                .as_deref()
                 .unwrap_or("https://s.altnet.rippletest.net:51234");
             XrplService::new(node_url)
         };
@@ -66,20 +68,18 @@ impl AppState {
     /// Initialize Redis connection (call after construction)
     pub async fn with_redis(mut self, redis_url: &str) -> Self {
         match redis::Client::open(redis_url) {
-            Ok(client) => {
-                match redis::aio::ConnectionManager::new(client).await {
-                    Ok(mgr) => {
-                        tracing::info!("Redis connected at {}", redis_url);
-                        self.redis = Some(mgr);
-                    }
-                    Err(e) => {
-                        tracing::warn!("Redis connection failed: {} — using in-memory fallback", e);
-                    }
-                }
-            }
+            Ok(client) => match redis::aio::ConnectionManager::new(client).await {
+                Ok(mgr) => {
+                    tracing::info!("Redis connected at {}", redis_url);
+                    self.redis = Some(mgr);
+                },
+                Err(e) => {
+                    tracing::warn!("Redis connection failed: {} — using in-memory fallback", e);
+                },
+            },
             Err(e) => {
                 tracing::warn!("Redis client error: {} — using in-memory fallback", e);
-            }
+            },
         }
         self
     }
@@ -93,13 +93,15 @@ impl AppState {
             let value = serde_json::json!({
                 "challenge": challenge,
                 "wallet": wallet
-            }).to_string();
+            })
+            .to_string();
 
             let mut conn = redis.clone();
             let result: Result<(), redis::RedisError> = redis::cmd("SET")
                 .arg(&key)
                 .arg(&value)
-                .arg("EX").arg(300) // 5 minute TTL
+                .arg("EX")
+                .arg(300) // 5 minute TTL
                 .query_async(&mut conn)
                 .await;
 
@@ -111,29 +113,49 @@ impl AppState {
 
         // In-memory fallback
         let mut store = self.challenge_store.write().await;
-        store.insert(nonce.to_string(), StoredChallenge {
-            challenge: challenge.to_string(),
-            wallet_address: wallet.to_string(),
-            created_at: Instant::now(),
-        });
+        store.insert(
+            nonce.to_string(),
+            StoredChallenge {
+                challenge: challenge.to_string(),
+                wallet_address: wallet.to_string(),
+                created_at: Instant::now(),
+            },
+        );
+    }
+
+    fn challenge_nonce(challenge: &str) -> Option<&str> {
+        let parts: Vec<&str> = challenge.split(':').collect();
+
+        // Existing wallet-bound format:
+        // xrpl-vault-auth:{wallet}:{nonce}:{timestamp}
+        if parts.len() >= 4 && parts[0] == "xrpl-vault-auth" {
+            return Some(parts[2]);
+        }
+
+        // Legacy login format where wallet was not known before wallet approval:
+        // xrpl-vault-auth-login:{nonce}:{timestamp}
+        if parts.len() >= 3 && parts[0] == "xrpl-vault-auth-login" {
+            return Some(parts[1]);
+        }
+
+        None
+    }
+
+    fn challenge_wallet_matches(stored_wallet: &str, wallet: &str) -> bool {
+        // "*" means wallet is intentionally unknown at challenge creation time.
+        stored_wallet == "*" || stored_wallet.eq_ignore_ascii_case(wallet)
     }
 
     /// Verify and consume a challenge (one-time use)
     pub async fn verify_and_consume_challenge(&self, challenge: &str, wallet: &str) -> bool {
         // Try Redis first
         if let Some(ref redis) = self.redis {
-            // Extract nonce from challenge format: "xrpl-vault-auth:{wallet}:{nonce}:{ts}"
-            let parts: Vec<&str> = challenge.split(':').collect();
-            if parts.len() >= 4 {
-                // nonce is the 3rd part (after "xrpl-vault-auth", wallet)
-                let nonce = parts[2];
+            if let Some(nonce) = Self::challenge_nonce(challenge) {
                 let key = format!("challenge:{}", nonce);
 
                 let mut conn = redis.clone();
-                let result: Result<Option<String>, redis::RedisError> = redis::cmd("GET")
-                    .arg(&key)
-                    .query_async(&mut conn)
-                    .await;
+                let result: Result<Option<String>, redis::RedisError> =
+                    redis::cmd("GET").arg(&key).query_async(&mut conn).await;
 
                 if let Ok(Some(value)) = result {
                     if let Ok(data) = serde_json::from_str::<serde_json::Value>(&value) {
@@ -141,12 +163,11 @@ impl AppState {
                         let stored_wallet = data["wallet"].as_str().unwrap_or("");
 
                         if stored_challenge == challenge
-                            && stored_wallet.eq_ignore_ascii_case(wallet) {
+                            && Self::challenge_wallet_matches(stored_wallet, wallet)
+                        {
                             // Consume: delete from Redis
-                            let _: Result<(), redis::RedisError> = redis::cmd("DEL")
-                                .arg(&key)
-                                .query_async(&mut conn)
-                                .await;
+                            let _: Result<(), redis::RedisError> =
+                                redis::cmd("DEL").arg(&key).query_async(&mut conn).await;
                             return true;
                         }
                     }
@@ -159,10 +180,11 @@ impl AppState {
         let mut store = self.challenge_store.write().await;
         let challenge_ttl = std::time::Duration::from_secs(300);
 
-        let found_key = store.iter()
+        let found_key = store
+            .iter()
             .find(|(_, v)| {
                 v.challenge == challenge
-                    && v.wallet_address.eq_ignore_ascii_case(wallet)
+                    && Self::challenge_wallet_matches(&v.wallet_address, wallet)
                     && v.created_at.elapsed() < challenge_ttl
             })
             .map(|(k, _)| k.clone());
@@ -186,7 +208,8 @@ impl AppState {
             let result: Result<(), redis::RedisError> = redis::cmd("SET")
                 .arg(&key)
                 .arg("1")
-                .arg("EX").arg(ttl)
+                .arg("EX")
+                .arg(ttl)
                 .query_async(&mut conn)
                 .await;
 
@@ -199,21 +222,24 @@ impl AppState {
         // HIGH-02: PostgreSQL fallback — survives restarts
         let pg_result = sqlx::query(
             "INSERT INTO token_blacklist (jti, expires_at) VALUES ($1, to_timestamp($2)) \
-             ON CONFLICT (jti) DO NOTHING"
+             ON CONFLICT (jti) DO NOTHING",
         )
-            .bind(jti)
-            .bind(exp as f64)
-            .execute(&self.db)
-            .await;
+        .bind(jti)
+        .bind(exp as f64)
+        .execute(&self.db)
+        .await;
 
         match pg_result {
             Ok(_) => {},
             Err(e) => {
                 // Table might not exist yet — fall back to in-memory
-                tracing::debug!("PostgreSQL blacklist insert failed (table may not exist): {}", e);
+                tracing::debug!(
+                    "PostgreSQL blacklist insert failed (table may not exist): {}",
+                    e
+                );
                 let mut blacklist = self.token_blacklist.write().await;
                 blacklist.insert(jti.to_string(), exp);
-            }
+            },
         }
     }
 
@@ -223,10 +249,8 @@ impl AppState {
         if let Some(ref redis) = self.redis {
             let key = format!("blacklist:{}", jti);
             let mut conn = redis.clone();
-            let result: Result<bool, redis::RedisError> = redis::cmd("EXISTS")
-                .arg(&key)
-                .query_async(&mut conn)
-                .await;
+            let result: Result<bool, redis::RedisError> =
+                redis::cmd("EXISTS").arg(&key).query_async(&mut conn).await;
 
             if let Ok(exists) = result {
                 return exists;
@@ -235,12 +259,11 @@ impl AppState {
         }
 
         // HIGH-02: PostgreSQL fallback
-        let pg_result: Result<Option<(i32,)>, _> = sqlx::query_as(
-            "SELECT 1 FROM token_blacklist WHERE jti = $1 AND expires_at > NOW()"
-        )
-            .bind(jti)
-            .fetch_optional(&self.db)
-            .await;
+        let pg_result: Result<Option<(i32,)>, _> =
+            sqlx::query_as("SELECT 1 FROM token_blacklist WHERE jti = $1 AND expires_at > NOW()")
+                .bind(jti)
+                .fetch_optional(&self.db)
+                .await;
 
         match pg_result {
             Ok(Some(_)) => true,
@@ -253,7 +276,7 @@ impl AppState {
                 // Table doesn't exist — check in-memory
                 let blacklist = self.token_blacklist.read().await;
                 blacklist.contains_key(jti)
-            }
+            },
         }
     }
 
@@ -310,12 +333,12 @@ impl AppState {
                 VALUES ($1, $2, $3, $4, NOW())
                 "#,
             )
-                .bind(user_id)
-                .bind(action)
-                .bind(nft_token_id)
-                .bind(&details)
-                .execute(&self.db)
-                .await
+            .bind(user_id)
+            .bind(action)
+            .bind(nft_token_id)
+            .bind(&details)
+            .execute(&self.db)
+            .await
         };
 
         if let Err(e) = result {

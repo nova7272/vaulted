@@ -32,10 +32,12 @@ pub mod sync;
 pub mod xrpl;
 pub mod xrpl_verify;
 
-pub use auth::{AuthenticatedUser, OptionalAuth, Claims, create_token, verify_token};
+pub use auth::{create_token, verify_token, AuthenticatedUser, Claims, OptionalAuth};
 pub use config::Config;
 pub use error::{ApiError, Result};
-pub use migrations::{run_migrations, run_embedded_migrations};
-pub use storage_token::{StorageToken, StorageUrlGenerator, sign_storage_token, verify_storage_token};
-pub use sync::{XrplSyncService, SyncConfig, SyncStats, SyncAction};
+pub use migrations::{run_embedded_migrations, run_migrations};
+pub use storage_token::{
+    sign_storage_token, verify_storage_token, StorageToken, StorageUrlGenerator,
+};
+pub use sync::{SyncAction, SyncConfig, SyncStats, XrplSyncService};
 pub use xrpl_verify::verify_xrpl_signature;

@@ -3,16 +3,13 @@
 //! Использует библиотеку umbral-pre (NuCypher) для реализации PRE схемы.
 //! Позволяет передавать зашифрованные данные без раскрытия ключа.
 
-use umbral_pre::{
-    SecretKey, SecretKeyFactory, PublicKey as UmbralPublicKey, Capsule,
-    encrypt, decrypt_original,
-    Signer,
-    CapsuleFrag, VerifiedKeyFrag, reencrypt, VerifiedCapsuleFrag,
-    decrypt_reencrypted,
-    DefaultSerialize, DefaultDeserialize,
-};
-use serde::{Deserialize, Serialize};
 use crate::error::{CryptoError, Result};
+use serde::{Deserialize, Serialize};
+use umbral_pre::{
+    decrypt_original, decrypt_reencrypted, encrypt, reencrypt, Capsule, CapsuleFrag,
+    DefaultDeserialize, DefaultSerialize, PublicKey as UmbralPublicKey, SecretKey,
+    SecretKeyFactory, Signer, VerifiedCapsuleFrag, VerifiedKeyFrag,
+};
 
 /// Ключевая пара PRE
 #[derive(Clone)]
@@ -119,31 +116,30 @@ impl EncryptedPreData {
     /// Сериализует в base64
     pub fn to_base64(&self) -> Result<String> {
         use base64::Engine;
-        let json = serde_json::to_string(self)
-            .map_err(|e| CryptoError::Serialization(e.to_string()))?;
+        let json =
+            serde_json::to_string(self).map_err(|e| CryptoError::Serialization(e.to_string()))?;
         Ok(base64::engine::general_purpose::STANDARD.encode(json.as_bytes()))
     }
 
     /// Десериализует из base64
     pub fn from_base64(s: &str) -> Result<Self> {
         use base64::Engine;
-        let bytes = base64::engine::general_purpose::STANDARD.decode(s)
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(s)
             .map_err(|e| CryptoError::Serialization(e.to_string()))?;
-        let json = String::from_utf8(bytes)
-            .map_err(|e| CryptoError::Serialization(e.to_string()))?;
+        let json =
+            String::from_utf8(bytes).map_err(|e| CryptoError::Serialization(e.to_string()))?;
         serde_json::from_str(&json).map_err(|e| CryptoError::Serialization(e.to_string()))
     }
 
     /// Сериализует в bytes (JSON)
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        serde_json::to_vec(self)
-            .map_err(|e| CryptoError::Serialization(e.to_string()))
+        serde_json::to_vec(self).map_err(|e| CryptoError::Serialization(e.to_string()))
     }
 
     /// Десериализует из bytes (JSON)
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        serde_json::from_slice(bytes)
-            .map_err(|e| CryptoError::Deserialization(e.to_string()))
+        serde_json::from_slice(bytes).map_err(|e| CryptoError::Deserialization(e.to_string()))
     }
 }
 
@@ -159,7 +155,9 @@ impl ReEncryptionKey {
     /// Сериализует в bytes
     pub fn to_bytes(&self) -> Vec<u8> {
         // Сериализуем каждый kfrag
-        let kfrag_bytes: Vec<Vec<u8>> = self.kfrags.iter()
+        let kfrag_bytes: Vec<Vec<u8>> = self
+            .kfrags
+            .iter()
             .map(|kf| kf.clone().to_bytes().unwrap().to_vec())
             .collect();
 
@@ -172,7 +170,7 @@ impl ReEncryptionKey {
         // VerifiedKeyFrag нельзя десериализовать напрямую без верификации
         // Для полной реализации нужно хранить KeyFrag и верифицировать при загрузке
         Err(CryptoError::Deserialization(
-            "ReEncryptionKey deserialization not yet implemented".to_string()
+            "ReEncryptionKey deserialization not yet implemented".to_string(),
         ))
     }
 
@@ -198,9 +196,15 @@ impl ReEncryptionKey {
         self.to_base64_impl(&sender_keypair.public_key(), Some(verifying_key_bytes))
     }
 
-    fn to_base64_impl(&self, sender_public_key: &PrePublicKey, sender_verifying_key: Option<Vec<u8>>) -> String {
+    fn to_base64_impl(
+        &self,
+        sender_public_key: &PrePublicKey,
+        sender_verifying_key: Option<Vec<u8>>,
+    ) -> String {
         use base64::Engine;
-        let kfrag_bytes: Vec<Vec<u8>> = self.kfrags.iter()
+        let kfrag_bytes: Vec<Vec<u8>> = self
+            .kfrags
+            .iter()
             .map(|kf| kf.clone().unverify().to_bytes().unwrap().to_vec())
             .collect();
         let mut data = serde_json::json!({
@@ -284,7 +288,8 @@ impl ProxyReEncryption {
             shares,
             true,
             true,
-        ).to_vec()
+        )
+        .to_vec()
     }
 
     /// Перешифровывает capsule (выполняется proxy)
@@ -311,7 +316,8 @@ impl ProxyReEncryption {
             capsule,
             cfrags,
             ciphertext,
-        ).map_err(|e| CryptoError::PreDecryption(format!("Re-decryption failed: {:?}", e)))?;
+        )
+        .map_err(|e| CryptoError::PreDecryption(format!("Re-decryption failed: {:?}", e)))?;
 
         Ok(plaintext.to_vec())
     }
@@ -348,7 +354,9 @@ mod tests {
 
         let aes_key = AesKey::generate();
 
-        let encrypted = pre.encrypt(&keypair.public_key(), aes_key.as_bytes()).unwrap();
+        let encrypted = pre
+            .encrypt(&keypair.public_key(), aes_key.as_bytes())
+            .unwrap();
         let decrypted = pre.decrypt(&keypair, &encrypted).unwrap();
 
         assert_eq!(aes_key.as_bytes(), decrypted.as_slice());
@@ -401,7 +409,9 @@ mod tests {
 
             let aes_key = AesKey::generate();
 
-            let encrypted = pre.encrypt(&alice.public_key(), aes_key.as_bytes()).unwrap();
+            let encrypted = pre
+                .encrypt(&alice.public_key(), aes_key.as_bytes())
+                .unwrap();
             let decrypted = pre.decrypt(&alice, &encrypted).unwrap();
 
             assert_eq!(aes_key.as_bytes(), decrypted.as_slice());
@@ -422,13 +432,15 @@ mod tests {
         let capsule = encrypted.get_capsule().unwrap();
         let cfrag = pre.reencrypt_capsule(&capsule, kfrags.into_iter().next().unwrap());
 
-        let decrypted = pre.decrypt_reencrypted(
-            &bob,
-            &alice.public_key(),
-            &capsule,
-            vec![cfrag],
-            &encrypted.ciphertext,
-        ).unwrap();
+        let decrypted = pre
+            .decrypt_reencrypted(
+                &bob,
+                &alice.public_key(),
+                &capsule,
+                vec![cfrag],
+                &encrypted.ciphertext,
+            )
+            .unwrap();
 
         assert_eq!(plaintext.as_slice(), decrypted.as_slice());
     }
@@ -455,22 +467,22 @@ impl ReEncryptedData {
     /// Сериализует в base64
     pub fn to_base64(&self) -> Result<String> {
         use base64::Engine;
-        let json = serde_json::to_string(self)
-            .map_err(|e| CryptoError::Serialization(e.to_string()))?;
+        let json =
+            serde_json::to_string(self).map_err(|e| CryptoError::Serialization(e.to_string()))?;
         Ok(base64::engine::general_purpose::STANDARD.encode(json.as_bytes()))
     }
 
     /// Десериализует из base64
     pub fn from_base64(s: &str) -> Result<Self> {
         use base64::Engine;
-        let bytes = base64::engine::general_purpose::STANDARD.decode(s)
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(s)
             .map_err(|e| CryptoError::Serialization(e.to_string()))?;
-        let json = String::from_utf8(bytes)
-            .map_err(|e| CryptoError::Serialization(e.to_string()))?;
+        let json =
+            String::from_utf8(bytes).map_err(|e| CryptoError::Serialization(e.to_string()))?;
         serde_json::from_str(&json).map_err(|e| CryptoError::Deserialization(e.to_string()))
     }
 }
-
 
 impl ProxyReEncryption {
     /// Выполняет re-encryption capsule с использованием kfrag
@@ -482,7 +494,10 @@ impl ProxyReEncryption {
         sender_public_key: &PrePublicKey,
     ) -> Result<ReEncryptedData> {
         self.perform_reencryption_with_kfrag_verified(
-            encrypted_data, kfrag, sender_public_key, None,
+            encrypted_data,
+            kfrag,
+            sender_public_key,
+            None,
         )
     }
 
@@ -525,20 +540,30 @@ impl ProxyReEncryption {
             let verifying_pk = UmbralPublicKey::try_from_compressed_bytes(vk_bytes)
                 .map_err(|e| CryptoError::InvalidKey(format!("Invalid verifying key: {}", e)))?;
 
-            let delegating_pk = UmbralPublicKey::try_from_compressed_bytes(&re_encrypted.sender_public_key)
-                .map_err(|e| CryptoError::InvalidKey(format!("Invalid delegating key: {}", e)))?;
+            let delegating_pk =
+                UmbralPublicKey::try_from_compressed_bytes(&re_encrypted.sender_public_key)
+                    .map_err(|e| {
+                        CryptoError::InvalidKey(format!("Invalid delegating key: {}", e))
+                    })?;
 
             let receiving_pk = recipient_keypair.public_key();
-            let receiving_umbral = UmbralPublicKey::try_from_compressed_bytes(&receiving_pk.to_bytes())
-                .map_err(|e| CryptoError::InvalidKey(format!("Invalid receiving key: {}", e)))?;
+            let receiving_umbral = UmbralPublicKey::try_from_compressed_bytes(
+                &receiving_pk.to_bytes(),
+            )
+            .map_err(|e| CryptoError::InvalidKey(format!("Invalid receiving key: {}", e)))?;
 
-            match cfrag_unverified.verify(&capsule, &verifying_pk, &delegating_pk, &receiving_umbral) {
+            match cfrag_unverified.verify(
+                &capsule,
+                &verifying_pk,
+                &delegating_pk,
+                &receiving_umbral,
+            ) {
                 Ok(verified) => verified,
                 Err((_, err)) => {
                     return Err(CryptoError::PreDecryption(
                         format!("Capsule fragment verification failed: {:?}. Data may have been tampered with.", err)
                     ));
-                }
+                },
             }
         } else {
             // Backward compatibility: legacy data without verifying key.

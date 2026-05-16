@@ -13,10 +13,10 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    storage_token::{StorageToken, sign_storage_token},
     auth::AuthenticatedUser,
     error::{ApiError, Result},
     services::{AppState, ReplicationService},
+    storage_token::{sign_storage_token, StorageToken},
 };
 
 // ==================== Types ====================
@@ -60,7 +60,8 @@ pub async fn upload_file(
 
     tracing::info!(
         "Uploading file for NFT {}: {} bytes",
-        params.nft_token_id, file_size
+        params.nft_token_id,
+        file_size
     );
 
     // Verify NFT exists and user is owner
@@ -70,11 +71,11 @@ pub async fn upload_file(
         FROM nft_metadata nm
         JOIN users u ON nm.owner_id = u.id
         WHERE nm.nft_token_id = $1
-        "#
+        "#,
     )
-        .bind(&params.nft_token_id)
-        .fetch_optional(&state.db)
-        .await?;
+    .bind(&params.nft_token_id)
+    .fetch_optional(&state.db)
+    .await?;
 
     match nft_owner {
         None => {
@@ -82,19 +83,21 @@ pub async fn upload_file(
                 "NFT not found: {}",
                 params.nft_token_id
             )));
-        }
+        },
         Some((_, owner_wallet)) => {
             if !auth.wallet_address.eq_ignore_ascii_case(&owner_wallet) {
                 return Err(ApiError::Forbidden(
-                    "Only the NFT owner can upload files".into()
+                    "Only the NFT owner can upload files".into(),
                 ));
             }
-        }
+        },
     }
 
     // Get replication settings and select nodes
     let replication_service = ReplicationService::new(state.db.clone());
-    let settings = replication_service.get_settings().await
+    let settings = replication_service
+        .get_settings()
+        .await
         .map_err(|e| ApiError::Storage(e.to_string()))?;
 
     let nodes = replication_service
@@ -103,7 +106,9 @@ pub async fn upload_file(
         .map_err(|e| ApiError::Storage(e.to_string()))?;
 
     if nodes.is_empty() {
-        return Err(ApiError::Storage("No active storage nodes available".to_string()));
+        return Err(ApiError::Storage(
+            "No active storage nodes available".to_string(),
+        ));
     }
 
     tracing::info!(
@@ -129,16 +134,15 @@ pub async fn upload_file(
         let upload_url = {
             let token = StorageToken::new_write(&params.nft_token_id, &node_storage_key, 10);
             let signed = sign_storage_token(&token, &state.signing_key);
-            format!("{}/fragments/{}?token={}", node.endpoint_url, node_storage_key, signed)
+            format!(
+                "{}/fragments/{}?token={}",
+                node.endpoint_url, node_storage_key, signed
+            )
         };
 
         tracing::debug!("Uploading to node {}: {}", node.id, upload_url);
 
-        let upload_result = client
-            .put(&upload_url)
-            .body(body.clone())
-            .send()
-            .await;
+        let upload_result = client.put(&upload_url).body(body.clone()).send().await;
 
         let status = match upload_result {
             Ok(resp) if resp.status().is_success() => {
@@ -184,18 +188,15 @@ pub async fn upload_file(
                     .ok();
 
                 "active".to_string()
-            }
+            },
             Ok(resp) => {
-                tracing::warn!(
-                    "Upload to {} failed: HTTP {}",
-                    node.id, resp.status()
-                );
+                tracing::warn!("Upload to {} failed: HTTP {}", node.id, resp.status());
                 "failed".to_string()
-            }
+            },
             Err(e) => {
                 tracing::warn!("Upload to {} failed: {}", node.id, e);
                 "failed".to_string()
-            }
+            },
         };
 
         replicas.push(ReplicaInfo {
@@ -207,7 +208,9 @@ pub async fn upload_file(
 
     // Need at least one successful upload
     if successful_uploads == 0 {
-        return Err(ApiError::Storage("Failed to upload to any storage node".to_string()));
+        return Err(ApiError::Storage(
+            "Failed to upload to any storage node".to_string(),
+        ));
     }
 
     // Update NFT metadata with file info and actual storage locations
@@ -226,17 +229,19 @@ pub async fn upload_file(
         ),
         updated_at = NOW()
         WHERE nft_token_id = $2
-        "#
+        "#,
     )
-        .bind(file_size)
-        .bind(&params.nft_token_id)
-        .bind(&fragments_json)
-        .execute(&state.db)
-        .await?;
+    .bind(file_size)
+    .bind(&params.nft_token_id)
+    .bind(&fragments_json)
+    .execute(&state.db)
+    .await?;
 
     tracing::info!(
         "File uploaded for NFT {}: {}/{} replicas successful",
-        params.nft_token_id, successful_uploads, replicas.len()
+        params.nft_token_id,
+        successful_uploads,
+        replicas.len()
     );
 
     Ok(Json(UploadFileResponse {
@@ -265,47 +270,54 @@ pub async fn download_file(
         FROM nft_metadata nm
         JOIN users u ON nm.owner_id = u.id
         WHERE nm.nft_token_id = $1
-        "#
+        "#,
     )
-        .bind(&nft_token_id)
-        .fetch_optional(&state.db)
-        .await?;
+    .bind(&nft_token_id)
+    .fetch_optional(&state.db)
+    .await?;
 
     match nft_owner_wallet {
         Some(ref wallet) if !auth.wallet_address.eq_ignore_ascii_case(wallet) => {
             return Err(ApiError::Forbidden(
-                "Only the NFT owner can download this file".into()
+                "Only the NFT owner can download this file".into(),
             ));
-        }
+        },
         None => {
             return Err(ApiError::NotFound(format!(
-                "NFT not found: {}", nft_token_id
+                "NFT not found: {}",
+                nft_token_id
             )));
-        }
-        _ => {}
+        },
+        _ => {},
     }
 
     // MED-06: Additional on-chain verification for critical download operation
-    match state.xrpl.verify_nft_owner(&nft_token_id, &auth.wallet_address).await {
+    match state
+        .xrpl
+        .verify_nft_owner(&nft_token_id, &auth.wallet_address)
+        .await
+    {
         Ok(true) => {
             tracing::debug!("On-chain NFT ownership verified for {}", nft_token_id);
-        }
+        },
         Ok(false) => {
             tracing::warn!(
                 "On-chain ownership mismatch for NFT {} — DB says {} but XRPL disagrees",
-                nft_token_id, auth.wallet_address
+                nft_token_id,
+                auth.wallet_address
             );
             return Err(ApiError::Forbidden(
-                "NFT ownership could not be verified on XRPL ledger".into()
+                "NFT ownership could not be verified on XRPL ledger".into(),
             ));
-        }
+        },
         Err(e) => {
             // Log warning but allow access based on DB (XRPL node might be down)
             tracing::warn!(
                 "On-chain verification failed for NFT {}: {} — falling back to DB check",
-                nft_token_id, e
+                nft_token_id,
+                e
             );
-        }
+        },
     }
 
     // Get active replicas for this file
@@ -318,11 +330,11 @@ pub async fn download_file(
           AND fr.status = 'active'
           AND sn.status = 'active'
         ORDER BY sn.health_check_failures ASC, sn.used_space_bytes ASC
-        "#
+        "#,
     )
-        .bind(&nft_token_id)
-        .fetch_all(&state.db)
-        .await?;
+    .bind(&nft_token_id)
+    .fetch_all(&state.db)
+    .await?;
 
     // Fallback: if file_replicas is empty, try reading fragment info from nft_metadata.manifest
     if replicas.is_empty() {
@@ -332,18 +344,19 @@ pub async fn download_file(
         );
 
         let manifest_opt: Option<serde_json::Value> = sqlx::query_scalar(
-            "SELECT COALESCE(manifest, '{}'::jsonb) FROM nft_metadata WHERE nft_token_id = $1"
+            "SELECT COALESCE(manifest, '{}'::jsonb) FROM nft_metadata WHERE nft_token_id = $1",
         )
-            .bind(&nft_token_id)
-            .fetch_optional(&state.db)
-            .await?;
+        .bind(&nft_token_id)
+        .fetch_optional(&state.db)
+        .await?;
 
         if let Some(manifest) = manifest_opt {
             if let Some(fragments) = manifest.get("fragments").and_then(|f| f.as_array()) {
                 // PERF FIX: Preload all node endpoints in one query
-                let node_endpoints: std::collections::HashMap<String, String> = sqlx::query_as::<_, (String, String)>(
-                    "SELECT id, endpoint_url FROM storage_nodes"
-                )
+                let node_endpoints: std::collections::HashMap<String, String> =
+                    sqlx::query_as::<_, (String, String)>(
+                        "SELECT id, endpoint_url FROM storage_nodes",
+                    )
                     .fetch_all(&state.db)
                     .await?
                     .into_iter()
@@ -351,14 +364,16 @@ pub async fn download_file(
 
                 for frag in fragments {
                     let storage_key = frag["storage_key"].as_str().unwrap_or("").to_string();
-                    let storage_node_id = frag["storage_node_id"].as_str().unwrap_or("").to_string();
+                    let storage_node_id =
+                        frag["storage_node_id"].as_str().unwrap_or("").to_string();
                     if storage_key.is_empty() {
                         continue;
                     }
                     let endpoint = if storage_node_id.is_empty() {
                         "http://localhost:9001".to_string()
                     } else {
-                        node_endpoints.get(&storage_node_id)
+                        node_endpoints
+                            .get(&storage_node_id)
                             .cloned()
                             .unwrap_or_else(|| "http://localhost:9001".to_string())
                     };
@@ -370,7 +385,8 @@ pub async fn download_file(
 
     if replicas.is_empty() {
         return Err(ApiError::NotFound(format!(
-            "No file found for NFT: {}", nft_token_id
+            "No file found for NFT: {}",
+            nft_token_id
         )));
     }
 
@@ -384,7 +400,10 @@ pub async fn download_file(
         let url = {
             let token = StorageToken::new_read(&nft_token_id, storage_key, 10);
             let signed = sign_storage_token(&token, &state.signing_key);
-            format!("{}/fragments/{}?token={}", endpoint_url, storage_key, signed)
+            format!(
+                "{}/fragments/{}?token={}",
+                endpoint_url, storage_key, signed
+            )
         };
         tracing::debug!("Trying node {}: {}", node_id, url);
 
@@ -397,15 +416,18 @@ pub async fn download_file(
 
                 tracing::info!(
                     "Downloaded file for NFT {} from node {}: {} bytes",
-                    nft_token_id, node_id, bytes.len()
+                    nft_token_id,
+                    node_id,
+                    bytes.len()
                 );
 
                 return Ok((
                     StatusCode::OK,
                     [(header::CONTENT_TYPE, "application/octet-stream")],
                     bytes,
-                ).into_response());
-            }
+                )
+                    .into_response());
+            },
             Ok(resp) => {
                 let status = resp.status();
                 tracing::warn!("Node {} returned: {}", node_id, status);
@@ -413,7 +435,8 @@ pub async fn download_file(
                 if status == StatusCode::NOT_FOUND {
                     tracing::warn!(
                         "Fragment {} missing from node {}, marking replica as stale",
-                        storage_key, node_id
+                        storage_key,
+                        node_id
                     );
                     sqlx::query(
                         "UPDATE file_replicas SET status = 'missing' WHERE nft_token_id = $1 AND storage_node_id = $2"
@@ -424,10 +447,10 @@ pub async fn download_file(
                         .await
                         .ok();
                 }
-            }
+            },
             Err(e) => {
                 tracing::warn!("Failed to fetch from {}: {}", node_id, e);
-            }
+            },
         }
     }
 
@@ -456,23 +479,23 @@ pub async fn delete_file_storage(
         FROM nft_metadata nm
         JOIN users u ON nm.owner_id = u.id
         WHERE nm.nft_token_id = $1
-        "#
+        "#,
     )
-        .bind(&nft_token_id)
-        .fetch_optional(&state.db)
-        .await?;
+    .bind(&nft_token_id)
+    .fetch_optional(&state.db)
+    .await?;
 
     match owner_wallet {
         Some(wallet) if !auth.wallet_address.eq_ignore_ascii_case(&wallet) => {
             return Err(ApiError::Forbidden(
-                "Only the NFT owner can delete files".into()
+                "Only the NFT owner can delete files".into(),
             ));
-        }
+        },
         None => {
             // NFT not found in DB, but we should still allow deletion of orphaned files
             tracing::warn!("NFT {} not found in DB, allowing deletion", nft_token_id);
-        }
-        _ => {}
+        },
+        _ => {},
     }
 
     // Get all replicas
@@ -482,11 +505,11 @@ pub async fn delete_file_storage(
         FROM file_replicas fr
         JOIN storage_nodes sn ON sn.id = fr.storage_node_id
         WHERE fr.nft_token_id = $1
-        "#
+        "#,
     )
-        .bind(&nft_token_id)
-        .fetch_all(&state.db)
-        .await?;
+    .bind(&nft_token_id)
+    .fetch_all(&state.db)
+    .await?;
 
     if replicas.is_empty() {
         return Ok(Json(DeleteFileResponse {
@@ -507,20 +530,23 @@ pub async fn delete_file_storage(
         let url = {
             let token = StorageToken::new_delete(&nft_token_id, storage_key, 10);
             let signed = sign_storage_token(&token, &state.signing_key);
-            format!("{}/fragments/{}?token={}", endpoint_url, storage_key, signed)
+            format!(
+                "{}/fragments/{}?token={}",
+                endpoint_url, storage_key, signed
+            )
         };
 
         match client.delete(&url).send().await {
             Ok(resp) if resp.status().is_success() || resp.status() == StatusCode::NOT_FOUND => {
                 deleted_count += 1;
                 tracing::debug!("Deleted from node {}: {}", node_id, storage_key);
-            }
+            },
             Ok(resp) => {
                 tracing::warn!("Delete from {} returned: {}", node_id, resp.status());
-            }
+            },
             Err(e) => {
                 tracing::warn!("Failed to delete from {}: {}", node_id, e);
-            }
+            },
         }
     }
 
@@ -532,7 +558,8 @@ pub async fn delete_file_storage(
 
     tracing::info!(
         "Deleted {} replicas for NFT {}",
-        deleted_count, nft_token_id
+        deleted_count,
+        nft_token_id
     );
 
     Ok(Json(DeleteFileResponse {
@@ -564,14 +591,16 @@ pub async fn get_file_status(
         FROM file_replicas fr
         JOIN storage_nodes sn ON sn.id = fr.storage_node_id
         WHERE fr.nft_token_id = $1
-        "#
+        "#,
     )
-        .bind(&nft_token_id)
-        .fetch_all(&state.db)
-        .await?;
+    .bind(&nft_token_id)
+    .fetch_all(&state.db)
+    .await?;
 
     let replication_service = ReplicationService::new(state.db.clone());
-    let settings = replication_service.get_settings().await
+    let settings = replication_service
+        .get_settings()
+        .await
         .map_err(|e| ApiError::Storage(e.to_string()))?;
 
     let active_count = replicas.iter().filter(|(_, _, _, s)| s == "active").count();
@@ -580,9 +609,14 @@ pub async fn get_file_status(
     Ok(Json(FileStatusResponse {
         nft_token_id,
         size_bytes: total_size,
-        replicas: replicas.into_iter().map(|(node_id, region, _, status)| {
-            ReplicaInfo { node_id, region, status }
-        }).collect(),
+        replicas: replicas
+            .into_iter()
+            .map(|(node_id, region, _, status)| ReplicaInfo {
+                node_id,
+                region,
+                status,
+            })
+            .collect(),
         active_replicas: active_count,
         target_replicas: settings.replication_factor as usize,
         healthy: active_count >= settings.min_active_replicas as usize,

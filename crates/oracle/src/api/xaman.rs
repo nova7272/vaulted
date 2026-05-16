@@ -56,6 +56,16 @@ pub async fn create_payload(
     let json: Value = serde_json::from_str(&text)
         .map_err(|e| ApiError::Internal(format!("Invalid Xaman JSON response: {}", e)))?;
 
+    // Xaman may not return custom_meta.blob in payload status for SignIn payloads.
+    // Keep a server-side binding so /auth/token-xaman-payload can verify that the
+    // signed payload corresponds to the exact Oracle challenge we issued.
+    if let Some(payload_uuid) = json.get("uuid").and_then(|v| v.as_str()) {
+        if let Some(blob) = request.pointer("/custom_meta/blob").cloned() {
+            state.store_xaman_payload_binding(payload_uuid, blob).await;
+            tracing::debug!("Stored Xaman payload binding for {}", payload_uuid);
+        }
+    }
+
     Ok(Json(json))
 }
 

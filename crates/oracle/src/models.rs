@@ -2,11 +2,11 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
+use sqlx::Row;
 use uuid::Uuid;
 
 /// Пользователь (кошелёк XRPL)
-#[derive(Debug, Clone, FromRow, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct User {
     pub id: Uuid,
     pub wallet_address: String,
@@ -17,7 +17,7 @@ pub struct User {
 }
 
 /// Метаданные NFT
-#[derive(Debug, Clone, FromRow, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct NftMetadata {
     pub id: Uuid,
     pub nft_token_id: String,
@@ -31,7 +31,7 @@ pub struct NftMetadata {
 }
 
 /// Манифест файла
-#[derive(Debug, Clone, FromRow, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct FileManifestRow {
     pub id: Uuid,
     pub nft_metadata_id: Uuid,
@@ -44,7 +44,7 @@ pub struct FileManifestRow {
 }
 
 /// Фрагмент файла
-#[derive(Debug, Clone, FromRow, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct FileFragment {
     pub id: Uuid,
     pub manifest_id: Uuid,
@@ -58,7 +58,7 @@ pub struct FileFragment {
 }
 
 /// Storage node
-#[derive(Debug, Clone, FromRow, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct StorageNode {
     pub id: String,
     pub endpoint_url: String,
@@ -73,7 +73,7 @@ pub struct StorageNode {
 }
 
 /// Запрос на передачу NFT
-#[derive(Debug, Clone, FromRow, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TransferRequest {
     pub id: Uuid,
     pub nft_metadata_id: Uuid,
@@ -323,3 +323,241 @@ pub struct HealthResponse {
     pub version: String,
     pub database: String,
 }
+/// Seed-based Vaulted identity public record.
+#[derive(Debug, Clone, Serialize)]
+pub struct VaultedIdentity {
+    pub id: String,
+    pub signing_public_key: String,
+    pub encryption_public_key: String,
+    pub protocol_version: String,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Registered device for a Vaulted identity.
+#[derive(Debug, Clone, Serialize)]
+pub struct IdentityDevice {
+    pub id: Uuid,
+    pub identity_id: String,
+    pub device_public_key: String,
+    pub device_name: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+/// External wallet linked to a Vaulted identity.
+#[derive(Debug, Clone, Serialize)]
+pub struct LinkedWallet {
+    pub id: Uuid,
+    pub identity_id: String,
+    pub chain: String,
+    pub address: String,
+    pub proof_signature: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+/// Signed manifest pointer indexed by Oracle.
+#[derive(Debug, Clone, Serialize)]
+pub struct VaultObject {
+    pub id: String,
+    pub owner_identity_id: String,
+    pub manifest_uri: String,
+    pub manifest_hash: String,
+    pub nft_chain: Option<String>,
+    pub nft_token_id: Option<String>,
+    pub manifest_version: i64,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Signed access grant indexed by Oracle.
+#[derive(Debug, Clone, Serialize)]
+pub struct Grant {
+    pub id: Uuid,
+    pub vault_object_id: String,
+    pub recipient_identity_id: String,
+    pub key_envelope: serde_json::Value,
+    /// Deprecated compatibility mirror of key_envelope.encrypted_file_key.
+    pub encrypted_file_key: String,
+    pub permissions: serde_json::Value,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub owner_signature: String,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+}
+
+// BEGIN GENERATED MANUAL SQLX FROMROW IMPLS
+
+impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for User {
+    fn from_row(row: &'r sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            wallet_address: row.try_get("wallet_address")?,
+            pre_public_key: row.try_get("pre_public_key")?,
+            created_at: row.try_get("created_at")?,
+            updated_at: row.try_get("updated_at")?,
+            last_seen_at: row.try_get("last_seen_at")?,
+        })
+    }
+}
+
+impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for NftMetadata {
+    fn from_row(row: &'r sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            nft_token_id: row.try_get("nft_token_id")?,
+            owner_id: row.try_get("owner_id")?,
+            encrypted_aes_key: row.try_get("encrypted_aes_key")?,
+            metadata_hash: row.try_get("metadata_hash")?,
+            crypto_version: row.try_get("crypto_version")?,
+            status: row.try_get("status")?,
+            created_at: row.try_get("created_at")?,
+            updated_at: row.try_get("updated_at")?,
+        })
+    }
+}
+
+impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for FileManifestRow {
+    fn from_row(row: &'r sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            nft_metadata_id: row.try_get("nft_metadata_id")?,
+            encrypted_filename: row.try_get("encrypted_filename")?,
+            original_size: row.try_get("original_size")?,
+            mime_type: row.try_get("mime_type")?,
+            original_hash: row.try_get("original_hash")?,
+            fragment_count: row.try_get("fragment_count")?,
+            created_at: row.try_get("created_at")?,
+        })
+    }
+}
+
+impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for FileFragment {
+    fn from_row(row: &'r sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            manifest_id: row.try_get("manifest_id")?,
+            fragment_index: row.try_get("fragment_index")?,
+            fragment_size: row.try_get("fragment_size")?,
+            encrypted_hash: row.try_get("encrypted_hash")?,
+            storage_node_id: row.try_get("storage_node_id")?,
+            storage_key: row.try_get("storage_key")?,
+            replication_count: row.try_get("replication_count")?,
+            created_at: row.try_get("created_at")?,
+        })
+    }
+}
+
+impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for StorageNode {
+    fn from_row(row: &'r sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            endpoint_url: row.try_get("endpoint_url")?,
+            region: row.try_get("region")?,
+            status: row.try_get("status")?,
+            total_space_bytes: row.try_get("total_space_bytes")?,
+            used_space_bytes: row.try_get("used_space_bytes")?,
+            last_health_check: row.try_get("last_health_check")?,
+            health_check_failures: row.try_get("health_check_failures")?,
+            created_at: row.try_get("created_at")?,
+            updated_at: row.try_get("updated_at")?,
+        })
+    }
+}
+
+impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for TransferRequest {
+    fn from_row(row: &'r sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            nft_metadata_id: row.try_get("nft_metadata_id")?,
+            from_user_id: row.try_get("from_user_id")?,
+            to_user_id: row.try_get("to_user_id")?,
+            status: row.try_get("status")?,
+            re_encrypted_aes_key: row.try_get("re_encrypted_aes_key")?,
+            error_message: row.try_get("error_message")?,
+            xrpl_tx_hash: row.try_get("xrpl_tx_hash")?,
+            created_at: row.try_get("created_at")?,
+            processed_at: row.try_get("processed_at")?,
+            completed_at: row.try_get("completed_at")?,
+        })
+    }
+}
+
+impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for VaultedIdentity {
+    fn from_row(row: &'r sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            signing_public_key: row.try_get("signing_public_key")?,
+            encryption_public_key: row.try_get("encryption_public_key")?,
+            protocol_version: row.try_get("protocol_version")?,
+            status: row.try_get("status")?,
+            created_at: row.try_get("created_at")?,
+            updated_at: row.try_get("updated_at")?,
+        })
+    }
+}
+
+impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for IdentityDevice {
+    fn from_row(row: &'r sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            identity_id: row.try_get("identity_id")?,
+            device_public_key: row.try_get("device_public_key")?,
+            device_name: row.try_get("device_name")?,
+            created_at: row.try_get("created_at")?,
+            revoked_at: row.try_get("revoked_at")?,
+        })
+    }
+}
+
+impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for LinkedWallet {
+    fn from_row(row: &'r sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            identity_id: row.try_get("identity_id")?,
+            chain: row.try_get("chain")?,
+            address: row.try_get("address")?,
+            proof_signature: row.try_get("proof_signature")?,
+            created_at: row.try_get("created_at")?,
+            revoked_at: row.try_get("revoked_at")?,
+        })
+    }
+}
+
+impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for VaultObject {
+    fn from_row(row: &'r sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            owner_identity_id: row.try_get("owner_identity_id")?,
+            manifest_uri: row.try_get("manifest_uri")?,
+            manifest_hash: row.try_get("manifest_hash")?,
+            nft_chain: row.try_get("nft_chain")?,
+            nft_token_id: row.try_get("nft_token_id")?,
+            manifest_version: row.try_get("manifest_version")?,
+            status: row.try_get("status")?,
+            created_at: row.try_get("created_at")?,
+            updated_at: row.try_get("updated_at")?,
+        })
+    }
+}
+
+impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for Grant {
+    fn from_row(row: &'r sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            vault_object_id: row.try_get("vault_object_id")?,
+            recipient_identity_id: row.try_get("recipient_identity_id")?,
+            key_envelope: row.try_get("key_envelope")?,
+            encrypted_file_key: row.try_get("encrypted_file_key")?,
+            permissions: row.try_get("permissions")?,
+            expires_at: row.try_get("expires_at")?,
+            owner_signature: row.try_get("owner_signature")?,
+            status: row.try_get("status")?,
+            created_at: row.try_get("created_at")?,
+        })
+    }
+}
+// END GENERATED MANUAL SQLX FROMROW IMPLS

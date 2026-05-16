@@ -4,7 +4,7 @@ import { open } from '@tauri-apps/plugin-dialog'
 import { stat } from '@tauri-apps/plugin-fs'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
-import { getNftColors, getNftImageUrl } from '../utils/nft_image'
+import { getNftColors } from '../utils/nft_image'
 
 interface FileEntry { path: string; name: string; size: number; oversized: boolean }
 
@@ -12,8 +12,20 @@ const MAX_FILE_SIZE = 100 * 1024 * 1024 // 100MB — matches backend AppConfig
 
 interface UploadResult {
   vault_id: string; nft_token_id: string; offer_index: string
-  xaman_link: string | null; nft_uri: string; filename: string
+  signing_request_uri: string | null; nft_uri: string; manifest_hash: string; filename: string
   file_size: number; fragments_count: number
+}
+interface VaultedSubmitResponse {
+  engineResult: string; engineResultMessage: string; txHash: string
+  accepted: boolean; nftTokenId: string | null
+}
+interface VaultedSignedMintResponse {
+  signed: { txBlob: string | null; txHash: string | null }
+  submitted: VaultedSubmitResponse | null
+}
+interface VaultedNftMetadataPreview {
+  visualSeed: string; svg: string; imageDataUri: string; metadataJson: string
+  metadataHash: string; metadataUri: string
 }
 interface ClaimPayload {
   uuid: string; qrPng: string; qrUri: string
@@ -45,7 +57,7 @@ const STAGES: Record<string,{label:string;sub:string;order:number}> = {
   complete:    { label: 'Complete',                 sub: 'File secured',             order: 4 },
 }
 
-type ClaimState = 'loading' | 'waiting' | 'claimed' | 'expired' | 'cancelled' | 'error'
+type ClaimState = 'loading' | 'waiting' | 'registered' | 'minting' | 'claimed' | 'expired' | 'cancelled' | 'error'
 
 export default function UploadScreen({ onNavigate }: { oracleConnected?: boolean; onNavigate?: (s: string) => void }) {
   const [files, setFiles] = useState<string[]>([])
@@ -58,6 +70,8 @@ export default function UploadScreen({ onNavigate }: { oracleConnected?: boolean
   const [claimState, setClaimState] = useState<ClaimState>('loading')
   const [timeLeft, setTimeLeft] = useState(CLAIM_TIMEOUT_SEC)
   const [cancelling, setCancelling] = useState(false)
+  const [mintResult, setMintResult] = useState<VaultedSubmitResponse | null>(null)
+  const [nftPreview, setNftPreview] = useState<VaultedNftMetadataPreview | null>(null)
   const [error, setError] = useState<string|null>(null)
   const [dragOver, setDragOver] = useState(false)
   const [progress, setProgress] = useState<ProgressEvent|null>(null)
@@ -99,82 +113,6 @@ export default function UploadScreen({ onNavigate }: { oracleConnected?: boolean
     } catch (e) { console.error('Failed to cancel/burn on oracle:', e) }
   }, [])
 
-  // --- Auto-claim when result arrives ---
-  useEffect(() => {
-    if (!result?.offer_index) return
-    abortedRef.current = false
-    setClaimState('loading')
-    setTimeLeft(CLAIM_TIMEOUT_SEC)
-
-    let mounted = true
-    ;(async () => {
-      try {
-        const payload = await invoke<ClaimPayload>('claim_nft', { offerIndex: result.offer_index })
-        if (!mounted || abortedRef.current) return
-        setClaimPayload(payload)
-        setClaimState('waiting')
-
-        // Start countdown
-        const start = Date.now()
-        timerRef.current = setInterval(() => {
-          const elapsed = Math.floor((Date.now() - start) / 1000)
-          const left = CLAIM_TIMEOUT_SEC - elapsed
-          if (left <= 0) {
-            clearTimer()
-            if (!abortedRef.current) {
-              setClaimState('expired')
-              cancelAndBurn(result)
-            }
-          } else {
-            setTimeLeft(left)
-          }
-        }, 1000)
-
-        // Wait for user to sign in Xaman
-        try {
-          await invoke('wait_for_claim', {
-            payloadUuid: payload.uuid,
-            websocketUrl: payload.websocketUrl,
-            offerIndex: result.offer_index,
-          })
-          if (!mounted || abortedRef.current) return
-          clearTimer()
-          setClaimState('claimed')
-        } catch (err) {
-          // Only handle if component is still mounted and not manually cancelled
-          if (!mounted || abortedRef.current) return
-          if (claimState !== 'expired' && claimState !== 'cancelled') {
-            clearTimer()
-            const errMsg = String(err).toLowerCase()
-            const isTimeout = errMsg.includes('timeout') || errMsg.includes('expired') || errMsg.includes('timed out')
-            const isRejected = errMsg.includes('rejected') || errMsg.includes('declined') || errMsg.includes('cancelled')
-
-            if (isTimeout) {
-              // Genuine timeout — safe to burn
-              setClaimState('expired')
-              cancelAndBurn(result)
-            } else if (isRejected) {
-              // User declined in Xaman — safe to burn
-              setClaimState('cancelled')
-              cancelAndBurn(result)
-            } else {
-              // Network error, processing error, etc. — NFT might be claimed on XRPL already, DO NOT burn
-              setClaimState('error')
-              setError('Claim may have succeeded but verification failed: ' + String(err) + '. Check your wallet before retrying.')
-            }
-          }
-        }
-      } catch (e) {
-        if (!mounted || abortedRef.current) return
-        setClaimState('error')
-        setError('Failed to create claim: ' + e)
-      }
-    })()
-
-    return () => { mounted = false; clearTimer() }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [result])
-
   // --- File progress listener ---
   useEffect(() => {
     const unlisten = listen<ProgressEvent>('file-progress', (e) => setProgress(e.payload))
@@ -192,7 +130,7 @@ export default function UploadScreen({ onNavigate }: { oracleConnected?: boolean
             setDragOver(false)
             const paths = event.payload.paths
             if (paths?.length) {
-              setFiles(paths); setResult(null); setClaimPayload(null); setError(null)
+              setFiles(paths); setResult(null); setClaimPayload(null); setNftPreview(null); setError(null)
               loadFileInfo(paths)
               if (paths.length > 1) {
                 const firstName = paths[0].split(/[\\/]/).pop()?.replace(/\.[^.]+$/, '') || 'files'
@@ -205,14 +143,14 @@ export default function UploadScreen({ onNavigate }: { oracleConnected?: boolean
     }
     setup()
     return () => { if (cleanup) cleanup() }
-  }, [])
+  }, [loadFileInfo])
 
   const pickFiles = async () => {
     try {
       const f = await open({ multiple: true, title: 'Select files to upload' })
       if (f) {
         const sel = Array.isArray(f) ? f : [f]
-        setFiles(sel); setResult(null); setClaimPayload(null); setError(null)
+        setFiles(sel); setResult(null); setClaimPayload(null); setNftPreview(null); setError(null)
         loadFileInfo(sel)
         if (sel.length > 1) {
           const firstName = sel[0].split(/[\\/]/).pop()?.replace(/\.[^.]+$/, '') || 'files'
@@ -222,10 +160,19 @@ export default function UploadScreen({ onNavigate }: { oracleConnected?: boolean
     } catch(e) { setError(String(e)) }
   }
 
+
+  const generateNftPreview = useCallback(async (r: UploadResult) => {
+    return await invoke<VaultedNftMetadataPreview>('generate_vaulted_nft_metadata_preview', {
+      manifestHash: r.manifest_hash,
+      vaultObjectId: r.vault_id,
+      metadataUri: r.nft_uri,
+    })
+  }, [])
+
   const upload = async () => {
     if (!files.length) return
     try {
-      setUploading(true); setError(null); setProgress(null)
+      setUploading(true); setError(null); setProgress(null); setClaimState('loading')
       let finalName = customName || null
       if (tag && files.length === 1 && !customName) {
         const orig = files[0].split(/[\\/]/).pop() || 'file'
@@ -238,7 +185,11 @@ export default function UploadScreen({ onNavigate }: { oracleConnected?: boolean
       let r: UploadResult
       if (files.length === 1 && !finalName) r = await invoke<UploadResult>('upload_file', { filePath: files[0] })
       else r = await invoke<UploadResult>('upload_files', { filePaths: files, customName: finalName || null })
-      setResult(r) // triggers auto-claim via useEffect
+      setResult(r)
+      setNftPreview(await generateNftPreview(r))
+      setClaimPayload(null)
+      setTimeLeft(CLAIM_TIMEOUT_SEC)
+      setClaimState('registered')
     } catch(e) { setError(String(e)) }
     finally { setUploading(false); setProgress(null) }
   }
@@ -256,11 +207,63 @@ export default function UploadScreen({ onNavigate }: { oracleConnected?: boolean
     } finally { setCancelling(false) }
   }
 
+  const handleLocalMint = async () => {
+    if (!result) return
+    setError(null)
+    setMintResult(null)
+    setClaimState('minting')
+    try {
+      const preview = nftPreview || await generateNftPreview(result)
+      if (!nftPreview) setNftPreview(preview)
+
+      await invoke('publish_vaulted_nft_metadata', {
+        vaultObjectId: result.vault_id,
+        manifestHash: result.manifest_hash,
+        metadataUri: preview.metadataUri,
+        metadataJson: preview.metadataJson,
+        metadataHash: preview.metadataHash,
+      })
+
+      const minted = await invoke<VaultedSignedMintResponse>('mint_vaulted_nft_locally', {
+        request: {
+          metadataUri: preview.metadataUri,
+          nftokenTaxon: 0,
+        },
+        submit: true,
+      })
+
+      const submitted = minted.submitted
+      if (!submitted) throw new Error('XRPL transaction was signed but not submitted')
+      if (!submitted.accepted) {
+        throw new Error(`${submitted.engineResult}: ${submitted.engineResultMessage}`)
+      }
+
+      const mintedTokenId = submitted.nftTokenId || result.nft_token_id
+      setMintResult(submitted)
+      setResult({ ...result, nft_token_id: mintedTokenId })
+
+      if (submitted.nftTokenId) {
+        await invoke('register_minted_vault_object', {
+          vaultObjectId: result.vault_id,
+          manifestUri: preview.metadataUri,
+          manifestHash: result.manifest_hash,
+          nftTokenId: submitted.nftTokenId,
+          txHash: submitted.txHash,
+        })
+      }
+
+      setClaimState('claimed')
+    } catch (e) {
+      setClaimState('registered')
+      setError('Vaulted XRPL mint failed: ' + String(e))
+    }
+  }
+
   const resetAll = () => {
     abortedRef.current = true
     clearTimer()
     setFiles([]); setFileEntries([]); setCustomName(''); setTag('')
-    setResult(null); setClaimPayload(null)
+    setResult(null); setClaimPayload(null); setMintResult(null); setNftPreview(null)
     setClaimState('loading'); setTimeLeft(CLAIM_TIMEOUT_SEC)
     setProgress(null); setError(null)
   }
@@ -353,11 +356,11 @@ export default function UploadScreen({ onNavigate }: { oracleConnected?: boolean
         )}
 
         {/* ── Stepper: shown during upload AND after result (all done) ── */}
-        {(uploading || result) && (claimState !== 'claimed' && claimState !== 'expired' && claimState !== 'cancelled' && claimState !== 'error') && (
+        {(uploading || result) && (claimState !== 'registered' && claimState !== 'claimed' && claimState !== 'expired' && claimState !== 'cancelled' && claimState !== 'error') && (
             <div style={{ marginBottom:24 }}>
               <div style={{textAlign:'center',marginBottom:24}}>
                 <div className="v-section-title" style={{fontSize:20}}>Minting NFT for <span className="v-mono" style={{color:'var(--accent)'}}>{customName || files[0]?.split(/[\\/]/).pop() || 'file'}</span></div>
-                <div className="v-section-sub" style={{fontSize:15,marginTop:4}}>Keep this window open. Do not disconnect your wallet.</div>
+                <div className="v-section-sub" style={{fontSize:15,marginTop:4}}>Keep this window open. Vaulted wallet mode keeps signing local.</div>
               </div>
 
               {/* Progress bar — larger */}
@@ -408,7 +411,7 @@ export default function UploadScreen({ onNavigate }: { oracleConnected?: boolean
                   <div style={{padding:40}}>
                     <div className="v-spin" style={{width:32,height:32,margin:'0 auto 16px',borderWidth:2}}/>
                     <div style={{fontSize:15,fontWeight:500,color:'var(--fg-1)'}}>Preparing claim...</div>
-                    <div className="v-section-sub" style={{marginTop:4}}>Generating QR code for Xaman</div>
+                    <div className="v-section-sub" style={{marginTop:4}}>Preparing Vaulted signing request</div>
                   </div>
               )}
 
@@ -431,12 +434,12 @@ export default function UploadScreen({ onNavigate }: { oracleConnected?: boolean
                     </div>
                     <div style={{fontSize:13,color:'var(--fg-2)',marginBottom:20}}>Time remaining to accept NFT</div>
 
-                    {/* Xaman link */}
+                    {/* Signing request link */}
                     <div style={{marginBottom:20}}>
-                      <a href={`https://xumm.app/sign/${claimPayload.uuid}`} target="_blank" rel="noopener noreferrer"
+                      <a href={`${claimPayload.qrUri}`} target="_blank" rel="noopener noreferrer"
                          style={{ color:'var(--accent)',fontSize:13,textDecoration:'none',display:'inline-flex',alignItems:'center',gap:6 }}>
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-                        Open in Xaman
+                        Open signing request
                       </a>
                     </div>
 
@@ -450,6 +453,45 @@ export default function UploadScreen({ onNavigate }: { oracleConnected?: boolean
                           <><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg> Cancel</>
                       )}
                     </button>
+                  </div>
+              )}
+
+
+              {/* ── REGISTERED: Vaulted mode pending local XRPL signing ── */}
+              {claimState === 'registered' && result && (
+                  <div className="fade-in">
+                    <div style={{background:'var(--ok-soft)',border:'1px solid var(--ok-line)',borderRadius:'var(--radius-md)',padding:28,marginBottom:20,textAlign:'center'}}>
+                      <div style={{width:52,height:52,borderRadius:'50%',background:'var(--ok-soft)',display:'flex',alignItems:'center',justifyContent:'center',color:'var(--ok)',margin:'0 auto 12px'}}>
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="20 6 9 17 4 12"/></svg>
+                      </div>
+                      <div style={{fontSize:18,fontWeight:600,color:'var(--ok)'}}>Encrypted vault registered</div>
+                      <div style={{fontSize:14,color:'var(--fg-2)',marginTop:6}}>Your encrypted file and manifest were created. Mint the ownership NFT with your Vaulted-derived XRPL wallet.</div>
+                      {nftPreview && (
+                        <div style={{width:128,aspectRatio:'2/3',borderRadius:14,overflow:'hidden',background:'#060608',margin:'16px auto 0',border:'1px solid var(--line)',boxShadow:'0 18px 40px rgba(0,0,0,0.25)'}}>
+                          <img src={nftPreview.imageDataUri} alt="Deterministic Vaulted NFT preview" style={{width:'100%',height:'100%',objectFit:'cover',display:'block'}} />
+                        </div>
+                      )}
+                      <div className="v-mono" style={{fontSize:12,color:'var(--fg-3)',marginTop:12,wordBreak:'break-all'}}>
+                        Published metadata URI: {nftPreview?.metadataUri || result.nft_uri}
+                      </div>
+                    </div>
+                    <div style={{display:'flex',gap:10}}>
+                      <button className="v-btn v-btn-primary" style={{ flex:1,justifyContent:'center',height:44,fontSize:14 }} onClick={handleLocalMint}>
+                        Mint with Vaulted Wallet
+                      </button>
+                      <button className="v-btn" style={{ flex:1,justifyContent:'center',height:44,fontSize:14 }} onClick={() => { resetAll(); onNavigate?.('files') }}>Skip for now</button>
+                    </div>
+                  </div>
+              )}
+
+              {/* ── MINTING: local Vaulted XRPL submit ── */}
+              {claimState === 'minting' && (
+                  <div className="fade-in">
+                    <div style={{background:'var(--accent-soft)',border:'1px solid var(--accent-line)',borderRadius:'var(--radius-md)',padding:28,marginBottom:20,textAlign:'center'}}>
+                      <div className="v-spin" style={{width:34,height:34,margin:'0 auto 12px'}} />
+                      <div style={{fontSize:18,fontWeight:600,color:'var(--accent)'}}>Minting with Vaulted Wallet</div>
+                      <div style={{fontSize:14,color:'var(--fg-2)',marginTop:6}}>Publishing metadata, then building, signing, and submitting the NFTokenMint transaction locally.</div>
+                    </div>
                   </div>
               )}
 
@@ -467,11 +509,13 @@ export default function UploadScreen({ onNavigate }: { oracleConnected?: boolean
                         boxShadow:`0 0 50px color-mix(in srgb, ${nftColor.stroke} 12%, transparent)`,
                       }}>
                         {/* 2:3 image */}
-                        <div style={{
-                          width:'100%',aspectRatio:'2/3',
-                          backgroundImage: getNftImageUrl(result.nft_token_id, '#3b82f6'),
-                          backgroundSize:'cover',backgroundPosition:'center',
-                        }}/>
+                        <div style={{ width:'100%',aspectRatio:'2/3' }}>
+                          {nftPreview ? (
+                            <img src={nftPreview.imageDataUri} alt="Vaulted NFT" style={{width:'100%',height:'100%',objectFit:'cover',display:'block'}} />
+                          ) : (
+                            <div style={{width:'100%',height:'100%',background:'#060608'}} />
+                          )}
+                        </div>
                         {/* NFT ID strip — vault card style */}
                         <div style={{
                           padding:'10px 16px',
@@ -493,11 +537,16 @@ export default function UploadScreen({ onNavigate }: { oracleConnected?: boolean
                           <div style={{width:22,height:22,borderRadius:'50%',background:'var(--ok-soft)',display:'flex',alignItems:'center',justifyContent:'center',color:'var(--ok)'}}>
                             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12"/></svg>
                           </div>
-                          <span style={{fontSize:16,fontWeight:600,color:'var(--fg-1)'}}>NFT claimed successfully</span>
+                          <span style={{fontSize:16,fontWeight:600,color:'var(--fg-1)'}}>NFT minted successfully</span>
                         </div>
                         <div className="v-mono" style={{fontSize:13,color:'var(--fg-3)'}}>
                           {result.filename} · {fmt(result.file_size)}
                         </div>
+                        {mintResult?.txHash && (
+                          <div className="v-mono" style={{fontSize:12,color:'var(--fg-3)',marginTop:8,wordBreak:'break-all'}}>
+                            tx: {mintResult.txHash}
+                          </div>
+                        )}
                       </div>
 
                       {/* Action buttons — compact */}
@@ -518,7 +567,7 @@ export default function UploadScreen({ onNavigate }: { oracleConnected?: boolean
                         <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
                       </div>
                       <div style={{fontSize:18,fontWeight:600,color:'var(--warn)'}}>QR code expired</div>
-                      <div style={{fontSize:14,color:'var(--fg-2)',marginTop:6}}>The NFT has been burned because it was not accepted within 5 minutes.</div>
+                      <div style={{fontSize:14,color:'var(--fg-2)',marginTop:6}}>The local signing request expired before it was submitted.</div>
                     </div>
                     <button className="v-btn v-btn-primary" style={{ width:'100%',justifyContent:'center',height:44,fontSize:14 }} onClick={resetAll}>Try Again</button>
                   </div>
@@ -532,7 +581,7 @@ export default function UploadScreen({ onNavigate }: { oracleConnected?: boolean
                         <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
                       </div>
                       <div style={{fontSize:18,fontWeight:600,color:'var(--danger)'}}>Upload cancelled</div>
-                      <div style={{fontSize:14,color:'var(--fg-2)',marginTop:6}}>The NFT offer has been cancelled and burned.</div>
+                      <div style={{fontSize:14,color:'var(--fg-2)',marginTop:6}}>The local signing step was cancelled.</div>
                     </div>
                     <button className="v-btn v-btn-primary" style={{ width:'100%',justifyContent:'center',height:44,fontSize:14 }} onClick={resetAll}>Upload Another File</button>
                   </div>

@@ -1,6 +1,6 @@
 //! XRPL Signature Verification
 //!
-//! Verifies signatures created by XRPL wallets (via Xaman/XUMM).
+//! Verifies signatures created by XRPL wallets (by XRPL wallets).
 //! XRPL uses secp256k1 ECDSA with SHA-512 first-half hashing.
 
 use k256::{
@@ -43,9 +43,10 @@ pub fn verify_xrpl_signature(
         VerifyingKey::from_encoded_point(&point)
             .map_err(|e| SignatureError::InvalidPublicKey(e.to_string()))?
     } else {
-        return Err(SignatureError::InvalidPublicKey(
-            format!("Invalid public key length: {} (expected 33)", pubkey_bytes.len())
-        ));
+        return Err(SignatureError::InvalidPublicKey(format!(
+            "Invalid public key length: {} (expected 33)",
+            pubkey_bytes.len()
+        )));
     };
 
     // Decode signature (DER format)
@@ -71,12 +72,15 @@ fn verify_ed25519_signature(
     message: &str,
     signature_hex: &str,
 ) -> Result<bool, SignatureError> {
-    use ed25519_dalek::{Signature as Ed25519Signature, Verifier, VerifyingKey as Ed25519VerifyingKey};
+    use ed25519_dalek::{
+        Signature as Ed25519Signature, Verifier, VerifyingKey as Ed25519VerifyingKey,
+    };
 
     if public_key.len() != 32 {
-        return Err(SignatureError::InvalidPublicKey(
-            format!("Invalid Ed25519 key length: {}", public_key.len())
-        ));
+        return Err(SignatureError::InvalidPublicKey(format!(
+            "Invalid Ed25519 key length: {}",
+            public_key.len()
+        )));
     }
 
     let mut key_bytes = [0u8; 32];
@@ -89,9 +93,10 @@ fn verify_ed25519_signature(
         .map_err(|_| SignatureError::InvalidSignature("Invalid hex encoding".into()))?;
 
     if sig_bytes.len() != 64 {
-        return Err(SignatureError::InvalidSignature(
-            format!("Invalid Ed25519 signature length: {}", sig_bytes.len())
-        ));
+        return Err(SignatureError::InvalidSignature(format!(
+            "Invalid Ed25519 signature length: {}",
+            sig_bytes.len()
+        )));
     }
 
     let mut sig_arr = [0u8; 64];
@@ -135,9 +140,10 @@ pub fn derive_address_from_public_key(public_key_hex: &str) -> Result<String, Si
         .map_err(|_| SignatureError::InvalidPublicKey("Invalid hex encoding".into()))?;
 
     if pubkey_bytes.len() != 33 {
-        return Err(SignatureError::InvalidPublicKey(
-            format!("Invalid public key length: {} (expected 33)", pubkey_bytes.len())
-        ));
+        return Err(SignatureError::InvalidPublicKey(format!(
+            "Invalid public key length: {} (expected 33)",
+            pubkey_bytes.len()
+        )));
     }
 
     // Step 1: SHA-256 hash of public key
@@ -162,10 +168,11 @@ pub fn derive_address_from_public_key(public_key_hex: &str) -> Result<String, Si
 
     // Step 6: Base58 encode using XRPL alphabet
     const XRPL_ALPHABET: &[u8; 58] = b"rpshnaf39wBUDNEGHJKLM4PQRST7VWXYZ2bcdeCg65jkm8oFqi1tuvAxyz";
-    let alphabet = bs58::Alphabet::new(XRPL_ALPHABET)
-        .expect("valid XRPL alphabet");
+    let alphabet = bs58::Alphabet::new(XRPL_ALPHABET).expect("valid XRPL alphabet");
 
-    Ok(bs58::encode(&payload).with_alphabet(&alphabet).into_string())
+    Ok(bs58::encode(&payload)
+        .with_alphabet(&alphabet)
+        .into_string())
 }
 
 #[cfg(test)]

@@ -37,16 +37,16 @@ pub async fn get_metadata(
         FROM nft_metadata nm
         JOIN users u ON nm.owner_id = u.id
         WHERE nm.nft_token_id = $1
-        "#
+        "#,
     )
-        .bind(&nft_token_id)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or_else(|| ApiError::NftNotFound(nft_token_id.clone()))?;
+    .bind(&nft_token_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| ApiError::NftNotFound(nft_token_id.clone()))?;
 
     if !owner_check.eq_ignore_ascii_case(&auth.wallet_address) {
         return Err(ApiError::Forbidden(
-            "Only the NFT owner can view full metadata".into()
+            "Only the NFT owner can view full metadata".into(),
         ));
     }
 

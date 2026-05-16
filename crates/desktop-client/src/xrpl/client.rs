@@ -57,16 +57,16 @@ impl XrplClient {
                                 }
                             }
                         }
-                    }
+                    },
                     Ok(Message::Close(_)) => {
                         tracing::info!("XRPL WebSocket closed");
                         break;
-                    }
+                    },
                     Err(e) => {
                         tracing::error!("XRPL WebSocket error: {}", e);
                         break;
-                    }
-                    _ => {}
+                    },
+                    _ => {},
                 }
             }
         });
@@ -193,7 +193,8 @@ impl XrplClient {
                                 .and_then(|v| v.as_str())
                                 .map(|s| hex_to_string(s)),
                             flags: nft.get("Flags")?.as_u64()? as u32,
-                            transfer_fee: nft.get("TransferFee").and_then(|v| v.as_u64()) as Option<u64>,
+                            transfer_fee: nft.get("TransferFee").and_then(|v| v.as_u64())
+                                as Option<u64>,
                             nft_serial: nft.get("nft_serial")?.as_u64()? as u32,
                         })
                     })
@@ -211,14 +212,11 @@ impl XrplClient {
 
         Ok(nfts.iter().any(|nft| nft.nft_token_id == nft_token_id))
     }
-    
+
     /// Получает sell offers для NFT
     pub async fn nft_sell_offers(&self, nft_id: &str) -> Result<Vec<NftOffer>> {
         let response = self
-            .request(
-                "nft_sell_offers",
-                json!({ "nft_id": nft_id }),
-            )
+            .request("nft_sell_offers", json!({ "nft_id": nft_id }))
             .await?;
         let result = response
             .get("result")
@@ -233,7 +231,10 @@ impl XrplClient {
                             offer_index: o.get("nft_offer_index")?.as_str()?.to_string(),
                             owner: o.get("owner")?.as_str()?.to_string(),
                             amount: o.get("amount")?.as_str().unwrap_or("0").to_string(),
-                            destination: o.get("destination").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                            destination: o
+                                .get("destination")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string()),
                         })
                     })
                     .collect()
@@ -278,10 +279,49 @@ impl XrplClient {
             tx_hash: result
                 .get("tx_json")
                 .and_then(|tx| tx.get("hash"))
+                .or_else(|| result.get("tx_json").and_then(|tx| tx.get("hash")))
+                .or_else(|| result.get("hash"))
                 .and_then(|h| h.as_str())
                 .unwrap_or("")
                 .to_string(),
         })
+    }
+
+    /// Returns current validated ledger index.
+    pub async fn ledger_current_index(&self) -> Result<u32> {
+        let response = self.request("ledger_current", json!({})).await?;
+        let result = response
+            .get("result")
+            .ok_or_else(|| ClientError::Xrpl("No result".to_string()))?;
+        let index = result
+            .get("ledger_current_index")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| ClientError::Xrpl("No ledger_current_index".to_string()))?;
+        Ok(index as u32)
+    }
+
+    /// Returns a conservative transaction fee in drops.
+    pub async fn fee_drops(&self) -> Result<String> {
+        let response = self.request("fee", json!({})).await?;
+        let result = response
+            .get("result")
+            .ok_or_else(|| ClientError::Xrpl("No result".to_string()))?;
+        let drops = result
+            .get("drops")
+            .and_then(|v| v.get("open_ledger_fee"))
+            .or_else(|| result.get("drops").and_then(|v| v.get("minimum_fee")))
+            .and_then(|v| v.as_str())
+            .unwrap_or("12");
+        Ok(drops.to_string())
+    }
+
+    /// Attempts to extract the minted NFTokenID from a validated transaction metadata response.
+    pub async fn extract_minted_nftoken_id(&self, tx_hash: &str) -> Result<Option<String>> {
+        let response = self.tx(tx_hash).await?;
+        let result = response
+            .get("result")
+            .ok_or_else(|| ClientError::Xrpl("No result".to_string()))?;
+        Ok(extract_minted_nftoken_id_from_tx_result(result))
     }
 
     /// Получает текущий fee
@@ -353,6 +393,33 @@ pub struct ServerInfo {
     pub base_fee_xrp: f64,
 }
 
+fn extract_minted_nftoken_id_from_tx_result(result: &Value) -> Option<String> {
+    let meta = result
+        .get("meta")
+        .or_else(|| result.get("metaData"))
+        .or_else(|| result.get("metadata"))?;
+    let affected_nodes = meta.get("AffectedNodes")?.as_array()?;
+
+    for node in affected_nodes {
+        let created = node.get("CreatedNode")?;
+        let ledger_entry_type = created.get("LedgerEntryType")?.as_str()?;
+        if ledger_entry_type != "NFTokenPage" {
+            continue;
+        }
+        let fields = created.get("NewFields")?;
+        let tokens = fields.get("NFTokens")?.as_array()?;
+        for token in tokens {
+            let id = token
+                .get("NFToken")
+                .and_then(|v| v.get("NFTokenID"))
+                .and_then(|v| v.as_str())?;
+            return Some(id.to_string());
+        }
+    }
+
+    None
+}
+
 /// Конвертирует hex строку в обычную строку
 fn hex_to_string(hex: &str) -> String {
     hex::decode(hex)
@@ -374,5 +441,27 @@ mod tests {
     #[test]
     fn test_hex_to_string_empty() {
         assert_eq!(hex_to_string(""), "");
+    }
+
+    #[test]
+    fn test_extract_minted_nftoken_id() {
+        let result = json!({
+            "meta": {
+                "AffectedNodes": [{
+                    "CreatedNode": {
+                        "LedgerEntryType": "NFTokenPage",
+                        "NewFields": {
+                            "NFTokens": [{
+                                "NFToken": {"NFTokenID": "00080000ABC"}
+                            }]
+                        }
+                    }
+                }]
+            }
+        });
+        assert_eq!(
+            extract_minted_nftoken_id_from_tx_result(&result),
+            Some("00080000ABC".to_string())
+        );
     }
 }

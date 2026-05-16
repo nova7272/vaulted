@@ -2,13 +2,15 @@
 //!
 //! Хранит текущую сессию, ключи и конфигурацию.
 //!
-//! PRE ключи хранятся ТОЛЬКО в памяти (сессионно).
-//! При закрытии приложения ключи удаляются.
-//! При следующем входе требуется повторная подпись в Xaman.
+//! Vaulted identity keys are derived from the Vaulted seed phrase and kept only in memory.
+//! The bundled wallet layer derives XRPL signing keys from the Vaulted seed with a separate domain; external wallet signing is not required.
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use xrpl_vault_crypto_core::pre::{PreKeyPair, PrePublicKey, ProxyReEncryption};
+use xrpl_vault_crypto_core::{
+    pre::{PreKeyPair, PrePublicKey, ProxyReEncryption},
+    VaultedIdentityKeys, VaultedXrplWallet,
+};
 
 use crate::{
     auth::Session,
@@ -22,9 +24,6 @@ pub struct AppConfig {
     pub oracle_url: String,
     /// URL XRPL ноды (WebSocket)
     pub xrpl_node_url: String,
-    /// Xaman API Key
-    pub xaman_api_key: String,
-    /// Xaman API Secret
     /// Максимальный размер файла (bytes)
     pub max_file_size: u64,
     /// Размер фрагмента (bytes)
@@ -37,10 +36,9 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             oracle_url: "http://localhost:3000".to_string(),
-            xrpl_node_url: "https://clio.altnet.rippletest.net:51234".to_string(),
-            xaman_api_key: String::new(),
+            xrpl_node_url: "wss://s.altnet.rippletest.net:51233".to_string(),
             max_file_size: 100 * 1024 * 1024, // 100MB
-            fragment_size: 1024 * 1024,        // 1MB
+            fragment_size: 1024 * 1024,       // 1MB
             storage_node_url: "http://localhost:9001".to_string(),
         }
     }
@@ -53,8 +51,8 @@ impl AppConfig {
             oracle_url: std::env::var("ORACLE_URL")
                 .unwrap_or_else(|_| "http://localhost:3000".to_string()),
             xrpl_node_url: std::env::var("XRPL_NODE_URL")
-                .unwrap_or_else(|_| "https://clio.altnet.rippletest.net:51234".to_string()),
-            xaman_api_key: std::env::var("XAMAN_API_KEY").unwrap_or_default(),            max_file_size: std::env::var("MAX_FILE_SIZE")
+                .unwrap_or_else(|_| "wss://s.altnet.rippletest.net:51233".to_string()),
+            max_file_size: std::env::var("MAX_FILE_SIZE")
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(100 * 1024 * 1024),
@@ -76,8 +74,12 @@ pub struct AppState {
     session: RwLock<Option<Session>>,
     /// PRE контекст (thread-safe)
     pre: ProxyReEncryption,
-    /// PRE keypair - хранится ТОЛЬКО в памяти (сессионно)
+    /// Legacy PRE keypair - derived from Vaulted seed only for compatibility/migration.
     keypair: RwLock<Option<PreKeyPair>>,
+    /// Vaulted seed-based identity keys - stored only in memory.
+    vaulted_identity: RwLock<Option<VaultedIdentityKeys>>,
+    /// Vaulted-owned XRPL wallet keys - stored only in memory after unlock.
+    xrpl_wallet: RwLock<Option<VaultedXrplWallet>>,
     /// HTTP клиент
     http_client: reqwest::Client,
     /// Device fingerprint (unique per app instance, persisted)
@@ -98,6 +100,8 @@ impl AppState {
             session: RwLock::new(None),
             pre: ProxyReEncryption::new(),
             keypair: RwLock::new(None),
+            vaulted_identity: RwLock::new(None),
+            xrpl_wallet: RwLock::new(None),
             http_client,
             device_fingerprint,
         }))
@@ -105,16 +109,18 @@ impl AppState {
 
     /// Generate or load persistent device fingerprint
     fn load_or_generate_fingerprint() -> String {
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
 
         // Try to load saved fingerprint
-        if let Some(project_dirs) = directories::ProjectDirs::from("com", "xrplvault", "xrplvault") {
+        if let Some(project_dirs) = directories::ProjectDirs::from("com", "xrplvault", "xrplvault")
+        {
             let fp_path = project_dirs.data_dir().join("device.fingerprint");
             let obfuscation_key = Self::derive_obfuscation_key(project_dirs.data_dir());
 
             if let Ok(raw_bytes) = std::fs::read(&fp_path) {
                 // Deobfuscate: XOR with machine-specific key
-                let fp_bytes: Vec<u8> = raw_bytes.iter()
+                let fp_bytes: Vec<u8> = raw_bytes
+                    .iter()
                     .zip(obfuscation_key.iter().cycle())
                     .map(|(a, b)| a ^ b)
                     .collect();
@@ -150,7 +156,9 @@ impl AppState {
 
             // Save obfuscated (XOR with machine key) + restrictive permissions
             let _ = std::fs::create_dir_all(project_dirs.data_dir());
-            let obfuscated: Vec<u8> = fp.as_bytes().iter()
+            let obfuscated: Vec<u8> = fp
+                .as_bytes()
+                .iter()
                 .zip(obfuscation_key.iter().cycle())
                 .map(|(a, b)| a ^ b)
                 .collect();
@@ -175,7 +183,7 @@ impl AppState {
 
     /// Derive a machine-specific obfuscation key for fingerprint storage
     fn derive_obfuscation_key(data_dir: &std::path::Path) -> Vec<u8> {
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(b"xrpl-vault-dfp-obfuscation-v1");
         hasher.update(data_dir.to_string_lossy().as_bytes());
@@ -203,10 +211,7 @@ impl AppState {
     /// Проверяет наличие активной сессии
     pub async fn is_authenticated(&self) -> bool {
         let session = self.session.read().await;
-        session
-            .as_ref()
-            .map(|s| !s.is_expired())
-            .unwrap_or(false)
+        session.as_ref().map(|s| !s.is_expired()).unwrap_or(false)
     }
 
     /// Возвращает текущую сессию
@@ -231,7 +236,11 @@ impl AppState {
         *session_guard = None;
         let mut keypair_guard = self.keypair.write().await;
         *keypair_guard = None;
-        tracing::info!("Session and PRE keypair cleared from memory");
+        let mut identity_guard = self.vaulted_identity.write().await;
+        *identity_guard = None;
+        let mut wallet_guard = self.xrpl_wallet.write().await;
+        *wallet_guard = None;
+        tracing::info!("Session, Vaulted identity, Vaulted XRPL wallet and legacy PRE keypair cleared from memory");
     }
 
     /// Возвращает адрес кошелька текущего пользователя
@@ -240,12 +249,16 @@ impl AppState {
         Ok(session.wallet_address)
     }
 
-    /// Инициализирует PRE ключи из seed (деривированного из подписи)
+    /// Initializes legacy PRE keys from a Vaulted-seed-derived migration seed.
     ///
-    /// Keypair хранится ТОЛЬКО в памяти - не сохраняется на диск!
-    /// При закрытии приложения ключ удаляется.
-    /// Seed зануляется сразу после создания keypair.
-    pub async fn init_keypair_from_seed(&self, wallet_address: &str, mut seed: [u8; 32]) -> Result<()> {
+    /// This must never be called with external-wallet DER/signature material. It exists only
+    /// to keep current upload/download flows operational while manifests/key envelopes
+    /// are rolled out across the app.
+    pub async fn init_keypair_from_seed(
+        &self,
+        wallet_address: &str,
+        mut seed: [u8; 32],
+    ) -> Result<()> {
         // Генерируем keypair из seed
         let keypair = self.pre.generate_keypair_from_seed(&seed)?;
 
@@ -258,10 +271,70 @@ impl AppState {
         *guard = Some(keypair);
 
         tracing::info!(
-            "PRE keypair initialized in memory for {} (session-only, not persisted to disk)", 
+            "Legacy PRE keypair initialized from Vaulted identity for {} (session-only, not persisted to disk)", 
             wallet_address
         );
         Ok(())
+    }
+
+    /// Initializes Vaulted identity and compatibility PRE state from a BIP-39 mnemonic.
+    pub async fn init_vaulted_identity_from_mnemonic(
+        &self,
+        mnemonic: &str,
+        passphrase: Option<&str>,
+    ) -> Result<VaultedIdentityKeys> {
+        let identity = VaultedIdentityKeys::from_mnemonic(mnemonic, passphrase)?;
+        let xrpl_wallet = VaultedXrplWallet::from_mnemonic(mnemonic, passphrase)?;
+        let legacy_seed = identity.legacy_pre_seed();
+        let legacy_keypair = self.pre.generate_keypair_from_seed(&legacy_seed)?;
+
+        {
+            let mut guard = self.vaulted_identity.write().await;
+            *guard = Some(identity.clone());
+        }
+        {
+            let mut guard = self.keypair.write().await;
+            *guard = Some(legacy_keypair);
+        }
+        {
+            let mut guard = self.xrpl_wallet.write().await;
+            *guard = Some(xrpl_wallet);
+        }
+
+        tracing::info!(
+            "Vaulted identity and XRPL wallet unlocked: identity_id={}, signing_pk={}..., encryption_pk={}...",
+            identity.identity_id_hex(),
+            &identity.signing_public_key_hex()[..16],
+            &identity.encryption_public_key_hex()[..16]
+        );
+        Ok(identity)
+    }
+
+    /// Returns current Vaulted identity if unlocked.
+    pub async fn get_vaulted_identity(&self) -> Result<VaultedIdentityKeys> {
+        let guard = self.vaulted_identity.read().await;
+        guard.clone().ok_or_else(|| {
+            ClientError::Auth(
+                "Vaulted wallet is locked. Create or restore it from seed phrase first."
+                    .to_string(),
+            )
+        })
+    }
+
+    /// Checks whether seed-based Vaulted identity is loaded.
+    pub async fn has_vaulted_identity(&self) -> bool {
+        self.vaulted_identity.read().await.is_some()
+    }
+
+    /// Returns current Vaulted-owned XRPL wallet if unlocked.
+    pub async fn get_xrpl_wallet(&self) -> Result<VaultedXrplWallet> {
+        let guard = self.xrpl_wallet.read().await;
+        guard.clone().ok_or_else(|| {
+            ClientError::Auth(
+                "Vaulted wallet is locked. Create or restore it from seed phrase first."
+                    .to_string(),
+            )
+        })
     }
 
     /// Проверяет есть ли keypair в памяти
@@ -273,9 +346,12 @@ impl AppState {
     /// Возвращает keypair из памяти (клонируется)
     pub async fn get_keypair(&self) -> Result<PreKeyPair> {
         let guard = self.keypair.read().await;
-        guard.clone().ok_or_else(|| ClientError::Auth(
-            "PRE keypair not initialized. Please sign in again with Xaman.".to_string()
-        ))
+        guard.clone().ok_or_else(|| {
+            ClientError::Auth(
+                "Vaulted wallet is locked. Create or restore it from seed phrase first."
+                    .to_string(),
+            )
+        })
     }
 
     /// Возвращает публичный ключ PRE в hex формате
@@ -293,9 +369,9 @@ impl AppState {
     /// Returns Oracle JWT token for API authentication
     pub async fn get_oracle_token(&self) -> Result<String> {
         let session = self.get_session().await?;
-        session.oracle_token.ok_or_else(|| ClientError::Auth(
-            "Oracle token not available. Please sign in again.".to_string()
-        ))
+        session.oracle_token.ok_or_else(|| {
+            ClientError::Auth("Oracle token not available. Please sign in again.".to_string())
+        })
     }
 
     /// Sets Oracle token in current session
@@ -310,7 +386,11 @@ impl AppState {
     }
 
     /// Sets Oracle token with custom expiry (in seconds)
-    pub async fn set_oracle_token_with_expiry(&self, token: String, expires_in_secs: i64) -> Result<()> {
+    pub async fn set_oracle_token_with_expiry(
+        &self,
+        token: String,
+        expires_in_secs: i64,
+    ) -> Result<()> {
         let mut guard = self.session.write().await;
         if let Some(ref mut session) = *guard {
             session.set_oracle_token_with_expiry(token, expires_in_secs);
@@ -368,11 +448,11 @@ impl AppState {
                 }
                 tracing::info!("Oracle token refreshed successfully");
                 Ok(true)
-            }
+            },
             Err(e) => {
                 tracing::warn!("Token refresh failed: {}", e);
                 Err(ClientError::Auth(format!("Token refresh failed: {}", e)))
-            }
+            },
         }
     }
 
@@ -431,7 +511,10 @@ impl AppState {
 
     /// Creates OracleClient with custom timeout and auth token (if available)
     /// Auto-refreshes token if it's about to expire (< 5 minutes)
-    pub async fn get_oracle_client_with_timeout(&self, timeout_secs: u64) -> Result<crate::oracle::OracleClient> {
+    pub async fn get_oracle_client_with_timeout(
+        &self,
+        timeout_secs: u64,
+    ) -> Result<crate::oracle::OracleClient> {
         let config = crate::oracle::OracleConfig {
             base_url: self.config.oracle_url.clone(),
             timeout_secs,
@@ -454,11 +537,16 @@ impl AppState {
                                 // Update session
                                 let mut session_guard = self.session.write().await;
                                 if let Some(ref mut s) = *session_guard {
-                                    s.update_tokens(new_access.clone(), new_refresh, expires_in, role);
+                                    s.update_tokens(
+                                        new_access.clone(),
+                                        new_refresh,
+                                        expires_in,
+                                        role,
+                                    );
                                 }
                                 client.set_auth_token(new_access);
                                 tracing::info!("Token refreshed successfully");
-                            }
+                            },
                             Err(e) => {
                                 tracing::warn!("Token refresh failed: {} — clearing session", e);
                                 // Clear tokens so has_oracle_token() returns false
@@ -468,8 +556,11 @@ impl AppState {
                                     s.oracle_token_expires_at = None;
                                     s.refresh_token = None;
                                 }
-                                return Err(ClientError::Auth("Token expired and refresh failed. Please sign in again.".to_string()));
-                            }
+                                return Err(ClientError::Auth(
+                                    "Token expired and refresh failed. Please sign in again."
+                                        .to_string(),
+                                ));
+                            },
                         }
                     } else {
                         // No refresh token — clear expired access token
@@ -478,7 +569,9 @@ impl AppState {
                             s.oracle_token = None;
                             s.oracle_token_expires_at = None;
                         }
-                        return Err(ClientError::Auth("Oracle token expired. Please sign in again.".to_string()));
+                        return Err(ClientError::Auth(
+                            "Oracle token expired. Please sign in again.".to_string(),
+                        ));
                     }
                 } else if session.oracle_token_needs_refresh() {
                     // Token expires soon — refresh in background, use current token
@@ -489,13 +582,18 @@ impl AppState {
                             Ok((new_access, new_refresh, expires_in, role)) => {
                                 let mut session_guard = self.session.write().await;
                                 if let Some(ref mut s) = *session_guard {
-                                    s.update_tokens(new_access.clone(), new_refresh, expires_in, role);
+                                    s.update_tokens(
+                                        new_access.clone(),
+                                        new_refresh,
+                                        expires_in,
+                                        role,
+                                    );
                                 }
                                 client.set_auth_token(new_access);
                                 tracing::info!("Token proactively refreshed");
-                            }
+                            },
                             Err(e) => {
-                                tracing::warn!("Proactive refresh failed: {} — clearing refresh token to stop retries", e);
+                                tracing::warn!("Proactive session refresh failed: {} — clearing stored refresh credential to stop retries", e);
                                 // Clear refresh token so we don't keep hammering the server
                                 {
                                     let mut session_guard = self.session.write().await;
@@ -513,9 +611,11 @@ impl AppState {
                                         s.oracle_token = None;
                                         s.oracle_token_expires_at = None;
                                     }
-                                    return Err(ClientError::Auth("Session expired. Please sign in again.".to_string()));
+                                    return Err(ClientError::Auth(
+                                        "Session expired. Please sign in again.".to_string(),
+                                    ));
                                 }
-                            }
+                            },
                         }
                     } else {
                         client.set_auth_token(token.clone());
@@ -536,7 +636,8 @@ impl AppState {
     ) -> std::result::Result<(String, Option<String>, i64, Option<String>), String> {
         let url = format!("{}/api/v1/auth/refresh", self.config.oracle_url);
 
-        let response = self.http_client
+        let response = self
+            .http_client
             .post(&url)
             .header("X-Device-Fingerprint", &self.device_fingerprint)
             .json(&serde_json::json!({
@@ -552,14 +653,16 @@ impl AppState {
             return Err(format!("Refresh failed: HTTP {} — {}", status, body));
         }
 
-        let data: serde_json::Value = response.json().await
+        let data: serde_json::Value = response
+            .json()
+            .await
             .map_err(|e| format!("JSON parse error: {}", e))?;
 
-        let access_token = data["access_token"].as_str()
+        let access_token = data["access_token"]
+            .as_str()
             .ok_or("Missing access_token in refresh response")?
             .to_string();
-        let new_refresh = data["refresh_token"].as_str()
-            .map(|s| s.to_string());
+        let new_refresh = data["refresh_token"].as_str().map(|s| s.to_string());
         let expires_in = data["expires_in"].as_i64().unwrap_or(3600);
         let role = data["role"].as_str().map(|s| s.to_string());
 

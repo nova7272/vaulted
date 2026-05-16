@@ -11,6 +11,7 @@ use xrpl_vault_crypto_core::pre::{PreKeyPair, PrePublicKey, ProxyReEncryption};
 
 use crate::error::{ClientError, Result};
 
+#[allow(dead_code)]
 const SERVICE_NAME: &str = "xrpl-vault";
 /// Default password used when user hasn't set one (better than plaintext)
 const DEFAULT_KEYSTORE_PASSWORD: &str = "xrpl-vault-local-keystore-v1";
@@ -56,7 +57,7 @@ impl Keystore {
 
     /// Derive encryption key from password using Argon2id
     fn derive_key(&self, password: &str, salt: &[u8; 16]) -> [u8; 32] {
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
 
         // Simple but effective key derivation: HKDF-like with multiple rounds
         // In production, use proper Argon2id crate
@@ -82,8 +83,8 @@ impl Keystore {
 
     /// Encrypt data with AES-256-GCM
     fn encrypt_data(&self, key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>> {
-        use aes_gcm::{Aes256Gcm, Key, Nonce};
         use aes_gcm::aead::{Aead, KeyInit};
+        use aes_gcm::{Aes256Gcm, Key, Nonce};
 
         let cipher_key = Key::<Aes256Gcm>::from_slice(key);
         let cipher = Aes256Gcm::new(cipher_key);
@@ -94,7 +95,8 @@ impl Keystore {
             .map_err(|e| ClientError::Keystore(format!("RNG error: {}", e)))?;
         let nonce = Nonce::from_slice(&nonce_bytes);
 
-        let ciphertext = cipher.encrypt(nonce, plaintext)
+        let ciphertext = cipher
+            .encrypt(nonce, plaintext)
             .map_err(|e| ClientError::Keystore(format!("Encryption failed: {}", e)))?;
 
         // Prepend nonce to ciphertext: [12 bytes nonce][ciphertext+tag]
@@ -106,11 +108,13 @@ impl Keystore {
 
     /// Decrypt data with AES-256-GCM
     fn decrypt_data(&self, key: &[u8; 32], encrypted: &[u8]) -> Result<Vec<u8>> {
-        use aes_gcm::{Aes256Gcm, Key, Nonce};
         use aes_gcm::aead::{Aead, KeyInit};
+        use aes_gcm::{Aes256Gcm, Key, Nonce};
 
         if encrypted.len() < 12 {
-            return Err(ClientError::Keystore("Encrypted data too short".to_string()));
+            return Err(ClientError::Keystore(
+                "Encrypted data too short".to_string(),
+            ));
         }
 
         let cipher_key = Key::<Aes256Gcm>::from_slice(key);
@@ -119,15 +123,21 @@ impl Keystore {
         let nonce = Nonce::from_slice(&encrypted[..12]);
         let ciphertext = &encrypted[12..];
 
-        cipher.decrypt(nonce, ciphertext)
-            .map_err(|e| ClientError::Keystore(format!("Decryption failed (wrong password?): {}", e)))
+        cipher.decrypt(nonce, ciphertext).map_err(|e| {
+            ClientError::Keystore(format!("Decryption failed (wrong password?): {}", e))
+        })
     }
 
     pub fn save_seed(&self, wallet_address: &str, seed: &[u8; 32]) -> Result<()> {
         self.save_seed_with_password(wallet_address, seed, DEFAULT_KEYSTORE_PASSWORD)
     }
 
-    pub fn save_seed_with_password(&self, wallet_address: &str, seed: &[u8; 32], password: &str) -> Result<()> {
+    pub fn save_seed_with_password(
+        &self,
+        wallet_address: &str,
+        seed: &[u8; 32],
+        password: &str,
+    ) -> Result<()> {
         // Generate random salt
         let mut salt = [0u8; 16];
         getrandom::getrandom(&mut salt)
@@ -162,7 +172,7 @@ impl Keystore {
         let public_key_hex = hex::encode(keypair.export_public_key_bytes());
         fs::write(self.public_key_path(wallet_address), &public_key_hex)?;
 
-        tracing::info!("Encrypted seed saved for {}", wallet_address);
+        tracing::info!("Encrypted recovery material saved for account");
         Ok(())
     }
 
@@ -170,7 +180,11 @@ impl Keystore {
         self.load_keypair_with_password(wallet_address, DEFAULT_KEYSTORE_PASSWORD)
     }
 
-    pub fn load_keypair_with_password(&self, wallet_address: &str, password: &str) -> Result<Option<PreKeyPair>> {
+    pub fn load_keypair_with_password(
+        &self,
+        wallet_address: &str,
+        password: &str,
+    ) -> Result<Option<PreKeyPair>> {
         if !self.public_key_path(wallet_address).exists() {
             return Ok(None);
         }
@@ -183,15 +197,22 @@ impl Keystore {
         // Fallback: try loading legacy unencrypted format and migrate
         let legacy_path = self.data_dir.join(format!("{}.seed", wallet_address));
         if legacy_path.exists() {
-            tracing::warn!("Found legacy unencrypted seed for {}, migrating...", wallet_address);
+            tracing::warn!(
+                "Found legacy unencrypted seed for {}, migrating...",
+                wallet_address
+            );
             return self.migrate_legacy_seed(wallet_address, &legacy_path, password);
         }
 
-        tracing::warn!("No seed file found for {}", wallet_address);
+        tracing::warn!("No local recovery material file found for account");
         Ok(None)
     }
 
-    fn load_encrypted_seed(&self, wallet_address: &str, password: &str) -> Result<Option<PreKeyPair>> {
+    fn load_encrypted_seed(
+        &self,
+        wallet_address: &str,
+        password: &str,
+    ) -> Result<Option<PreKeyPair>> {
         use base64::Engine;
 
         // Load salt
@@ -228,7 +249,12 @@ impl Keystore {
         Ok(Some(keypair))
     }
 
-    fn migrate_legacy_seed(&self, wallet_address: &str, legacy_path: &PathBuf, password: &str) -> Result<Option<PreKeyPair>> {
+    fn migrate_legacy_seed(
+        &self,
+        wallet_address: &str,
+        legacy_path: &PathBuf,
+        password: &str,
+    ) -> Result<Option<PreKeyPair>> {
         use base64::Engine;
 
         let seed_b64 = fs::read_to_string(legacy_path)?;
@@ -248,7 +274,10 @@ impl Keystore {
 
         // Remove legacy unencrypted file
         let _ = fs::remove_file(legacy_path);
-        tracing::info!("Migrated legacy seed to encrypted format for {}", wallet_address);
+        tracing::info!(
+            "Migrated legacy seed to encrypted format for {}",
+            wallet_address
+        );
 
         let keypair = self.pre.generate_keypair_from_seed(&seed)?;
         Ok(Some(keypair))

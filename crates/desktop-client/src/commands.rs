@@ -2,20 +2,1314 @@
 //!
 //! Мост между JavaScript UI и Rust backend.
 
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::Arc;
-use tauri::{State, Emitter, AppHandle, Manager};
-use serde::{Deserialize, Serialize};
-use xrpl_vault_crypto_core::KeyDerivation;
+use tauri::{AppHandle, Emitter, Manager, State};
+use xrpl_vault_crypto_core::{
+    add_xrpl_signing_fields, build_nftoken_mint_tx, encryption_public_key_fingerprint_hex,
+    format_fingerprint_groups,
+    generate_vaulted_nft_metadata_preview as build_vaulted_nft_metadata_preview, open_key_envelope,
+    seal_key_for_recipient_hex, KeyEnvelope, SeedManager, VaultedNftMetadataInput,
+    VaultedNftMetadataPreview, VaultedQrSigningRequest, VaultedSignedXrplTransaction,
+    DEFAULT_MNEMONIC_WORDS,
+};
 
-use crate::auth::{Session, XamanAuth, XamanPayload};
+use crate::auth::{Session, VaultedSigningRequest};
 use crate::crypto::FileEncryptor;
 use crate::error::{ClientError, Result};
 use crate::oracle::api::{
-    OracleClient, OracleConfig, CreateVaultRequest,
-    VaultManifest, VaultFragment,
+    CreateVaultRequest, FinalizeVaultMintRequest, GrantResponse, IdentityDeviceResponse,
+    OracleClient, OracleConfig, PublishVaultMetadataRequest, PublishVaultMetadataResponse,
+    QrFileGrantConfirmRequest, QrFileGrantStartRequest, QrXrplSigningConfirmRequest,
+    QrXrplSigningStartRequest, RecipientKeyTrustResponse, RegisterVaultObjectRequest,
+    RevokeRecipientKeyTrustRequest, TrustRecipientKeyRequest, VaultFragment, VaultManifest,
+    VaultObjectResponse,
 };
 use crate::state::AppState;
+use crate::xrpl::XrplClient;
+
+// ==================== Vaulted Identity Commands ====================
+
+/// Response returned when creating/restoring the seed-based Vaulted wallet.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultedIdentityResponse {
+    /// Vaulted identity id.
+    pub vaulted_identity_id: String,
+    /// BIP-39 mnemonic. Returned only during creation so the UI can show backup ceremony.
+    pub mnemonic: Option<String>,
+    /// Ed25519 signing public key, hex.
+    pub signing_public_key: String,
+    /// X25519 encryption public key, hex.
+    pub encryption_public_key: String,
+    /// Device public key, hex.
+    pub device_public_key: String,
+    /// Protocol version.
+    pub protocol_version: String,
+}
+
+/// Create a new seed-based Vaulted wallet. Defaults to 12 words.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn create_vaulted_wallet(
+    state: State<'_, Arc<AppState>>,
+    word_count: Option<usize>,
+    passphrase: Option<String>,
+) -> Result<VaultedIdentityResponse> {
+    let mnemonic = SeedManager::generate_mnemonic(word_count.unwrap_or(DEFAULT_MNEMONIC_WORDS))?;
+    let identity = state
+        .init_vaulted_identity_from_mnemonic(&mnemonic, passphrase.as_deref())
+        .await?;
+
+    let response = VaultedIdentityResponse {
+        vaulted_identity_id: identity.identity_id_hex(),
+        mnemonic: Some(mnemonic),
+        signing_public_key: identity.signing_public_key_hex(),
+        encryption_public_key: identity.encryption_public_key_hex(),
+        device_public_key: identity.device_public_key_hex(),
+        protocol_version: "vaulted-v1".to_string(),
+    };
+    set_vaulted_session(state.inner()).await?;
+    register_vaulted_identity_public(state.inner(), &response).await;
+    Ok(response)
+}
+
+/// Restore/unlock a seed-based Vaulted wallet from a BIP-39 mnemonic.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn restore_vaulted_wallet(
+    state: State<'_, Arc<AppState>>,
+    mnemonic: String,
+    passphrase: Option<String>,
+) -> Result<VaultedIdentityResponse> {
+    SeedManager::validate_mnemonic(&mnemonic)?;
+    let identity = state
+        .init_vaulted_identity_from_mnemonic(&mnemonic, passphrase.as_deref())
+        .await?;
+
+    let response = VaultedIdentityResponse {
+        vaulted_identity_id: identity.identity_id_hex(),
+        mnemonic: None,
+        signing_public_key: identity.signing_public_key_hex(),
+        encryption_public_key: identity.encryption_public_key_hex(),
+        device_public_key: identity.device_public_key_hex(),
+        protocol_version: "vaulted-v1".to_string(),
+    };
+    set_vaulted_session(state.inner()).await?;
+    register_vaulted_identity_public(state.inner(), &response).await;
+    Ok(response)
+}
+
+/// Validate a recovery phrase without unlocking it.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn validate_vaulted_seed(mnemonic: String) -> Result<bool> {
+    Ok(SeedManager::validate_mnemonic(&mnemonic).is_ok())
+}
+
+/// Returns whether the seed-based Vaulted wallet is currently unlocked.
+#[tauri::command]
+pub async fn has_vaulted_wallet(state: State<'_, Arc<AppState>>) -> Result<bool> {
+    Ok(state.has_vaulted_identity().await)
+}
+
+async fn set_vaulted_session(state: &Arc<AppState>) -> Result<()> {
+    let identity = state.get_vaulted_identity().await?;
+    let wallet = state.get_xrpl_wallet().await?;
+    let mut session = Session::new(
+        wallet.classic_address()?,
+        wallet.public_key_hex()?,
+        format!("vaulted-seed:{}", identity.identity_id_hex()),
+        24,
+    );
+    session.set_device_fingerprint(state.device_fingerprint().to_string());
+    state.set_session(session).await;
+    Ok(())
+}
+
+async fn register_vaulted_identity_public(
+    state: &Arc<AppState>,
+    identity: &VaultedIdentityResponse,
+) {
+    let oracle = match OracleClient::new(OracleConfig {
+        base_url: state.config.oracle_url.clone(),
+        timeout_secs: 30,
+        ..Default::default()
+    }) {
+        Ok(client) => client,
+        Err(e) => {
+            tracing::warn!(
+                "Could not create Oracle client for identity registration: {}",
+                e
+            );
+            return;
+        },
+    };
+
+    let request = crate::oracle::api::RegisterVaultedIdentityRequest {
+        vaulted_identity_id: identity.vaulted_identity_id.clone(),
+        encryption_public_key: identity.encryption_public_key.clone(),
+        signing_public_key: identity.signing_public_key.clone(),
+        device_public_key: identity.device_public_key.clone(),
+        linked_wallets: vec![],
+        protocol_version: identity.protocol_version.clone(),
+    };
+
+    match oracle.register_vaulted_identity(&request).await {
+        Ok(r) => tracing::info!(
+            "Vaulted identity registered in Oracle: id={}, created={}",
+            r.id,
+            r.created
+        ),
+        Err(e) => tracing::warn!("Vaulted identity Oracle registration failed: {}", e),
+    }
+}
+
+/// Public XRPL wallet details derived from the Vaulted seed.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultedWalletResponse {
+    pub classic_address: String,
+    pub public_key: String,
+    pub protocol: String,
+}
+
+/// QR-login start response returned by Oracle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QrLoginStartResponse {
+    pub login_request_id: String,
+    pub challenge: String,
+    pub oracle_url: String,
+    pub expires_at: String,
+    pub qr_payload: serde_json::Value,
+}
+
+/// Returns the Vaulted-owned XRPL wallet public details.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_vaulted_xrpl_wallet(
+    state: State<'_, Arc<AppState>>,
+) -> Result<VaultedWalletResponse> {
+    let wallet = state.get_xrpl_wallet().await?;
+    Ok(VaultedWalletResponse {
+        classic_address: wallet.classic_address()?,
+        public_key: wallet.public_key_hex()?,
+        protocol: "vaulted-xrpl-wallet-v1".to_string(),
+    })
+}
+
+/// Builds a Vaulted QR payload for offline/mobile NFTokenMint signing.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn create_vaulted_nft_mint_qr_request(
+    state: State<'_, Arc<AppState>>,
+    metadata_uri: String,
+    nftoken_taxon: Option<u32>,
+    flags: Option<u32>,
+    transfer_fee: Option<u16>,
+) -> Result<VaultedQrSigningRequest> {
+    let wallet = state.get_xrpl_wallet().await?;
+    let account = wallet.classic_address()?;
+    let tx_json = build_nftoken_mint_tx(
+        &account,
+        &metadata_uri,
+        nftoken_taxon.unwrap_or(0),
+        flags,
+        transfer_fee,
+    );
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let expires_at = (chrono::Utc::now() + chrono::Duration::minutes(2)).to_rfc3339();
+    Ok(VaultedQrSigningRequest {
+        r#type: "vaulted-xrpl-signing-request-v1".to_string(),
+        request_id,
+        tx_json,
+        oracle_url: state.config.oracle_url.clone(),
+        expires_at,
+        human_summary: Some(format!("Mint Vaulted NFT metadata at {}", metadata_uri)),
+    })
+}
+
+/// Signs a Vaulted QR XRPL transaction request with the local Vaulted wallet.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn sign_vaulted_xrpl_qr_request(
+    state: State<'_, Arc<AppState>>,
+    request: VaultedQrSigningRequest,
+) -> Result<VaultedSignedXrplTransaction> {
+    if request.r#type != "vaulted-xrpl-signing-request-v1" {
+        return Err(ClientError::Auth(
+            "Unsupported Vaulted QR signing request".to_string(),
+        ));
+    }
+    let expires_at = chrono::DateTime::parse_from_rfc3339(&request.expires_at)
+        .map_err(|e| ClientError::Config(format!("Invalid QR request expiration: {}", e)))?
+        .with_timezone(&chrono::Utc);
+    if expires_at < chrono::Utc::now() {
+        return Err(ClientError::Auth("QR signing request expired".to_string()));
+    }
+    let wallet = state.get_xrpl_wallet().await?;
+    wallet
+        .sign_transaction_json(&request.tx_json)
+        .map_err(Into::into)
+}
+
+/// Generate a deterministic Vaulted NFT image and metadata preview locally.
+///
+/// The generated visual is derived from opaque hashes/ids only and is safe to
+/// show before XRPL minting. It does not require Oracle mint authority.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn generate_vaulted_nft_metadata_preview(
+    state: State<'_, Arc<AppState>>,
+    manifest_hash: String,
+    encrypted_hash: Option<String>,
+    vault_object_id: Option<String>,
+    metadata_uri: Option<String>,
+) -> Result<VaultedNftMetadataPreview> {
+    let owner_identity_id = state
+        .get_vaulted_identity()
+        .await
+        .ok()
+        .map(|identity| identity.identity_id_hex());
+    let input = VaultedNftMetadataInput {
+        manifest_hash,
+        encrypted_hash,
+        vault_object_id,
+        owner_identity_id,
+        metadata_uri,
+    };
+    Ok(build_vaulted_nft_metadata_preview(&input))
+}
+
+/// Publishes the client-generated public NFT metadata JSON to Oracle before local mint.
+///
+/// The resulting `metadata_uri` is the URI embedded in NFTokenMint. Oracle verifies
+/// the JSON hash and stores the exact metadata as an immutable public artifact.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn publish_vaulted_nft_metadata(
+    state: State<'_, Arc<AppState>>,
+    vault_object_id: String,
+    manifest_hash: String,
+    metadata_uri: String,
+    metadata_json: String,
+    metadata_hash: String,
+) -> Result<PublishVaultMetadataResponse> {
+    let oracle = state.get_oracle_client_with_timeout(30).await?;
+    oracle
+        .publish_vault_metadata(&PublishVaultMetadataRequest {
+            vault_id: vault_object_id,
+            manifest_hash,
+            metadata_uri,
+            metadata_json,
+            metadata_hash,
+        })
+        .await
+        .map_err(Into::into)
+}
+
+/// Parameters for building and locally signing an NFTokenMint transaction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultedNftMintSigningRequest {
+    pub metadata_uri: String,
+    pub nftoken_taxon: Option<u32>,
+    pub flags: Option<u32>,
+    pub transfer_fee: Option<u16>,
+    pub fee_drops: Option<String>,
+    pub sequence: Option<u32>,
+    pub last_ledger_sequence: Option<u32>,
+}
+
+/// Local signed NFTokenMint response. `tx_blob` can be submitted directly to XRPL.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultedSignedMintResponse {
+    pub signed: VaultedSignedXrplTransaction,
+    pub submitted: Option<VaultedSubmitResponse>,
+}
+
+/// XRPL submit response for a locally signed Vaulted transaction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultedSubmitResponse {
+    pub engine_result: String,
+    pub engine_result_message: String,
+    pub tx_hash: String,
+    pub accepted: bool,
+    pub nft_token_id: Option<String>,
+}
+
+/// Builds an NFTokenMint transaction, fills network fields, signs locally, and returns tx_blob.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn sign_vaulted_nft_mint_transaction(
+    state: State<'_, Arc<AppState>>,
+    request: VaultedNftMintSigningRequest,
+) -> Result<VaultedSignedXrplTransaction> {
+    sign_vaulted_nft_mint_transaction_inner(state.inner(), request).await
+}
+
+async fn sign_vaulted_nft_mint_transaction_inner(
+    state: &Arc<AppState>,
+    request: VaultedNftMintSigningRequest,
+) -> Result<VaultedSignedXrplTransaction> {
+    let wallet = state.get_xrpl_wallet().await?;
+    let account = wallet.classic_address()?;
+
+    let tx = build_nftoken_mint_tx(
+        &account,
+        &request.metadata_uri,
+        request.nftoken_taxon.unwrap_or(0),
+        request.flags,
+        request.transfer_fee,
+    );
+
+    let (fee_drops, sequence, last_ledger_sequence) = match (
+        request.fee_drops,
+        request.sequence,
+        request.last_ledger_sequence,
+    ) {
+        (Some(fee), Some(sequence), Some(last_ledger)) => (fee, sequence, last_ledger),
+        (fee, sequence, last_ledger) => {
+            let network = fetch_xrpl_signing_fields(
+                &state.config.xrpl_node_url,
+                &account,
+                fee,
+                sequence,
+                last_ledger,
+            )
+            .await?;
+            (
+                network.fee_drops,
+                network.sequence,
+                network.last_ledger_sequence,
+            )
+        },
+    };
+
+    let tx = add_xrpl_signing_fields(tx, fee_drops, sequence, last_ledger_sequence);
+    wallet.sign_xrpl_transaction_json(&tx).map_err(Into::into)
+}
+
+/// Builds, locally signs, and optionally submits an NFTokenMint transaction to XRPL.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn mint_vaulted_nft_locally(
+    state: State<'_, Arc<AppState>>,
+    request: VaultedNftMintSigningRequest,
+    submit: Option<bool>,
+) -> Result<VaultedSignedMintResponse> {
+    let signed = sign_vaulted_nft_mint_transaction_inner(state.inner(), request).await?;
+
+    let submitted = if submit.unwrap_or(false) {
+        let tx_blob = signed.tx_blob.clone().ok_or_else(|| {
+            ClientError::Xrpl("Local signing did not produce an XRPL tx_blob".to_string())
+        })?;
+        Some(submit_vaulted_xrpl_tx_blob(state, tx_blob).await?)
+    } else {
+        None
+    };
+
+    Ok(VaultedSignedMintResponse { signed, submitted })
+}
+
+/// Submits a locally signed XRPL tx_blob and returns engine result / tx hash.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn submit_vaulted_xrpl_tx_blob(
+    state: State<'_, Arc<AppState>>,
+    tx_blob: String,
+) -> Result<VaultedSubmitResponse> {
+    let mut client = XrplClient::new(&state.config.xrpl_node_url);
+    client.connect().await?;
+    let result = client.submit(&tx_blob).await?;
+    let tx_hash = result.tx_hash;
+    let nft_token_id = if !tx_hash.is_empty() {
+        client
+            .extract_minted_nftoken_id(&tx_hash)
+            .await
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+    Ok(VaultedSubmitResponse {
+        accepted: result.engine_result.starts_with("tes"),
+        engine_result: result.engine_result,
+        engine_result_message: result.engine_result_message,
+        tx_hash,
+        nft_token_id,
+    })
+}
+
+/// Registers a locally minted Vaulted vault object in the Oracle manifest index.
+///
+/// This is used after local XRPL signing/submission succeeds so Oracle stores only
+/// the manifest pointer and chain token id, not wallet-signing authority.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn register_minted_vault_object(
+    state: State<'_, Arc<AppState>>,
+    vault_object_id: String,
+    manifest_uri: String,
+    manifest_hash: String,
+    nft_token_id: String,
+    tx_hash: String,
+) -> Result<VaultObjectResponse> {
+    let identity = state.get_vaulted_identity().await?;
+    let oracle = state.get_oracle_client_with_timeout(30).await?;
+
+    oracle
+        .finalize_vault_mint(&FinalizeVaultMintRequest {
+            vault_id: vault_object_id.clone(),
+            nft_token_id: nft_token_id.clone(),
+            tx_hash,
+            manifest_uri: manifest_uri.clone(),
+            manifest_hash: manifest_hash.clone(),
+        })
+        .await?;
+
+    let request = RegisterVaultObjectRequest {
+        id: vault_object_id,
+        owner_identity_id: identity.identity_id_hex(),
+        manifest_uri,
+        manifest_hash,
+        nft_chain: Some("xrpl:testnet".to_string()),
+        nft_token_id: Some(nft_token_id),
+        manifest: None,
+    };
+
+    oracle.register_vault_object(&request).await
+}
+
+#[derive(Debug, Clone)]
+struct XrplSigningFields {
+    fee_drops: String,
+    sequence: u32,
+    last_ledger_sequence: u32,
+}
+
+async fn fetch_xrpl_signing_fields(
+    xrpl_node_url: &str,
+    account: &str,
+    fee_drops: Option<String>,
+    sequence: Option<u32>,
+    last_ledger_sequence: Option<u32>,
+) -> Result<XrplSigningFields> {
+    let mut client = XrplClient::new(xrpl_node_url);
+    client.connect().await?;
+
+    let resolved_sequence = match sequence {
+        Some(sequence) => sequence,
+        None => client.account_info(account).await?.sequence,
+    };
+
+    let resolved_fee = match fee_drops {
+        Some(fee) => fee,
+        None => client.fee_drops().await?,
+    };
+
+    let resolved_last_ledger = match last_ledger_sequence {
+        Some(last_ledger) => last_ledger,
+        None => client.ledger_current_index().await?.saturating_add(20),
+    };
+
+    Ok(XrplSigningFields {
+        fee_drops: resolved_fee,
+        sequence: resolved_sequence,
+        last_ledger_sequence: resolved_last_ledger,
+    })
+}
+
+/// Starts QR login. Desktop shows the returned qr_payload for scanning by mobile.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn start_vaulted_qr_login(
+    state: State<'_, Arc<AppState>>,
+) -> Result<QrLoginStartResponse> {
+    let oracle = OracleClient::new(OracleConfig {
+        base_url: state.config.oracle_url.clone(),
+        timeout_secs: 30,
+        ..Default::default()
+    })?;
+    let response = oracle
+        .start_qr_login(&crate::oracle::api::QrLoginStartRequest {
+            desktop_device_name: hostname::get()
+                .ok()
+                .map(|h| h.to_string_lossy().to_string()),
+            desktop_device_public_key: Some(state.device_fingerprint().to_string()),
+        })
+        .await?;
+    Ok(QrLoginStartResponse {
+        login_request_id: response.login_request_id,
+        challenge: response.challenge,
+        oracle_url: response.oracle_url,
+        expires_at: response.expires_at,
+        qr_payload: response.qr_payload,
+    })
+}
+
+/// Polls QR login status and stores Oracle session when approved.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn poll_vaulted_qr_login(
+    state: State<'_, Arc<AppState>>,
+    login_request_id: String,
+) -> Result<serde_json::Value> {
+    let oracle = OracleClient::new(OracleConfig {
+        base_url: state.config.oracle_url.clone(),
+        timeout_secs: 30,
+        ..Default::default()
+    })?;
+    let status = oracle.qr_login_status(&login_request_id).await?;
+    if status.status == "approved" || status.status == "consumed" {
+        if let (Some(token), Some(identity_id)) =
+            (status.access_token.clone(), status.identity_id.clone())
+        {
+            let identity = state.get_vaulted_identity().await.ok();
+            let public_key = identity
+                .as_ref()
+                .map(|i| i.signing_public_key_hex())
+                .unwrap_or_default();
+            let mut session = Session::with_oracle_token(
+                identity_id,
+                public_key,
+                format!("vaulted-qr:{}", login_request_id),
+                24,
+                token,
+            );
+            if let Some(refresh) = status.refresh_token.clone() {
+                session.set_refresh_token(refresh);
+            }
+            if let Some(expires_in) = status.expires_in {
+                session.set_oracle_token_with_expiry(
+                    session.oracle_token.clone().unwrap_or_default(),
+                    expires_in,
+                );
+            }
+            session.set_device_fingerprint(state.device_fingerprint().to_string());
+            state.set_session(session).await;
+        }
+    }
+    Ok(serde_json::json!({
+        "status": status.status,
+        "identityId": status.identity_id,
+        "approved": status.access_token.is_some(),
+    }))
+}
+
+/// Confirms QR login from a device that has the Vaulted seed unlocked.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn confirm_vaulted_qr_login(
+    state: State<'_, Arc<AppState>>,
+    login_request_id: String,
+    challenge: String,
+) -> Result<bool> {
+    let identity = state.get_vaulted_identity().await?;
+    let message = format!(
+        "Vaulted QR Login v1\nlogin_request_id:{}\nchallenge:{}\noracle_url:{}\ndevice_id:{}",
+        login_request_id,
+        challenge,
+        state.config.oracle_url,
+        state.device_fingerprint()
+    );
+    use ed25519_dalek::Signer;
+    let signature = identity.signing_key().sign(message.as_bytes());
+
+    let oracle = OracleClient::new(OracleConfig {
+        base_url: state.config.oracle_url.clone(),
+        timeout_secs: 30,
+        ..Default::default()
+    })?;
+    let result = oracle
+        .confirm_qr_login(&crate::oracle::api::QrLoginConfirmRequest {
+            login_request_id,
+            identity_id: identity.identity_id_hex(),
+            device_id: state.device_fingerprint().to_string(),
+            signing_public_key: identity.signing_public_key_hex(),
+            signature: hex::encode(signature.to_bytes()),
+        })
+        .await?;
+    Ok(result.approved)
+}
+
+/// Starts Scan-to-Pair-Device. The returned QR payload is scanned by a trusted device.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn start_vaulted_device_pairing(
+    state: State<'_, Arc<AppState>>,
+    identity_id: Option<String>,
+) -> Result<serde_json::Value> {
+    let identity = state.get_vaulted_identity().await?;
+    let resolved_identity_id = match identity_id {
+        Some(id) if !id.trim().is_empty() => id,
+        _ => identity.identity_id_hex(),
+    };
+    let device_name = hostname::get()
+        .ok()
+        .map(|h| h.to_string_lossy().to_string())
+        .unwrap_or_else(|| "Vaulted desktop".to_string());
+    let device_public_key = identity.device_public_key_hex();
+    let oracle = OracleClient::new(OracleConfig {
+        base_url: state.config.oracle_url.clone(),
+        timeout_secs: 30,
+        ..Default::default()
+    })?;
+    let response = oracle
+        .start_qr_device_pairing(&crate::oracle::api::QrPairDeviceStartRequest {
+            identity_id: resolved_identity_id,
+            desktop_device_name: Some(device_name.clone()),
+            desktop_device_public_key: device_public_key.clone(),
+        })
+        .await?;
+    Ok(serde_json::json!({
+        "pairingRequestId": response.pairing_request_id,
+        "challenge": response.challenge,
+        "oracleUrl": response.oracle_url,
+        "expiresAt": response.expires_at,
+        "deviceName": device_name,
+        "devicePublicKey": device_public_key,
+        "qrPayload": response.qr_payload,
+    }))
+}
+
+/// Polls Scan-to-Pair-Device status.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn poll_vaulted_device_pairing(
+    state: State<'_, Arc<AppState>>,
+    pairing_request_id: String,
+) -> Result<serde_json::Value> {
+    let oracle = OracleClient::new(OracleConfig {
+        base_url: state.config.oracle_url.clone(),
+        timeout_secs: 30,
+        ..Default::default()
+    })?;
+    let status = oracle.qr_device_pairing_status(&pairing_request_id).await?;
+    Ok(serde_json::json!({
+        "status": status.status,
+        "identityId": status.identity_id,
+        "deviceId": status.device_id,
+        "pairedAt": status.paired_at,
+        "paired": status.device_id.is_some(),
+    }))
+}
+
+/// Confirms Scan-to-Pair-Device from a trusted unlocked Vaulted identity.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn confirm_vaulted_device_pairing(
+    state: State<'_, Arc<AppState>>,
+    pairing_request_id: String,
+    challenge: String,
+    desktop_device_public_key: String,
+    desktop_device_name: Option<String>,
+) -> Result<bool> {
+    let identity = state.get_vaulted_identity().await?;
+    let message = format!(
+        "Vaulted QR Pair Device v1\npairing_request_id:{}\nchallenge:{}\noracle_url:{}\ndesktop_device_public_key:{}\ndesktop_device_name:{}\nauthorizing_device_id:{}",
+        pairing_request_id,
+        challenge,
+        state.config.oracle_url,
+        desktop_device_public_key,
+        desktop_device_name.as_deref().unwrap_or(""),
+        state.device_fingerprint()
+    );
+    use ed25519_dalek::Signer;
+    let signature = identity.signing_key().sign(message.as_bytes());
+
+    let oracle = OracleClient::new(OracleConfig {
+        base_url: state.config.oracle_url.clone(),
+        timeout_secs: 30,
+        ..Default::default()
+    })?;
+    let result = oracle
+        .confirm_qr_device_pairing(&crate::oracle::api::QrPairDeviceConfirmRequest {
+            pairing_request_id,
+            identity_id: identity.identity_id_hex(),
+            authorizing_device_id: state.device_fingerprint().to_string(),
+            signing_public_key: identity.signing_public_key_hex(),
+            signature: hex::encode(signature.to_bytes()),
+        })
+        .await?;
+    Ok(result.approved)
+}
+
+/// Starts Scan-to-Sign-XRPL-Transaction. The returned QR payload can be approved by a trusted device.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn start_vaulted_xrpl_signing_request(
+    state: State<'_, Arc<AppState>>,
+    xrpl_tx_json: serde_json::Value,
+    expected_xrpl_account: Option<String>,
+    human_summary: Option<String>,
+) -> Result<serde_json::Value> {
+    let identity = state.get_vaulted_identity().await?;
+    let wallet = state.get_xrpl_wallet().await?;
+    let resolved_account = match expected_xrpl_account {
+        Some(account) if !account.trim().is_empty() => account,
+        _ => wallet.classic_address()?,
+    };
+    let oracle = OracleClient::new(OracleConfig {
+        base_url: state.config.oracle_url.clone(),
+        timeout_secs: 30,
+        ..Default::default()
+    })?;
+    let response = oracle
+        .start_qr_xrpl_signing(&QrXrplSigningStartRequest {
+            identity_id: identity.identity_id_hex(),
+            xrpl_tx_json,
+            expected_xrpl_account: resolved_account,
+            requester_device_id: Some(state.device_fingerprint().to_string()),
+            requester_device_name: hostname::get()
+                .ok()
+                .map(|h| h.to_string_lossy().to_string()),
+            human_summary,
+        })
+        .await?;
+
+    Ok(serde_json::json!({
+        "signingRequestId": response.signing_request_id,
+        "challenge": response.challenge,
+        "oracleUrl": response.oracle_url,
+        "expiresAt": response.expires_at,
+        "txJsonHash": response.tx_json_hash,
+        "qrPayload": response.qr_payload,
+    }))
+}
+
+/// Polls Scan-to-Sign-XRPL-Transaction status.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn poll_vaulted_xrpl_signing_request(
+    state: State<'_, Arc<AppState>>,
+    signing_request_id: String,
+) -> Result<serde_json::Value> {
+    let oracle = OracleClient::new(OracleConfig {
+        base_url: state.config.oracle_url.clone(),
+        timeout_secs: 30,
+        ..Default::default()
+    })?;
+    let status = oracle.qr_xrpl_signing_status(&signing_request_id).await?;
+    Ok(serde_json::json!({
+        "status": status.status,
+        "identityId": status.identity_id,
+        "txJsonHash": status.tx_json_hash,
+        "expectedXrplAccount": status.expected_xrpl_account,
+        "approvedByDeviceId": status.approved_by_device_id,
+        "approvalSignature": status.approval_signature,
+        "approvedAt": status.approved_at,
+        "approved": status.approval_signature.is_some(),
+    }))
+}
+
+/// Confirms Scan-to-Sign-XRPL-Transaction from a trusted unlocked Vaulted identity.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn confirm_vaulted_xrpl_signing_request(
+    state: State<'_, Arc<AppState>>,
+    signing_request_id: String,
+    challenge: String,
+    oracle_url: Option<String>,
+    tx_json_hash: String,
+    expected_xrpl_account: String,
+    requester_device_id: Option<String>,
+    requester_device_name: Option<String>,
+) -> Result<bool> {
+    let identity = state.get_vaulted_identity().await?;
+    let resolved_oracle_url = oracle_url.unwrap_or_else(|| state.config.oracle_url.clone());
+    let authorizing_device_id = state.device_fingerprint().to_string();
+    let message = format!(
+        "Vaulted QR XRPL Sign v1\nsigning_request_id:{}\nchallenge:{}\noracle_url:{}\ntx_json_hash:{}\nexpected_xrpl_account:{}\nrequester_device_id:{}\nrequester_device_name:{}\nauthorizing_device_id:{}",
+        signing_request_id,
+        challenge,
+        resolved_oracle_url,
+        tx_json_hash,
+        expected_xrpl_account,
+        requester_device_id.as_deref().unwrap_or(""),
+        requester_device_name.as_deref().unwrap_or(""),
+        authorizing_device_id,
+    );
+    use ed25519_dalek::Signer;
+    let signature = identity.signing_key().sign(message.as_bytes());
+
+    let oracle = OracleClient::new(OracleConfig {
+        base_url: state.config.oracle_url.clone(),
+        timeout_secs: 30,
+        ..Default::default()
+    })?;
+    let result = oracle
+        .confirm_qr_xrpl_signing(&QrXrplSigningConfirmRequest {
+            signing_request_id,
+            identity_id: identity.identity_id_hex(),
+            authorizing_device_id,
+            signing_public_key: identity.signing_public_key_hex(),
+            signature: hex::encode(signature.to_bytes()),
+        })
+        .await?;
+    Ok(result.approved)
+}
+
+/// Computes the Vaulted display fingerprint for a recipient encryption public key.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn compute_recipient_encryption_key_fingerprint(
+    recipient_encryption_public_key: String,
+) -> Result<serde_json::Value> {
+    let fingerprint = encryption_public_key_fingerprint_hex(&recipient_encryption_public_key)?;
+    Ok(serde_json::json!({
+        "fingerprint": fingerprint,
+        "displayFingerprint": format_fingerprint_groups(&fingerprint),
+    }))
+}
+
+/// Returns recipient identity public keys plus TOFU trust status for the current owner.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_vaulted_recipient_key_trust(
+    state: State<'_, Arc<AppState>>,
+    recipient_identity_id: String,
+    recipient_encryption_public_key: Option<String>,
+    owner_identity_id: Option<String>,
+) -> Result<serde_json::Value> {
+    let identity = state.get_vaulted_identity().await?;
+    let owner_identity_id = owner_identity_id.unwrap_or_else(|| identity.identity_id_hex());
+    let oracle = OracleClient::new(OracleConfig {
+        base_url: state.config.oracle_url.clone(),
+        timeout_secs: 30,
+        ..Default::default()
+    })?;
+    let recipient_public = oracle
+        .get_vaulted_identity_public(&recipient_identity_id)
+        .await?;
+    let encryption_key = recipient_encryption_public_key
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| recipient_public.encryption_public_key.clone());
+    let fingerprint = encryption_public_key_fingerprint_hex(&encryption_key)?;
+    let trust = oracle
+        .recipient_key_trust_status(
+            &owner_identity_id,
+            &recipient_identity_id,
+            Some(&fingerprint),
+        )
+        .await
+        .unwrap_or_else(|_| RecipientKeyTrustResponse {
+            owner_identity_id: owner_identity_id.clone(),
+            recipient_identity_id: recipient_identity_id.clone(),
+            recipient_encryption_public_key: encryption_key.clone(),
+            recipient_encryption_public_key_fingerprint: fingerprint.clone(),
+            trusted: false,
+            trust_level: "untrusted".into(),
+            trust_source: "none".into(),
+            trusted_at: None,
+            revoked_at: None,
+            active_recipient_encryption_public_key_fingerprint: Some(fingerprint.clone()),
+            key_rotation_detected: Some(false),
+            trusted_different_key_fingerprint: None,
+            trusted_different_key_at: None,
+        });
+
+    Ok(serde_json::json!({
+        "ownerIdentityId": owner_identity_id,
+        "recipientIdentityId": recipient_identity_id,
+        "recipientEncryptionPublicKey": encryption_key,
+        "recipientEncryptionPublicKeyFingerprint": fingerprint,
+        "displayFingerprint": format_fingerprint_groups(&fingerprint),
+        "trusted": trust.trusted,
+        "trustLevel": trust.trust_level,
+        "trustSource": trust.trust_source,
+        "trustedAt": trust.trusted_at,
+        "revokedAt": trust.revoked_at,
+        "activeRecipientEncryptionPublicKeyFingerprint": trust.active_recipient_encryption_public_key_fingerprint.unwrap_or_else(|| fingerprint.clone()),
+        "keyRotationDetected": trust.key_rotation_detected.unwrap_or(false),
+        "trustedDifferentKeyFingerprint": trust.trusted_different_key_fingerprint,
+        "trustedDifferentKeyAt": trust.trusted_different_key_at,
+    }))
+}
+
+/// Stores a TOFU/manual trust decision for a recipient encryption public key.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn trust_vaulted_recipient_key(
+    state: State<'_, Arc<AppState>>,
+    recipient_identity_id: String,
+    recipient_encryption_public_key: Option<String>,
+    owner_identity_id: Option<String>,
+    trust_source: Option<String>,
+    trust_level: Option<String>,
+) -> Result<serde_json::Value> {
+    let identity = state.get_vaulted_identity().await?;
+    let owner_identity_id = owner_identity_id.unwrap_or_else(|| identity.identity_id_hex());
+    let oracle = OracleClient::new(OracleConfig {
+        base_url: state.config.oracle_url.clone(),
+        timeout_secs: 30,
+        ..Default::default()
+    })?;
+    let recipient_public = oracle
+        .get_vaulted_identity_public(&recipient_identity_id)
+        .await?;
+    let encryption_key = recipient_encryption_public_key
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| recipient_public.encryption_public_key.clone());
+    let fingerprint = encryption_public_key_fingerprint_hex(&encryption_key)?;
+    let trust = oracle
+        .trust_recipient_key(&TrustRecipientKeyRequest {
+            owner_identity_id: owner_identity_id.clone(),
+            recipient_identity_id: recipient_identity_id.clone(),
+            recipient_encryption_public_key: encryption_key.clone(),
+            recipient_encryption_public_key_fingerprint: fingerprint.clone(),
+            trust_source: trust_source.or_else(|| Some("desktop-tofu".into())),
+            trust_level: trust_level.or_else(|| Some("tofu".into())),
+        })
+        .await?;
+    Ok(serde_json::json!({
+        "ownerIdentityId": trust.owner_identity_id,
+        "recipientIdentityId": trust.recipient_identity_id,
+        "recipientEncryptionPublicKey": trust.recipient_encryption_public_key,
+        "recipientEncryptionPublicKeyFingerprint": trust.recipient_encryption_public_key_fingerprint,
+        "displayFingerprint": format_fingerprint_groups(&trust.recipient_encryption_public_key_fingerprint),
+        "trusted": trust.trusted,
+        "trustLevel": trust.trust_level,
+        "trustSource": trust.trust_source,
+        "trustedAt": trust.trusted_at,
+        "revokedAt": trust.revoked_at,
+        "activeRecipientEncryptionPublicKeyFingerprint": trust.active_recipient_encryption_public_key_fingerprint.unwrap_or_else(|| trust.recipient_encryption_public_key_fingerprint.clone()),
+        "keyRotationDetected": trust.key_rotation_detected.unwrap_or(false),
+        "trustedDifferentKeyFingerprint": trust.trusted_different_key_fingerprint,
+        "trustedDifferentKeyAt": trust.trusted_different_key_at,
+    }))
+}
+
+/// Revokes a TOFU/manual trust decision for a recipient encryption public key.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn revoke_vaulted_recipient_key_trust(
+    state: State<'_, Arc<AppState>>,
+    recipient_identity_id: String,
+    recipient_encryption_public_key_fingerprint: Option<String>,
+    owner_identity_id: Option<String>,
+) -> Result<serde_json::Value> {
+    let identity = state.get_vaulted_identity().await?;
+    let owner_identity_id = owner_identity_id.unwrap_or_else(|| identity.identity_id_hex());
+    let oracle = OracleClient::new(OracleConfig {
+        base_url: state.config.oracle_url.clone(),
+        timeout_secs: 30,
+        ..Default::default()
+    })?;
+    let trust = oracle
+        .revoke_recipient_key_trust(&RevokeRecipientKeyTrustRequest {
+            owner_identity_id: owner_identity_id.clone(),
+            recipient_identity_id: recipient_identity_id.clone(),
+            recipient_encryption_public_key_fingerprint,
+        })
+        .await?;
+    Ok(serde_json::json!({
+        "ownerIdentityId": trust.owner_identity_id,
+        "recipientIdentityId": trust.recipient_identity_id,
+        "recipientEncryptionPublicKey": trust.recipient_encryption_public_key,
+        "recipientEncryptionPublicKeyFingerprint": trust.recipient_encryption_public_key_fingerprint,
+        "displayFingerprint": format_fingerprint_groups(&trust.recipient_encryption_public_key_fingerprint),
+        "trusted": trust.trusted,
+        "trustLevel": trust.trust_level,
+        "trustSource": trust.trust_source,
+        "trustedAt": trust.trusted_at,
+        "revokedAt": trust.revoked_at,
+        "activeRecipientEncryptionPublicKeyFingerprint": trust.active_recipient_encryption_public_key_fingerprint.unwrap_or_else(|| trust.recipient_encryption_public_key_fingerprint.clone()),
+        "keyRotationDetected": trust.key_rotation_detected.unwrap_or(false),
+        "trustedDifferentKeyFingerprint": trust.trusted_different_key_fingerprint,
+        "trustedDifferentKeyAt": trust.trusted_different_key_at,
+    }))
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultedDeviceInfo {
+    pub device_id: String,
+    pub identity_id: String,
+    pub device_public_key: String,
+    pub device_public_key_fingerprint: String,
+    pub device_name: Option<String>,
+    pub status: String,
+    pub created_at: String,
+    pub revoked_at: Option<String>,
+    pub is_current_device: bool,
+}
+
+impl VaultedDeviceInfo {
+    fn from_response(device: IdentityDeviceResponse, current_device_public_key: &str) -> Self {
+        Self {
+            is_current_device: device.device_public_key == current_device_public_key,
+            device_id: device.id,
+            identity_id: device.identity_id,
+            device_public_key: device.device_public_key,
+            device_public_key_fingerprint: device.device_public_key_fingerprint,
+            device_name: device.device_name,
+            status: device.status,
+            created_at: device.created_at,
+            revoked_at: device.revoked_at,
+        }
+    }
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn list_vaulted_identity_devices(
+    state: State<'_, Arc<AppState>>,
+    include_revoked: Option<bool>,
+) -> Result<Vec<VaultedDeviceInfo>> {
+    let identity = state.get_vaulted_identity().await?;
+    let identity_id = identity.identity_id_hex();
+    let current_device_public_key = identity.device_public_key_hex();
+    let oracle = state.get_oracle_client_with_timeout(30).await?;
+    let devices = oracle
+        .list_identity_devices(&identity_id, include_revoked.unwrap_or(true))
+        .await?;
+
+    Ok(devices
+        .into_iter()
+        .map(|device| VaultedDeviceInfo::from_response(device, &current_device_public_key))
+        .collect())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn revoke_vaulted_identity_device(
+    state: State<'_, Arc<AppState>>,
+    device_id: String,
+) -> Result<VaultedDeviceInfo> {
+    let identity = state.get_vaulted_identity().await?;
+    let identity_id = identity.identity_id_hex();
+    let current_device_public_key = identity.device_public_key_hex();
+    let oracle = state.get_oracle_client_with_timeout(30).await?;
+    let device = oracle
+        .revoke_identity_device(&device_id, &identity_id)
+        .await?;
+    Ok(VaultedDeviceInfo::from_response(
+        device,
+        &current_device_public_key,
+    ))
+}
+
+async fn build_recipient_key_envelope(
+    oracle: &OracleClient,
+    vault_object_id: &str,
+    recipient_identity_id: &str,
+    compatibility_encrypted_file_key: &str,
+    file_key_base64: Option<String>,
+    recipient_encryption_public_key: Option<String>,
+) -> Result<serde_json::Value> {
+    if let Some(file_key_base64) = file_key_base64.filter(|v| !v.trim().is_empty()) {
+        let recipient_public_key =
+            match recipient_encryption_public_key.filter(|v| !v.trim().is_empty()) {
+                Some(pk) => pk,
+                None => {
+                    oracle
+                        .get_vaulted_identity_public(recipient_identity_id)
+                        .await?
+                        .encryption_public_key
+                },
+            };
+        let file_key = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            file_key_base64.trim(),
+        )
+        .map_err(|e| ClientError::InvalidData(format!("Invalid file_key_base64: {e}")))?;
+        if file_key.is_empty() {
+            return Err(ClientError::InvalidData(
+                "file_key_base64 decoded to an empty key".into(),
+            ));
+        }
+        let recipient_key_id = recipient_public_key_id(&recipient_public_key);
+        let aad = grant_envelope_aad(vault_object_id, recipient_identity_id);
+        let envelope = seal_key_for_recipient_hex(
+            &file_key,
+            &recipient_public_key,
+            recipient_identity_id.to_string(),
+            recipient_key_id,
+            "grant-recipient",
+            aad.as_bytes(),
+        )?;
+        return serde_json::to_value(envelope).map_err(ClientError::from);
+    }
+
+    Ok(serde_json::json!({
+        "protocol": "vaulted-key-envelope-v1",
+        "alg": "legacy-pre-aes-key",
+        "recipient_type": "grant-recipient",
+        "recipient_identity_id": recipient_identity_id,
+        "encrypted_file_key": compatibility_encrypted_file_key,
+    }))
+}
+
+fn grant_envelope_aad(vault_object_id: &str, recipient_identity_id: &str) -> String {
+    format!("vaulted-grant-envelope-v1:{vault_object_id}:{recipient_identity_id}")
+}
+
+fn recipient_public_key_id(recipient_public_key_hex: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"Vaulted v1 recipient encryption public key id");
+    hasher.update(recipient_public_key_hex.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// Starts Scan-to-Approve-File-Grant. The returned QR payload can be approved by a trusted device.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn start_vaulted_file_grant_approval(
+    state: State<'_, Arc<AppState>>,
+    vault_object_id: String,
+    recipient_identity_id: String,
+    encrypted_file_key: String,
+    permissions: Vec<String>,
+    grant_expires_at: Option<String>,
+    human_summary: Option<String>,
+    // Optional raw file/content key as base64. When present, Vaulted builds a real X25519 key envelope.
+    file_key_base64: Option<String>,
+    // Optional recipient X25519 encryption public key hex. If omitted, Oracle identity lookup is used.
+    recipient_encryption_public_key: Option<String>,
+    // When true and file_key_base64 is present, the recipient encryption key must be TOFU/manual trusted.
+    require_trusted_recipient: Option<bool>,
+) -> Result<serde_json::Value> {
+    let identity = state.get_vaulted_identity().await?;
+    let parsed_expires_at = match grant_expires_at {
+        Some(ts) if !ts.trim().is_empty() => Some(
+            chrono::DateTime::parse_from_rfc3339(&ts)
+                .map_err(|e| ClientError::Config(format!("Invalid grant expiration: {}", e)))?
+                .with_timezone(&chrono::Utc),
+        ),
+        _ => None,
+    };
+    let oracle = OracleClient::new(OracleConfig {
+        base_url: state.config.oracle_url.clone(),
+        timeout_secs: 30,
+        ..Default::default()
+    })?;
+    if require_trusted_recipient.unwrap_or(false)
+        && file_key_base64
+            .as_ref()
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+    {
+        let recipient_public_key = match recipient_encryption_public_key
+            .as_ref()
+            .filter(|v| !v.trim().is_empty())
+        {
+            Some(pk) => pk.clone(),
+            None => {
+                oracle
+                    .get_vaulted_identity_public(&recipient_identity_id)
+                    .await?
+                    .encryption_public_key
+            },
+        };
+        let fingerprint = encryption_public_key_fingerprint_hex(&recipient_public_key)?;
+        let trust = oracle
+            .recipient_key_trust_status(
+                &identity.identity_id_hex(),
+                &recipient_identity_id,
+                Some(&fingerprint),
+            )
+            .await?;
+        if !trust.trusted {
+            return Err(ClientError::InvalidData(format!(
+                "Recipient encryption key is not trusted. Verify fingerprint {} before granting access.",
+                format_fingerprint_groups(&fingerprint)
+            )));
+        }
+    }
+
+    let key_envelope = build_recipient_key_envelope(
+        &oracle,
+        &vault_object_id,
+        &recipient_identity_id,
+        &encrypted_file_key,
+        file_key_base64,
+        recipient_encryption_public_key,
+    )
+    .await?;
+    let response = oracle
+        .start_qr_file_grant_approval(&QrFileGrantStartRequest {
+            identity_id: identity.identity_id_hex(),
+            vault_object_id,
+            recipient_identity_id: recipient_identity_id.clone(),
+            key_envelope,
+            encrypted_file_key: None,
+            permissions,
+            grant_expires_at: parsed_expires_at,
+            requester_device_id: Some(state.device_fingerprint().to_string()),
+            requester_device_name: hostname::get()
+                .ok()
+                .map(|h| h.to_string_lossy().to_string()),
+            human_summary,
+        })
+        .await?;
+
+    Ok(serde_json::json!({
+        "grantRequestId": response.grant_request_id,
+        "grantId": response.grant_id,
+        "challenge": response.challenge,
+        "oracleUrl": response.oracle_url,
+        "expiresAt": response.expires_at,
+        "grantContextHash": response.grant_context_hash,
+        "qrPayload": response.qr_payload,
+    }))
+}
+
+/// Polls Scan-to-Approve-File-Grant status.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn poll_vaulted_file_grant_approval(
+    state: State<'_, Arc<AppState>>,
+    grant_request_id: String,
+) -> Result<serde_json::Value> {
+    let oracle = OracleClient::new(OracleConfig {
+        base_url: state.config.oracle_url.clone(),
+        timeout_secs: 30,
+        ..Default::default()
+    })?;
+    let status = oracle
+        .qr_file_grant_approval_status(&grant_request_id)
+        .await?;
+    Ok(serde_json::json!({
+        "status": status.status,
+        "identityId": status.identity_id,
+        "vaultObjectId": status.vault_object_id,
+        "grantId": status.grant_id,
+        "recipientIdentityId": status.recipient_identity_id,
+        "grantContextHash": status.grant_context_hash,
+        "approvedByDeviceId": status.approved_by_device_id,
+        "approvalSignature": status.approval_signature,
+        "createdGrantId": status.created_grant_id,
+        "approvedAt": status.approved_at,
+        "approved": status.created_grant_id.is_some(),
+    }))
+}
+
+/// Confirms Scan-to-Approve-File-Grant from a trusted unlocked Vaulted identity.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn confirm_vaulted_file_grant_approval(
+    state: State<'_, Arc<AppState>>,
+    grant_request_id: String,
+    challenge: String,
+    oracle_url: Option<String>,
+    vault_object_id: String,
+    grant_id: String,
+    recipient_identity_id: String,
+    grant_context_hash: String,
+    requester_device_id: Option<String>,
+    requester_device_name: Option<String>,
+) -> Result<bool> {
+    let identity = state.get_vaulted_identity().await?;
+    let resolved_oracle_url = oracle_url.unwrap_or_else(|| state.config.oracle_url.clone());
+    let authorizing_device_id = state.device_fingerprint().to_string();
+    let message = format!(
+        "Vaulted QR File Grant v1\ngrant_request_id:{}\nchallenge:{}\noracle_url:{}\nvault_object_id:{}\ngrant_id:{}\nrecipient_identity_id:{}\ngrant_context_hash:{}\nrequester_device_id:{}\nrequester_device_name:{}\nauthorizing_device_id:{}",
+        grant_request_id,
+        challenge,
+        resolved_oracle_url,
+        vault_object_id,
+        grant_id,
+        recipient_identity_id,
+        grant_context_hash,
+        requester_device_id.as_deref().unwrap_or(""),
+        requester_device_name.as_deref().unwrap_or(""),
+        authorizing_device_id,
+    );
+    use ed25519_dalek::Signer;
+    let signature = identity.signing_key().sign(message.as_bytes());
+
+    let oracle = OracleClient::new(OracleConfig {
+        base_url: state.config.oracle_url.clone(),
+        timeout_secs: 30,
+        ..Default::default()
+    })?;
+    let result = oracle
+        .confirm_qr_file_grant_approval(&QrFileGrantConfirmRequest {
+            grant_request_id,
+            identity_id: identity.identity_id_hex(),
+            authorizing_device_id,
+            signing_public_key: identity.signing_public_key_hex(),
+            signature: hex::encode(signature.to_bytes()),
+        })
+        .await?;
+    Ok(result.approved)
+}
 
 // ==================== Progress Events ====================
 
@@ -62,187 +1356,35 @@ impl ProgressEvent {
 
 // ==================== Auth Commands ====================
 
-/// Шаг 1: Создаёт SignIn request для QR-авторизации
-#[tauri::command]
-pub async fn start_xaman_auth(state: State<'_, Arc<AppState>>) -> Result<XamanPayload> {
-    let xaman = XamanAuth::new(
-        state.config.xaman_api_key.clone(),
-        String::new(),
-    );
-    xaman.create_sign_in_request().await
-}
-
-/// Шаг 2: Ожидает SignIn, деривирует PRE ключи и возвращает сессию
-///
-/// SignIn подпись детерминистическая (не зависит от Sequence/Fee),
-/// поэтому один и тот же wallet всегда получит одинаковый PRE keypair.
-#[tauri::command(rename_all = "camelCase")]
-pub async fn wait_for_auth(
-    state: State<'_, Arc<AppState>>,
-    payload_uuid: String,
-    websocket_url: String,
-) -> Result<Session> {
-    let xaman = XamanAuth::new(
-        state.config.xaman_api_key.clone(),
-        String::new(),
-    );
-
-    let payload = XamanPayload {
-        uuid: payload_uuid,
-        qr_png: String::new(),
-        qr_uri: String::new(),
-        websocket_url,
-        expires_at: None,
-    };
-
-    // SignIn возвращает session + signature
-    let sign_in_result = xaman.wait_for_sign_in(&payload, 24).await?;
-    let session = sign_in_result.session;
-
-    // Сохраняем сессию
-    state.set_session(session.clone()).await;
-
-    // Деривируем PRE keypair из SignIn signature
-    // SignIn signature детерминистическая — один wallet = один keypair
-    let mut signature_bytes = hex::decode(&sign_in_result.signature_hex)
-        .map_err(|e| ClientError::Auth(format!("Invalid signature hex: {}", e)))?;
-
-    let seed = KeyDerivation::derive_seed_from_signature(&signature_bytes, &session.wallet_address);
-
-    // Зануляем signature bytes после использования
-    use zeroize::Zeroize;
-    signature_bytes.zeroize();
-
-    state.init_keypair_from_seed(&session.wallet_address, seed).await?;
-
-    let public_key_hex = state.get_public_key_hex().await?;
-
-    tracing::info!(
-        "User {} signed in, PRE keypair derived from SignIn signature, public_key: {}...",
-        session.wallet_address,
-        &public_key_hex[..16]
-    );
-
-    // Регистрируем пользователя в Oracle (или обновляем public key)
-    let oracle = OracleClient::new(OracleConfig {
-        base_url: state.config.oracle_url.clone(),
-        timeout_secs: 30,
-        ..Default::default()
-    })?;
-
-    // Store signature for Oracle auth.
-    // Xaman SignIn usually returns the full signed transaction in response.hex.
-    // Oracle /auth/token-signin expects only DER-encoded ECDSA signature.
-    let signin_signature = extract_xrpl_der_signature(&sign_in_result.signature_hex)
-        .unwrap_or_else(|| sign_in_result.signature_hex.clone());
-    let signin_public_key = session.public_key.clone();
-
-    tracing::info!(
-        "Prepared SignIn signature for Oracle auth: {} hex chars",
-        signin_signature.len()
-    );
-
-    match oracle.register_user(&crate::oracle::api::RegisterUserRequest {
-        wallet_address: session.wallet_address.clone(),
-        pre_public_key: public_key_hex,
-        signature: sign_in_result.signature_hex,
-    }).await {
-        Ok(r) => tracing::info!("User registered in Oracle: created={}", r.created),
-        Err(e) => tracing::warn!("Oracle registration failed: {}", e),
-    }
-
-    // Автоматически получаем Oracle JWT используя SignIn signature
-    match oracle.get_token_from_signin(&crate::oracle::api::SignInTokenRequest {
-        wallet_address: session.wallet_address.clone(),
-        public_key: signin_public_key,
-        signature: signin_signature,
-        device_fingerprint: Some(state.device_fingerprint().to_string()),
-    }).await {
-        Ok(token_response) => {
-            state.save_oracle_tokens(
-                token_response.access_token,
-                token_response.expires_in,
-                token_response.refresh_token,
-                token_response.role,
-            ).await?;
-            tracing::info!(
-                "Oracle JWT obtained automatically for {} (expires in {} hours)",
-                session.wallet_address,
-                token_response.expires_in / 3600
-            );
-        }
-        Err(e) => {
-            tracing::warn!("Failed to get Oracle JWT: {} - manual auth will be required", e);
-        }
-    }
-
-    Ok(session)
-}
-
-
-fn extract_xrpl_der_signature(signed_tx_hex: &str) -> Option<String> {
-    let hex = signed_tx_hex.trim().to_ascii_uppercase();
-
-    // XRPL binary field 0x74 is TxnSignature.
-    // It is followed by a one-byte variable length, then DER signature bytes.
-    // Example: 74 46 30 44 02 20 ... 02 20 ...
-    let bytes = hex.as_bytes();
-
-    let mut i = 0usize;
-    while i + 4 <= bytes.len() {
-        if &hex[i..i + 2] == "74" {
-            let len_hex = &hex[i + 2..i + 4];
-            if let Ok(sig_len) = usize::from_str_radix(len_hex, 16) {
-                let start = i + 4;
-                let end = start + sig_len * 2;
-
-                if end <= hex.len() {
-                    let candidate = &hex[start..end];
-
-                    // DER ECDSA signature starts with 0x30.
-                    if candidate.starts_with("30") {
-                        tracing::debug!(
-                            "Extracted DER signature from XRPL tx hex: {} bytes",
-                            sig_len
-                        );
-                        return Some(candidate.to_string());
-                    }
-                }
-            }
-        }
-
-        i += 2;
-    }
-
-    tracing::warn!(
-        "Could not extract DER signature from Xaman SignIn hex; falling back to original value"
-    );
-    None
-}
-
-/// Шаг 3: DEPRECATED - PRE ключи теперь деривируются автоматически при SignIn
+/// Шаг 3: DEPRECATED - PRE ключи теперь деривируются автоматически при Vaulted unlock
 /// Оставлено для совместимости с UI
 #[tauri::command]
-pub async fn start_key_derivation(state: State<'_, Arc<AppState>>) -> Result<XamanPayload> {
-    // PRE ключи уже деривированы при SignIn
+pub async fn start_key_derivation(
+    state: State<'_, Arc<AppState>>,
+) -> Result<VaultedSigningRequest> {
+    // PRE ключи уже деривированы при Vaulted unlock
     // Возвращаем пустой payload — UI проверит has_pre_keys и увидит что ключи есть
     let session = state.get_session().await?;
 
     if state.has_keypair().await {
-        tracing::info!("PRE keys already derived from SignIn for {}", session.wallet_address);
+        tracing::info!(
+            "PRE keys already derived from Vaulted unlock for {}",
+            session.wallet_address
+        );
     }
 
     // Возвращаем dummy payload — UI не должен его использовать
-    Ok(XamanPayload {
+    Ok(VaultedSigningRequest {
         uuid: "keys-already-derived".to_string(),
         qr_png: String::new(),
         qr_uri: String::new(),
         websocket_url: String::new(),
         expires_at: None,
+        challenge: None,
     })
 }
 
-/// Шаг 4: DEPRECATED - PRE ключи теперь деривируются автоматически при SignIn
+/// Шаг 4: DEPRECATED - PRE ключи теперь деривируются автоматически при Vaulted unlock
 /// Оставлено для совместимости с UI
 #[tauri::command(rename_all = "camelCase")]
 pub async fn wait_for_key_derivation(
@@ -252,11 +1394,11 @@ pub async fn wait_for_key_derivation(
 ) -> Result<KeyDerivationResponse> {
     let session = state.get_session().await?;
 
-    // PRE ключи уже деривированы при SignIn
+    // PRE ключи уже деривированы при Vaulted unlock
     let public_key_hex = state.get_public_key_hex().await?;
 
     tracing::info!(
-        "PRE keys already derived for {} from SignIn, public_key: {}...",
+        "PRE keys already derived for {} from Vaulted unlock, public_key: {}...",
         session.wallet_address,
         &public_key_hex[..16]
     );
@@ -309,6 +1451,10 @@ pub struct UserInfo {
     pub wallet_address: String,
     pub public_key: String,
     pub has_pre_keys: bool,
+    pub has_vaulted_wallet: bool,
+    pub vaulted_identity_id: Option<String>,
+    pub encryption_public_key: Option<String>,
+    pub signing_public_key: Option<String>,
     pub expires_at: String,
 }
 
@@ -317,7 +1463,15 @@ pub struct UserInfo {
 pub async fn get_current_user(state: State<'_, Arc<AppState>>) -> Result<UserInfo> {
     let session = state.get_session().await?;
     let has_pre_keys = state.has_keypair().await;
-    let public_key = if has_pre_keys {
+    let has_vaulted_wallet = state.has_vaulted_identity().await;
+    let identity = if has_vaulted_wallet {
+        state.get_vaulted_identity().await.ok()
+    } else {
+        None
+    };
+    let public_key = if let Some(identity) = identity.as_ref() {
+        identity.encryption_public_key_hex()
+    } else if has_pre_keys {
         state.get_public_key_hex().await.unwrap_or_default()
     } else {
         String::new()
@@ -327,6 +1481,10 @@ pub async fn get_current_user(state: State<'_, Arc<AppState>>) -> Result<UserInf
         wallet_address: session.wallet_address,
         public_key,
         has_pre_keys,
+        has_vaulted_wallet,
+        vaulted_identity_id: identity.as_ref().map(|i| i.identity_id_hex()),
+        encryption_public_key: identity.as_ref().map(|i| i.encryption_public_key_hex()),
+        signing_public_key: identity.as_ref().map(|i| i.signing_public_key_hex()),
         expires_at: session.expires_at.to_rfc3339(),
     })
 }
@@ -346,8 +1504,9 @@ pub struct UploadResult {
     pub vault_id: String,
     pub nft_token_id: String,
     pub offer_index: String,
-    pub xaman_link: String,
+    pub signing_request_uri: String,
     pub nft_uri: String,
+    pub manifest_hash: String,
     pub filename: String,
     pub file_size: u64,
     pub fragments_count: u32,
@@ -373,7 +1532,9 @@ pub async fn upload_file(
 
     // Проверяем что keypair есть в памяти
     if !state.has_keypair().await {
-        return Err(ClientError::Auth("PRE keys not initialized. Please sign in again with Xaman.".to_string()));
+        return Err(ClientError::Auth(
+            "Vaulted wallet is locked. Create or restore it from seed phrase first.".to_string(),
+        ));
     }
 
     let public_key = state.get_public_key().await?;
@@ -397,7 +1558,8 @@ pub async fn upload_file(
         });
     }
 
-    let filename = path.file_name()
+    let filename = path
+        .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("unknown")
         .to_string();
@@ -407,7 +1569,7 @@ pub async fn upload_file(
     progress.bytes_total = file_size;
     progress.emit(&app);
 
-    tracing::info!("Uploading file: {} ({} bytes)", filename, file_size);
+    tracing::info!("Uploading encrypted file payload ({} bytes)", file_size);
 
     // Этап 1: Шифрование (0-30%)
     progress.stage = "encrypting".to_string();
@@ -429,7 +1591,7 @@ pub async fn upload_file(
     // Этап 2: Создание Vault и минтинг NFT (30-60%)
     progress.stage = "minting".to_string();
     progress.progress = 0;
-    progress.message = "Creating vault and minting NFT...".to_string();
+    progress.message = "Preparing encrypted vault...".to_string();
     progress.total_progress = 35;
     progress.emit(&app);
 
@@ -442,7 +1604,7 @@ pub async fn upload_file(
         wallet_address: wallet_address.clone(),
         pre_public_key: public_key_hex,
         encrypted_aes_key: encrypted.encrypted_aes_key.to_base64()?,
-        metadata_hash,
+        metadata_hash: metadata_hash.clone(),
         manifest: VaultManifest {
             encrypted_filename: encrypted.manifest.encrypted_filename.clone(),
             original_size: encrypted.manifest.original_size,
@@ -459,19 +1621,18 @@ pub async fn upload_file(
     };
 
     progress.total_progress = 50;
-    progress.message = "Minting NFT on XRPL...".to_string();
+    progress.message = "Preparing vault registry entry...".to_string();
     progress.emit(&app);
 
     let vault_response = oracle.create_vault(&vault_request).await?;
 
     progress.total_progress = 60;
-    progress.message = "NFT minted!".to_string();
+    progress.message = "Vault prepared for local mint".to_string();
     progress.emit(&app);
 
     tracing::info!(
-        "Vault created! NFT: {}, Offer: {}",
-        vault_response.nft_token_id,
-        vault_response.offer_index
+        "Vault prepared. Pending upload key: {}",
+        vault_response.nft_token_id
     );
 
     // Этап 3: Загрузка через Oracle proxy (60-95%)
@@ -483,13 +1644,14 @@ pub async fn upload_file(
 
     let upload_url = format!(
         "{}/api/v1/files/upload?nft_token_id={}",
-        state.config.oracle_url,
-        vault_response.nft_token_id
+        state.config.oracle_url, vault_response.nft_token_id
     );
 
-    tracing::info!("Uploading to Oracle proxy: {}", upload_url);
+    tracing::info!("Uploading encrypted payload through Oracle proxy");
 
-    let response = state.create_authed_client().await
+    let response = state
+        .create_authed_client()
+        .await
         .post(&upload_url)
         .header("Content-Type", "application/octet-stream")
         .body(encrypted_bytes.clone())
@@ -505,8 +1667,8 @@ pub async fn upload_file(
         )));
     }
 
-    let upload_result: serde_json::Value = response.json().await?;
-    tracing::info!("Upload result: {:?}", upload_result);
+    let _upload_result: serde_json::Value = response.json().await?;
+    tracing::info!("Encrypted payload upload completed");
 
     progress.total_progress = 95;
     progress.progress = 100;
@@ -525,8 +1687,9 @@ pub async fn upload_file(
         vault_id: vault_response.vault_id,
         nft_token_id: vault_response.nft_token_id,
         offer_index: vault_response.offer_index,
-        xaman_link: vault_response.xaman_link,
+        signing_request_uri: vault_response.signing_request_uri,
         nft_uri: vault_response.nft_uri,
+        manifest_hash: metadata_hash,
         filename,
         file_size,
         fragments_count: 1,
@@ -541,7 +1704,7 @@ pub async fn upload_files(
     file_paths: Vec<String>,
     custom_name: Option<String>,
 ) -> Result<UploadResult> {
-    use crate::archive::{create_zip_archive, needs_archiving, generate_archive_name};
+    use crate::archive::{create_zip_archive, generate_archive_name, needs_archiving};
 
     if file_paths.is_empty() {
         return Err(ClientError::Validation("No files selected".to_string()));
@@ -569,16 +1732,27 @@ pub async fn upload_files(
         archive_name
     };
 
-    tracing::info!("Creating ZIP archive: {} from {} files", archive_name, file_paths.len());
+    tracing::info!(
+        "Creating ZIP archive: {} from {} files",
+        archive_name,
+        file_paths.len()
+    );
 
     // Создаём архив
-    let zip_data = create_zip_archive(&file_paths, &archive_name)
-        .map_err(|e| ClientError::Validation(e))?;
+    let zip_data =
+        create_zip_archive(&file_paths, &archive_name).map_err(|e| ClientError::Validation(e))?;
 
     tracing::info!("ZIP archive created: {} bytes", zip_data.len());
 
     // Загружаем архив
-    upload_bytes_internal(app, state, zip_data, archive_name, "application/zip".to_string()).await
+    upload_bytes_internal(
+        app,
+        state,
+        zip_data,
+        archive_name,
+        "application/zip".to_string(),
+    )
+    .await
 }
 
 /// Внутренняя функция для загрузки байтов
@@ -593,7 +1767,9 @@ async fn upload_bytes_internal(
     let wallet_address = session.wallet_address.clone();
 
     if !state.has_keypair().await {
-        return Err(ClientError::Auth("PRE keys not initialized. Please sign in again with Xaman.".to_string()));
+        return Err(ClientError::Auth(
+            "Vaulted wallet is locked. Create or restore it from seed phrase first.".to_string(),
+        ));
     }
 
     let public_key = state.get_public_key().await?;
@@ -611,7 +1787,10 @@ async fn upload_bytes_internal(
     progress.bytes_total = file_size;
     progress.emit(&app);
 
-    tracing::info!("Uploading data: {} ({} bytes)", filename, file_size);
+    tracing::info!(
+        "Uploading encrypted in-memory payload ({} bytes)",
+        file_size
+    );
 
     // Этап 1: Шифрование (0-30%)
     progress.stage = "encrypting".to_string();
@@ -633,7 +1812,7 @@ async fn upload_bytes_internal(
     // Этап 2: Создание vault и минтинг NFT (30-60%)
     progress.stage = "minting".to_string();
     progress.progress = 0;
-    progress.message = "Creating vault and minting NFT...".to_string();
+    progress.message = "Preparing encrypted vault...".to_string();
     progress.total_progress = 35;
     progress.emit(&app);
 
@@ -654,30 +1833,31 @@ async fn upload_bytes_internal(
         fragments: vec![fragment],
     };
 
+    let metadata_hash = encrypted.manifest.compute_hash();
+
     let create_request = CreateVaultRequest {
         wallet_address: wallet_address.clone(),
         pre_public_key: public_key_hex,
         encrypted_aes_key: encrypted.encrypted_aes_key.to_base64()?,
-        metadata_hash: encrypted.manifest.compute_hash(),
+        metadata_hash: metadata_hash.clone(),
         manifest,
     };
 
     let oracle = state.get_oracle_client_with_timeout(120).await?;
 
     progress.total_progress = 50;
-    progress.message = "Minting NFT on XRPL...".to_string();
+    progress.message = "Preparing vault registry entry...".to_string();
     progress.emit(&app);
 
     let vault_response = oracle.create_vault(&create_request).await?;
 
     progress.total_progress = 60;
-    progress.message = "NFT minted!".to_string();
+    progress.message = "Vault prepared for local mint".to_string();
     progress.emit(&app);
 
     tracing::info!(
-        "Vault created! NFT: {}, Offer: {}",
-        vault_response.nft_token_id,
-        vault_response.offer_index
+        "Vault prepared. Pending upload key: {}",
+        vault_response.nft_token_id
     );
 
     // Этап 3: Загрузка через Oracle proxy (60-95%)
@@ -689,13 +1869,14 @@ async fn upload_bytes_internal(
 
     let upload_url = format!(
         "{}/api/v1/files/upload?nft_token_id={}",
-        state.config.oracle_url,
-        vault_response.nft_token_id
+        state.config.oracle_url, vault_response.nft_token_id
     );
 
-    tracing::info!("Uploading to Oracle proxy: {}", upload_url);
+    tracing::info!("Uploading encrypted payload through Oracle proxy");
 
-    let response = state.create_authed_client().await
+    let response = state
+        .create_authed_client()
+        .await
         .post(&upload_url)
         .header("Content-Type", "application/octet-stream")
         .body(encrypted_bytes.clone())
@@ -711,8 +1892,8 @@ async fn upload_bytes_internal(
         )));
     }
 
-    let upload_result: serde_json::Value = response.json().await?;
-    tracing::info!("Upload result: {:?}", upload_result);
+    let _upload_result: serde_json::Value = response.json().await?;
+    tracing::info!("Encrypted payload upload completed");
 
     progress.total_progress = 95;
     progress.progress = 100;
@@ -731,8 +1912,9 @@ async fn upload_bytes_internal(
         vault_id: vault_response.vault_id,
         nft_token_id: vault_response.nft_token_id,
         offer_index: vault_response.offer_index,
-        xaman_link: vault_response.xaman_link,
+        signing_request_uri: vault_response.signing_request_uri,
         nft_uri: vault_response.nft_uri,
+        manifest_hash: metadata_hash,
         filename,
         file_size,
         fragments_count: 1,
@@ -748,7 +1930,9 @@ pub async fn encrypt_file(
     let _session = state.get_session().await?;
 
     if !state.has_keypair().await {
-        return Err(ClientError::Auth("PRE keys not initialized. Please sign in again.".to_string()));
+        return Err(ClientError::Auth(
+            "PRE keys not initialized. Please sign in again.".to_string(),
+        ));
     }
 
     let public_key = state.get_public_key().await?;
@@ -759,7 +1943,11 @@ pub async fn encrypt_file(
     let metadata_hash = encrypted.manifest.compute_hash();
 
     Ok(EncryptedFileInfo {
-        filename: path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown").to_string(),
+        filename: path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .to_string(),
         original_size: encrypted.manifest.original_size,
         mime_type: encrypted.manifest.mime_type,
         original_hash: encrypted.manifest.original_hash,
@@ -790,7 +1978,9 @@ pub async fn encrypt_bytes(
     let _session = state.get_session().await?;
 
     if !state.has_keypair().await {
-        return Err(ClientError::Auth("PRE keys not initialized. Please sign in again.".to_string()));
+        return Err(ClientError::Auth(
+            "PRE keys not initialized. Please sign in again.".to_string(),
+        ));
     }
 
     let public_key = state.get_public_key().await?;
@@ -829,19 +2019,24 @@ async fn decrypt_filename(
 
     // Расшифровываем AES ключ
     let aes_key_bytes = if is_re_encrypted {
-        let re_encrypted_data = xrpl_vault_crypto_core::pre::ReEncryptedData::from_base64(encrypted_aes_key)
-            .map_err(|e| ClientError::Crypto(e))?;
-        state.pre().decrypt_reencrypted_data(&keypair, &re_encrypted_data)?
+        let re_encrypted_data =
+            xrpl_vault_crypto_core::pre::ReEncryptedData::from_base64(encrypted_aes_key)
+                .map_err(|e| ClientError::Crypto(e))?;
+        state
+            .pre()
+            .decrypt_reencrypted_data(&keypair, &re_encrypted_data)?
     } else {
-        let encrypted_pre_data = xrpl_vault_crypto_core::EncryptedPreData::from_base64(encrypted_aes_key)
-            .map_err(|e| ClientError::Crypto(e))?;
+        let encrypted_pre_data =
+            xrpl_vault_crypto_core::EncryptedPreData::from_base64(encrypted_aes_key)
+                .map_err(|e| ClientError::Crypto(e))?;
         state.pre().decrypt(&keypair, &encrypted_pre_data)?
     };
 
     let aes_key = xrpl_vault_crypto_core::AesKey::from_bytes(&aes_key_bytes)?;
 
     // Расшифровываем имя файла
-    let decrypted_bytes = aes_key.decrypt_from_base64(encrypted_filename)
+    let decrypted_bytes = aes_key
+        .decrypt_from_base64(encrypted_filename)
         .map_err(|e| ClientError::Crypto(e))?;
 
     String::from_utf8(decrypted_bytes)
@@ -852,7 +2047,9 @@ async fn decrypt_filename(
 pub async fn list_my_nfts(state: State<'_, Arc<AppState>>) -> Result<Vec<NftInfo>> {
     let session = state.get_session().await?;
 
-    let http_url = state.config.xrpl_node_url
+    let http_url = state
+        .config
+        .xrpl_node_url
         .replace("wss://", "https://")
         .replace("ws://", "http://")
         .replace(":51233", ":51234");
@@ -881,43 +2078,62 @@ pub async fn list_my_nfts(state: State<'_, Arc<AppState>>) -> Result<Vec<NftInfo
 
     // Собираем базовую информацию о NFT
     // Фильтруем только NFT нашего проекта (URI: vaulted:// или .../nft/.../metadata.json)
-    let mut nft_infos: Vec<NftInfo> = nfts.into_iter().filter_map(|nft| {
-        let nft_token_id = nft.get("NFTokenID")?.as_str()?.to_string();
-        let uri_hex = nft.get("URI").and_then(|u| u.as_str()).unwrap_or("");
-        let uri = if !uri_hex.is_empty() {
-            hex::decode(uri_hex).ok().and_then(|b| String::from_utf8(b).ok()).unwrap_or_else(|| uri_hex.to_string())
-        } else { String::new() };
+    let mut nft_infos: Vec<NftInfo> = nfts
+        .into_iter()
+        .filter_map(|nft| {
+            let nft_token_id = nft.get("NFTokenID")?.as_str()?.to_string();
+            let uri_hex = nft.get("URI").and_then(|u| u.as_str()).unwrap_or("");
+            let uri = if !uri_hex.is_empty() {
+                hex::decode(uri_hex)
+                    .ok()
+                    .and_then(|b| String::from_utf8(b).ok())
+                    .unwrap_or_else(|| uri_hex.to_string())
+            } else {
+                String::new()
+            };
 
-        // Показываем только NFT нашего проекта
-        let is_vault_nft = uri.starts_with("vaulted://")
-            || (uri.contains("/nft/") && uri.contains("/metadata.json"));
-        if !is_vault_nft {
-            return None;
-        }
+            // Показываем только NFT нашего проекта
+            let is_vault_nft = uri.starts_with("vaulted://")
+                || (uri.contains("/nft/") && uri.contains("/metadata.json"));
+            if !is_vault_nft {
+                return None;
+            }
 
-        Some(NftInfo { nft_token_id, uri, filename: None, created_at: None, file_status: "unknown".to_string() })
-    }).collect();
+            Some(NftInfo {
+                nft_token_id,
+                uri,
+                filename: None,
+                created_at: None,
+                file_status: "unknown".to_string(),
+            })
+        })
+        .collect();
 
     // Запрашиваем и расшифровываем filename из Oracle для каждого NFT
     let oracle_url = &state.config.oracle_url;
     let has_keypair = state.has_keypair().await;
 
     // Parallel fetch: all /files/*/access requests at once instead of sequential
-    let futures: Vec<_> = nft_infos.iter().map(|nft| {
-        let url = format!("{}/api/v1/files/{}/access", oracle_url, nft.nft_token_id);
-        let client = client.clone();
-        async move {
-            match client.get(&url).send().await {
-                Ok(resp) if resp.status().is_success() => {
-                    resp.json::<serde_json::Value>().await.ok().map(|data| ("available".to_string(), data))
+    let futures: Vec<_> = nft_infos
+        .iter()
+        .map(|nft| {
+            let url = format!("{}/api/v1/files/{}/access", oracle_url, nft.nft_token_id);
+            let client = client.clone();
+            async move {
+                match client.get(&url).send().await {
+                    Ok(resp) if resp.status().is_success() => resp
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()
+                        .map(|data| ("available".to_string(), data)),
+                    Ok(resp) if resp.status().as_u16() == 404 => {
+                        Some(("deleted".to_string(), serde_json::Value::Null))
+                    },
+                    _ => None,
                 }
-                Ok(resp) if resp.status().as_u16() == 404 => {
-                    Some(("deleted".to_string(), serde_json::Value::Null))
-                }
-                _ => None,
             }
-        }
-    }).collect();
+        })
+        .collect();
 
     let results = futures_util::future::join_all(futures).await;
 
@@ -928,12 +2144,21 @@ pub async fn list_my_nfts(state: State<'_, Arc<AppState>>) -> Result<Vec<NftInfo
                 if let Some(created) = data["created_at"].as_str() {
                     nft.created_at = Some(created.to_string());
                 }
-                let encrypted_filename = data["manifest"]["encrypted_filename"].as_str().unwrap_or("");
+                let encrypted_filename = data["manifest"]["encrypted_filename"]
+                    .as_str()
+                    .unwrap_or("");
                 let encrypted_aes_key = data["encrypted_aes_key"].as_str().unwrap_or("");
                 let is_re_encrypted = data["is_re_encrypted"].as_bool().unwrap_or(false);
 
                 if has_keypair && !encrypted_filename.is_empty() && !encrypted_aes_key.is_empty() {
-                    if let Ok(decrypted_name) = decrypt_filename(&state, encrypted_aes_key, encrypted_filename, is_re_encrypted).await {
+                    if let Ok(decrypted_name) = decrypt_filename(
+                        &state,
+                        encrypted_aes_key,
+                        encrypted_filename,
+                        is_re_encrypted,
+                    )
+                    .await
+                    {
                         nft.filename = Some(decrypted_name);
                     } else {
                         nft.filename = Some(format!("Vault #{}", &nft.nft_token_id[..8]));
@@ -941,18 +2166,22 @@ pub async fn list_my_nfts(state: State<'_, Arc<AppState>>) -> Result<Vec<NftInfo
                 } else {
                     nft.filename = Some(format!("Vault #{}", &nft.nft_token_id[..8]));
                 }
-            }
+            },
             Some((status, _)) if status == "deleted" => {
                 nft.file_status = "deleted".to_string();
                 nft.filename = Some(format!("Deleted file #{}", &nft.nft_token_id[..8]));
-            }
+            },
             _ => {
                 nft.file_status = "unknown".to_string();
-            }
+            },
         }
     }
 
-    tracing::info!("Found {} NFTs for {}", nft_infos.len(), session.wallet_address);
+    tracing::info!(
+        "Found {} NFTs for {}",
+        nft_infos.len(),
+        session.wallet_address
+    );
     Ok(nft_infos)
 }
 
@@ -1003,46 +2232,45 @@ pub async fn download_file(
     let client = state.create_authed_client().await;
 
     // Получаем метаданные файла
-    let oracle_url = format!("{}/api/v1/files/{}/access", state.config.oracle_url, nft_token_id);
+    let oracle_url = format!(
+        "{}/api/v1/files/{}/access",
+        state.config.oracle_url, nft_token_id
+    );
 
     progress.stage = "fetching".to_string();
     progress.message = "Fetching file metadata...".to_string();
     progress.total_progress = 5;
     progress.emit(&app);
 
-    let file_info: serde_json::Value = client
-        .get(&oracle_url)
-        .send()
-        .await?
-        .json()
-        .await?;
+    let file_info: serde_json::Value = client.get(&oracle_url).send().await?.json().await?;
 
-    tracing::debug!("File info: {:?}", file_info);
+    tracing::debug!("Received encrypted file access metadata");
 
     let encrypted_aes_key = file_info["encrypted_aes_key"]
         .as_str()
         .ok_or_else(|| ClientError::Oracle("Missing encrypted_aes_key".into()))?;
 
     // Проверяем был ли ключ перешифрован (после transfer)
-    let is_re_encrypted = file_info["is_re_encrypted"]
-        .as_bool()
-        .unwrap_or(false);
+    let is_re_encrypted = file_info["is_re_encrypted"].as_bool().unwrap_or(false);
 
     // Расшифровываем имя файла
     let encrypted_filename = file_info["manifest"]["encrypted_filename"]
         .as_str()
         .unwrap_or("");
     let original_filename = if !encrypted_filename.is_empty() {
-        decrypt_filename(&state, encrypted_aes_key, encrypted_filename, is_re_encrypted)
-            .await
-            .unwrap_or_else(|_| "downloaded_file".to_string())
+        decrypt_filename(
+            &state,
+            encrypted_aes_key,
+            encrypted_filename,
+            is_re_encrypted,
+        )
+        .await
+        .unwrap_or_else(|_| "downloaded_file".to_string())
     } else {
         "downloaded_file".to_string()
     };
 
-    let original_size = file_info["manifest"]["original_size"]
-        .as_u64()
-        .unwrap_or(0);
+    let original_size = file_info["manifest"]["original_size"].as_u64().unwrap_or(0);
 
     progress.bytes_total = original_size;
 
@@ -1059,14 +2287,14 @@ pub async fn download_file(
     progress.emit(&app);
 
     // Используем новый Oracle proxy endpoint
-    let download_url = format!("{}/api/v1/files/{}/download", state.config.oracle_url, nft_token_id);
+    let download_url = format!(
+        "{}/api/v1/files/{}/download",
+        state.config.oracle_url, nft_token_id
+    );
 
     tracing::debug!("Downloading from Oracle proxy: {}", download_url);
 
-    let response = client
-        .get(&download_url)
-        .send()
-        .await?;
+    let response = client.get(&download_url).send().await?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -1084,7 +2312,10 @@ pub async fn download_file(
     progress.message = "Download complete".to_string();
     progress.emit(&app);
 
-    tracing::info!("Downloaded {} bytes of encrypted data", encrypted_data.len());
+    tracing::info!(
+        "Downloaded {} bytes of encrypted data",
+        encrypted_data.len()
+    );
 
     // Этап: Расшифровка (70-95%)
     progress.stage = "decrypting".to_string();
@@ -1098,24 +2329,28 @@ pub async fn download_file(
     // Расшифровываем AES ключ в зависимости от типа данных
     let aes_key_bytes = if is_re_encrypted {
         // После transfer - ключ в формате ReEncryptedData
-        tracing::info!("Decrypting re-encrypted AES key (post-transfer)");
+        tracing::info!("Unwrapping transferred content key");
         progress.message = "Decrypting transferred key...".to_string();
         progress.emit(&app);
 
-        let re_encrypted_data = xrpl_vault_crypto_core::pre::ReEncryptedData::from_base64(encrypted_aes_key)
-            .map_err(|e| ClientError::Crypto(e))?;
-        state.pre().decrypt_reencrypted_data(&keypair, &re_encrypted_data)?
+        let re_encrypted_data =
+            xrpl_vault_crypto_core::pre::ReEncryptedData::from_base64(encrypted_aes_key)
+                .map_err(|e| ClientError::Crypto(e))?;
+        state
+            .pre()
+            .decrypt_reencrypted_data(&keypair, &re_encrypted_data)?
     } else {
         // Оригинальный владелец - ключ в формате EncryptedPreData
-        tracing::info!("Decrypting original AES key");
-        let encrypted_pre_data = xrpl_vault_crypto_core::EncryptedPreData::from_base64(encrypted_aes_key)
-            .map_err(|e| ClientError::Crypto(e))?;
+        tracing::info!("Unwrapping owner content key");
+        let encrypted_pre_data =
+            xrpl_vault_crypto_core::EncryptedPreData::from_base64(encrypted_aes_key)
+                .map_err(|e| ClientError::Crypto(e))?;
         state.pre().decrypt(&keypair, &encrypted_pre_data)?
     };
 
     let aes_key = xrpl_vault_crypto_core::AesKey::from_bytes(&aes_key_bytes)?;
 
-    tracing::info!("AES key decrypted successfully");
+    tracing::info!("Content key unwrap succeeded");
 
     progress.message = "Decrypting file content...".to_string();
     progress.total_progress = 85;
@@ -1124,7 +2359,7 @@ pub async fn download_file(
     let encrypted_fragment = xrpl_vault_crypto_core::EncryptedData::from_bytes(&encrypted_data)?;
     let decrypted_data = aes_key.decrypt(&encrypted_fragment)?;
 
-    tracing::info!("Decrypted {} bytes", decrypted_data.len());
+    tracing::info!("Encrypted file payload decrypted");
 
     // Этап: Сохранение (95-100%)
     progress.stage = "saving".to_string();
@@ -1143,7 +2378,7 @@ pub async fn download_file(
     progress.bytes_processed = decrypted_data.len() as u64;
     progress.emit(&app);
 
-    tracing::info!("File saved to {}", output_path);
+    tracing::info!("Decrypted file saved to selected output path");
 
     Ok(output_path)
 }
@@ -1165,7 +2400,9 @@ pub async fn request_file_access(
         &access.encrypted_aes_key,
         &access.manifest.encrypted_filename,
         access.is_re_encrypted,
-    ).await.unwrap_or_else(|_| format!("Vault #{}", &nft_token_id[..8]));
+    )
+    .await
+    .unwrap_or_else(|_| format!("Vault #{}", &nft_token_id[..8]));
 
     Ok(FileAccessInfo {
         nft_token_id: access.nft_token_id,
@@ -1185,6 +2422,371 @@ pub struct FileAccessInfo {
     pub filename: String,
     pub size: u64,
     pub fragments_count: u32,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IncomingGrantInfo {
+    pub grant_id: String,
+    pub vault_object_id: String,
+    pub recipient_identity_id: String,
+    pub permissions: serde_json::Value,
+    pub expires_at: Option<String>,
+    pub status: String,
+    pub nft_token_id: Option<String>,
+    pub manifest_hash: Option<String>,
+    pub can_decrypt_key: bool,
+    pub key_envelope_alg: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutgoingGrantInfo {
+    pub grant_id: String,
+    pub vault_object_id: String,
+    pub recipient_identity_id: String,
+    pub permissions: serde_json::Value,
+    pub expires_at: Option<String>,
+    pub status: String,
+    pub nft_token_id: Option<String>,
+    pub manifest_hash: Option<String>,
+}
+
+fn open_grant_file_key(
+    identity: &xrpl_vault_crypto_core::VaultedIdentityKeys,
+    grant: &GrantResponse,
+) -> Result<Vec<u8>> {
+    if grant.recipient_identity_id != identity.identity_id_hex() {
+        return Err(ClientError::Auth(
+            "Grant is not addressed to this Vaulted identity".into(),
+        ));
+    }
+
+    let envelope: KeyEnvelope = serde_json::from_value(grant.key_envelope.clone())
+        .map_err(|e| ClientError::Config(format!("Invalid grant key envelope: {e}")))?;
+    if envelope.recipient_identity_id != grant.recipient_identity_id {
+        return Err(ClientError::Auth(
+            "Grant key envelope recipient mismatch".into(),
+        ));
+    }
+
+    let aad = grant_envelope_aad(&grant.vault_object_id, &grant.recipient_identity_id);
+    open_key_envelope(
+        &envelope,
+        &identity.encryption_private_key(),
+        aad.as_bytes(),
+    )
+    .map_err(Into::into)
+}
+
+fn decrypt_filename_with_file_key(file_key: &[u8], encrypted_filename: &str) -> Result<String> {
+    let aes_key = xrpl_vault_crypto_core::AesKey::from_bytes(file_key)?;
+    let decrypted = aes_key
+        .decrypt_from_base64(encrypted_filename)
+        .map_err(ClientError::Crypto)?;
+    String::from_utf8(decrypted)
+        .map_err(|e| ClientError::Config(format!("Invalid filename UTF-8: {e}")))
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn list_outgoing_vaulted_grants(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<OutgoingGrantInfo>> {
+    let identity = state.get_vaulted_identity().await?;
+    let owner_identity_id = identity.identity_id_hex();
+    let oracle = state.get_oracle_client_with_timeout(120).await?;
+    let grants = oracle.outgoing_grants(&owner_identity_id).await?;
+
+    let mut result = Vec::with_capacity(grants.len());
+    for grant in grants {
+        let vault = oracle.get_vault_object(&grant.vault_object_id).await.ok();
+        result.push(OutgoingGrantInfo {
+            grant_id: grant.id,
+            vault_object_id: grant.vault_object_id,
+            recipient_identity_id: grant.recipient_identity_id,
+            permissions: grant.permissions,
+            expires_at: grant.expires_at,
+            status: grant.status,
+            nft_token_id: vault.as_ref().and_then(|v| v.nft_token_id.clone()),
+            manifest_hash: vault.map(|v| v.manifest_hash),
+        });
+    }
+    Ok(result)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn revoke_vaulted_grant(
+    state: State<'_, Arc<AppState>>,
+    grant_id: String,
+) -> Result<OutgoingGrantInfo> {
+    let identity = state.get_vaulted_identity().await?;
+    let owner_identity_id = identity.identity_id_hex();
+    let oracle = state.get_oracle_client_with_timeout(120).await?;
+    let grant = oracle.revoke_grant(&grant_id, &owner_identity_id).await?;
+    let vault = oracle.get_vault_object(&grant.vault_object_id).await.ok();
+    Ok(OutgoingGrantInfo {
+        grant_id: grant.id,
+        vault_object_id: grant.vault_object_id,
+        recipient_identity_id: grant.recipient_identity_id,
+        permissions: grant.permissions,
+        expires_at: grant.expires_at,
+        status: grant.status,
+        nft_token_id: vault.as_ref().and_then(|v| v.nft_token_id.clone()),
+        manifest_hash: vault.map(|v| v.manifest_hash),
+    })
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn list_incoming_vaulted_grants(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<IncomingGrantInfo>> {
+    let identity = state.get_vaulted_identity().await?;
+    let identity_id = identity.identity_id_hex();
+    let oracle = state.get_oracle_client_with_timeout(120).await?;
+    let grants = oracle.incoming_grants(&identity_id).await?;
+
+    let mut result = Vec::with_capacity(grants.len());
+    for grant in grants {
+        let can_decrypt_key = open_grant_file_key(&identity, &grant).is_ok();
+        let key_envelope_alg = grant
+            .key_envelope
+            .get("alg")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let vault = oracle.get_vault_object(&grant.vault_object_id).await.ok();
+        result.push(IncomingGrantInfo {
+            grant_id: grant.id,
+            vault_object_id: grant.vault_object_id,
+            recipient_identity_id: grant.recipient_identity_id,
+            permissions: grant.permissions,
+            expires_at: grant.expires_at,
+            status: grant.status,
+            nft_token_id: vault.as_ref().and_then(|v| v.nft_token_id.clone()),
+            manifest_hash: vault.map(|v| v.manifest_hash),
+            can_decrypt_key,
+            key_envelope_alg,
+        });
+    }
+    Ok(result)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn download_incoming_vaulted_grant(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    grant_id: String,
+    output_path: String,
+) -> Result<String> {
+    let identity = state.get_vaulted_identity().await?;
+    let identity_id = identity.identity_id_hex();
+    let oracle = state.get_oracle_client_with_timeout(120).await?;
+    let grants = oracle.incoming_grants(&identity_id).await?;
+    let grant = grants
+        .into_iter()
+        .find(|g| g.id == grant_id)
+        .ok_or_else(|| ClientError::Oracle(format!("Incoming grant not found: {grant_id}")))?;
+    let file_key = open_grant_file_key(&identity, &grant)?;
+    let access = oracle.grant_file_access(&grant_id, &identity_id).await?;
+
+    let mut progress = ProgressEvent::new(&grant_id, "grant-download");
+    progress.stage = "downloading".to_string();
+    progress.message = "Downloading encrypted grant data...".to_string();
+    progress.total_progress = 10;
+    progress.bytes_total = access.manifest.original_size;
+    progress.emit(&app);
+
+    let client = state.create_authed_client().await;
+    let mut fragments = access.fragment_urls;
+    fragments.sort_by_key(|f| f.index);
+    if fragments.is_empty() {
+        return Err(ClientError::Oracle(
+            "Grant has no downloadable fragments".into(),
+        ));
+    }
+
+    let mut encrypted_data = Vec::new();
+    for fragment in fragments {
+        let response = client.get(&fragment.url).send().await?;
+        if !response.status().is_success() {
+            return Err(ClientError::Oracle(format!(
+                "Failed to download grant fragment {}: {}",
+                fragment.index,
+                response.status()
+            )));
+        }
+        let bytes = response.bytes().await?;
+        encrypted_data.extend_from_slice(&bytes);
+        progress.bytes_processed = encrypted_data.len() as u64;
+        progress.emit(&app);
+    }
+
+    progress.stage = "decrypting".to_string();
+    progress.message = "Decrypting file key envelope and content...".to_string();
+    progress.total_progress = 75;
+    progress.emit(&app);
+
+    let aes_key = xrpl_vault_crypto_core::AesKey::from_bytes(&file_key)?;
+    let encrypted_fragment = xrpl_vault_crypto_core::EncryptedData::from_bytes(&encrypted_data)?;
+    let decrypted_data = aes_key.decrypt(&encrypted_fragment)?;
+
+    progress.stage = "saving".to_string();
+    progress.message = "Saving decrypted grant file...".to_string();
+    progress.total_progress = 95;
+    progress.emit(&app);
+
+    std::fs::write(&output_path, &decrypted_data)
+        .map_err(|e| ClientError::Config(format!("Failed to write grant file: {e}")))?;
+
+    progress.stage = "complete".to_string();
+    progress.message = "Grant download complete".to_string();
+    progress.progress = 100;
+    progress.total_progress = 100;
+    progress.bytes_processed = decrypted_data.len() as u64;
+    progress.emit(&app);
+
+    Ok(output_path)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn preview_incoming_vaulted_grant(
+    state: State<'_, Arc<AppState>>,
+    grant_id: String,
+) -> Result<serde_json::Value> {
+    let identity = state.get_vaulted_identity().await?;
+    let identity_id = identity.identity_id_hex();
+    let oracle = state.get_oracle_client_with_timeout(120).await?;
+    let grants = oracle.incoming_grants(&identity_id).await?;
+    let grant = grants
+        .into_iter()
+        .find(|g| g.id == grant_id)
+        .ok_or_else(|| ClientError::Oracle(format!("Incoming grant not found: {grant_id}")))?;
+    let file_key = open_grant_file_key(&identity, &grant)?;
+    let access = oracle.grant_file_access(&grant_id, &identity_id).await?;
+    let filename = decrypt_filename_with_file_key(&file_key, &access.manifest.encrypted_filename)
+        .unwrap_or_else(|_| format!("Grant #{}", &grant_id[..8.min(grant_id.len())]));
+    Ok(serde_json::json!({
+        "grantId": grant_id,
+        "vaultObjectId": grant.vault_object_id,
+        "nftTokenId": access.nft_token_id,
+        "filename": filename,
+        "size": access.manifest.original_size,
+        "mimeType": access.manifest.mime_type,
+        "fragmentsCount": access.fragment_urls.len(),
+    }))
+}
+
+/// Starts a recipient-bound file grant for an owned NFT.
+///
+/// This is the desktop UX helper for Priority 5 sharing: it resolves the
+/// vault_object_id from the NFT token, decrypts the local file key in memory,
+/// seals it to the recipient identity key, and requires TOFU/manual trust by
+/// default before opening the QR approval request.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn start_vaulted_file_grant_for_nft(
+    state: State<'_, Arc<AppState>>,
+    nft_token_id: String,
+    recipient_identity_id: String,
+    permissions: Option<Vec<String>>,
+    grant_expires_at: Option<String>,
+    human_summary: Option<String>,
+    require_trusted_recipient: Option<bool>,
+) -> Result<serde_json::Value> {
+    let identity = state.get_vaulted_identity().await?;
+    let oracle = OracleClient::new(OracleConfig {
+        base_url: state.config.oracle_url.clone(),
+        timeout_secs: 30,
+        ..Default::default()
+    })?;
+
+    let access = oracle.request_file_access(&nft_token_id).await?;
+    let keypair = state.get_keypair().await?;
+    let file_key_bytes = if access.is_re_encrypted {
+        let re_encrypted_data =
+            xrpl_vault_crypto_core::pre::ReEncryptedData::from_base64(&access.encrypted_aes_key)
+                .map_err(ClientError::Crypto)?;
+        state
+            .pre()
+            .decrypt_reencrypted_data(&keypair, &re_encrypted_data)?
+    } else {
+        let encrypted_pre_data =
+            xrpl_vault_crypto_core::EncryptedPreData::from_base64(&access.encrypted_aes_key)
+                .map_err(ClientError::Crypto)?;
+        state.pre().decrypt(&keypair, &encrypted_pre_data)?
+    };
+    let file_key_base64 =
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &file_key_bytes);
+
+    let vault_object = oracle.get_vault_object_by_nft(&nft_token_id).await?;
+    let resolved_permissions = permissions.unwrap_or_else(|| vec!["read".into()]);
+    let parsed_expires_at = match grant_expires_at {
+        Some(ts) if !ts.trim().is_empty() => Some(
+            chrono::DateTime::parse_from_rfc3339(&ts)
+                .map_err(|e| ClientError::Config(format!("Invalid grant expiration: {}", e)))?
+                .with_timezone(&chrono::Utc),
+        ),
+        _ => None,
+    };
+
+    let recipient_public_key = oracle
+        .get_vaulted_identity_public(&recipient_identity_id)
+        .await?
+        .encryption_public_key;
+    if require_trusted_recipient.unwrap_or(true) {
+        let fingerprint = encryption_public_key_fingerprint_hex(&recipient_public_key)?;
+        let trust = oracle
+            .recipient_key_trust_status(
+                &identity.identity_id_hex(),
+                &recipient_identity_id,
+                Some(&fingerprint),
+            )
+            .await?;
+        if !trust.trusted {
+            return Err(ClientError::InvalidData(format!(
+                "Recipient encryption key is not trusted. Verify fingerprint {} before granting access.",
+                format_fingerprint_groups(&fingerprint)
+            )));
+        }
+    }
+
+    let key_envelope = build_recipient_key_envelope(
+        &oracle,
+        &vault_object.id,
+        &recipient_identity_id,
+        &access.encrypted_aes_key,
+        Some(file_key_base64),
+        Some(recipient_public_key),
+    )
+    .await?;
+
+    let response = oracle
+        .start_qr_file_grant_approval(&QrFileGrantStartRequest {
+            identity_id: identity.identity_id_hex(),
+            vault_object_id: vault_object.id.clone(),
+            recipient_identity_id: recipient_identity_id.clone(),
+            key_envelope,
+            encrypted_file_key: None,
+            permissions: resolved_permissions,
+            grant_expires_at: parsed_expires_at,
+            requester_device_id: Some(state.device_fingerprint().to_string()),
+            requester_device_name: hostname::get()
+                .ok()
+                .map(|h| h.to_string_lossy().to_string()),
+            human_summary,
+        })
+        .await?;
+
+    Ok(serde_json::json!({
+        "grantRequestId": response.grant_request_id,
+        "grantId": response.grant_id,
+        "challenge": response.challenge,
+        "oracleUrl": response.oracle_url,
+        "expiresAt": response.expires_at,
+        "grantContextHash": response.grant_context_hash,
+        "vaultObjectId": vault_object.id,
+        "recipientIdentityId": recipient_identity_id,
+        "qrPayload": response.qr_payload,
+    }))
 }
 
 // ==================== Transfer Commands ====================
@@ -1215,9 +2817,12 @@ pub async fn generate_transfer_key(
     let oracle = state.get_oracle_client_with_timeout(120).await?;
 
     let recipient_info = oracle.get_user_public_key(&recipient_address).await?;
-    let recipient_public_key = xrpl_vault_crypto_core::pre::PrePublicKey::from_hex(&recipient_info.pre_public_key)?;
+    let recipient_public_key =
+        xrpl_vault_crypto_core::pre::PrePublicKey::from_hex(&recipient_info.pre_public_key)?;
 
-    let re_key = state.pre().generate_re_key(&sender_keypair, &recipient_public_key)?;
+    let re_key = state
+        .pre()
+        .generate_re_key(&sender_keypair, &recipient_public_key)?;
     let re_key_base64 = re_key.to_base64_verified(&sender_keypair);
 
     Ok(TransferKeyInfo {
@@ -1257,26 +2862,36 @@ pub async fn initiate_transfer(
 
     let oracle = state.get_oracle_client_with_timeout(120).await?;
 
-    let response = oracle.initiate_transfer(
-        &nft_token_id,
-        &session.wallet_address,
-        &to_address,
-        &transfer_key.re_encryption_key,
-    ).await?;
+    let response = oracle
+        .initiate_transfer(
+            &nft_token_id,
+            &session.wallet_address,
+            &to_address,
+            &transfer_key.re_encryption_key,
+        )
+        .await?;
 
-    let xaman_payload = match create_transfer_offer(
+    let signing_request = match create_transfer_offer(
         state.clone(),
         nft_token_id.clone(),
         to_address.clone(),
-    ).await {
-        Ok(p) => { tracing::info!("Created XamanPayload: uuid={}", p.uuid); Some(p) }
-        Err(e) => { tracing::error!("Failed to create offer: {}", e); None }
+    )
+    .await
+    {
+        Ok(p) => {
+            tracing::info!("Created Vaulted signing request: uuid={}", p.uuid);
+            Some(p)
+        },
+        Err(e) => {
+            tracing::error!("Failed to create offer: {}", e);
+            None
+        },
     };
 
     Ok(InitiateTransferResult {
         transfer_id: response.transfer_id,
         status: response.status,
-        xaman_payload,
+        signing_request,
     })
 }
 
@@ -1285,128 +2900,27 @@ pub async fn initiate_transfer(
 pub struct InitiateTransferResult {
     pub transfer_id: String,
     pub status: String,
-    pub xaman_payload: Option<crate::auth::xaman::XamanPayload>,
+    pub signing_request: Option<crate::auth::VaultedSigningRequest>,
 }
 
 #[tauri::command]
 pub async fn create_transfer_offer(
-    state: State<'_, Arc<AppState>>,
-    nft_token_id: String,
-    to_address: String,
-) -> Result<crate::auth::xaman::XamanPayload> {
-    let session = state.get_session().await?;
-
-    let tx_json = serde_json::json!({
-        "TransactionType": "NFTokenCreateOffer",
-        "Account": session.wallet_address,
-        "NFTokenID": nft_token_id,
-        "Amount": "0",
-        "Flags": 1,
-        "Destination": to_address
-    });
-
-    let api_key = std::env::var("XAMAN_API_KEY")
-        .map_err(|_| ClientError::Auth("XAMAN_API_KEY not set".into()))?;
-    let api_secret = String::new();
-
-    let xaman = crate::auth::xaman::XamanAuth::new(api_key, api_secret);
-    let payload = xaman.create_payload(serde_json::json!({"txjson": tx_json})).await?;
-
-    tracing::info!("Transfer offer payload created for NFT {} -> {}", nft_token_id, to_address);
-    Ok(payload)
+    _state: State<'_, Arc<AppState>>,
+    _nft_token_id: String,
+    _to_address: String,
+) -> Result<crate::auth::VaultedSigningRequest> {
+    Err(ClientError::Auth("Legacy external-wallet signing is disabled in Vaulted wallet mode; use Vaulted XRPL wallet QR signing/submission flows".to_string()))
 }
 
 #[tauri::command(rename_all = "camelCase")]
 pub async fn wait_for_transfer_offer(
-    state: State<'_, Arc<AppState>>,
-    payload_uuid: String,
-    websocket_url: String,
-    transfer_id: String,
-    nft_token_id: String,
+    _state: State<'_, Arc<AppState>>,
+    _payload_uuid: String,
+    _websocket_url: String,
+    _transfer_id: String,
+    _nft_token_id: String,
 ) -> Result<TransferOfferResult> {
-    let api_key = std::env::var("XAMAN_API_KEY")
-        .map_err(|_| ClientError::Auth("XAMAN_API_KEY not set".into()))?;
-    let api_secret = String::new();
-
-    let xaman = crate::auth::xaman::XamanAuth::new(api_key, api_secret);
-
-    let payload = crate::auth::xaman::XamanPayload {
-        uuid: payload_uuid,
-        qr_png: String::new(),
-        qr_uri: String::new(),
-        websocket_url,
-        expires_at: None,
-    };
-
-    let result = xaman.wait_for_signature(&payload, 300).await?;
-    tracing::info!("Xaman signature received, txid: {}", result.txid);
-
-    // Используем HTTP вместо WebSocket для получения offers
-    let http_url = state.config.xrpl_node_url
-        .replace("wss://", "https://")
-        .replace("ws://", "http://")
-        .replace(":51233", ":51234");
-
-    let http_client = state.create_authed_client().await;
-    let offers_response: serde_json::Value = http_client
-        .post(&http_url)
-        .json(&serde_json::json!({
-            "method": "nft_sell_offers",
-            "params": [{
-                "nft_id": nft_token_id
-            }]
-        }))
-        .send()
-        .await?
-        .json()
-        .await?;
-
-    let session = state.get_session().await?;
-
-    let offer_index = offers_response
-        .get("result")
-        .and_then(|r| r.get("offers"))
-        .and_then(|o| o.as_array())
-        .and_then(|arr| {
-            arr.iter().find_map(|o| {
-                let owner = o.get("owner")?.as_str()?;
-                if owner == session.wallet_address {
-                    o.get("nft_offer_index")?.as_str().map(|s| s.to_string())
-                } else {
-                    None
-                }
-            })
-        })
-        .ok_or_else(|| ClientError::Xrpl("Offer not found on XRPL".to_string()))?;
-
-    tracing::info!("Transfer offer signed: {}, offer_index: {}", transfer_id, offer_index);
-
-    // Уведомляем Oracle что offer подписан - статус NFT -> 'transferring'
-    let confirm_url = format!("{}/api/v1/transfers/confirm-signed", state.config.oracle_url);
-    match http_client.post(&confirm_url)
-        .json(&serde_json::json!({
-            "transfer_id": transfer_id,
-            "offer_index": offer_index
-        }))
-        .send()
-        .await
-    {
-        Ok(resp) if resp.status().is_success() => {
-            tracing::info!("Oracle notified: NFT status -> transferring");
-        }
-        Ok(resp) => {
-            tracing::warn!("confirm-signed failed: {}", resp.status());
-        }
-        Err(e) => {
-            tracing::warn!("confirm-signed request failed: {}", e);
-        }
-    }
-
-    Ok(TransferOfferResult {
-        transfer_id,
-        offer_index,
-        tx_hash: result.txid,
-    })
+    Err(ClientError::Auth("Legacy external-wallet signing is disabled in Vaulted wallet mode; use Vaulted XRPL wallet QR signing/submission flows".to_string()))
 }
 
 #[derive(Debug, Serialize)]
@@ -1438,27 +2952,10 @@ pub async fn complete_transfer(
 
 #[tauri::command]
 pub async fn claim_nft(
-    state: State<'_, Arc<AppState>>,
-    offer_index: String,
-) -> Result<crate::auth::xaman::XamanPayload> {
-    let session = state.get_session().await?;
-
-    let tx_json = serde_json::json!({
-        "TransactionType": "NFTokenAcceptOffer",
-        "Account": session.wallet_address,
-        "NFTokenSellOffer": offer_index
-    });
-
-    let api_key = std::env::var("XAMAN_API_KEY")
-        .map_err(|_| ClientError::Auth("XAMAN_API_KEY not set".into()))?;
-    let api_secret = String::new();
-
-    let xaman = crate::auth::xaman::XamanAuth::new(api_key, api_secret);
-    let payload_request = serde_json::json!({"txjson": tx_json});
-    let payload = xaman.create_payload(payload_request).await?;
-
-    tracing::info!("Claim NFT payload created: {}", payload.uuid);
-    Ok(payload)
+    _state: State<'_, Arc<AppState>>,
+    _offer_index: String,
+) -> Result<crate::auth::VaultedSigningRequest> {
+    Err(ClientError::Auth("Legacy external-wallet signing is disabled in Vaulted wallet mode; use Vaulted XRPL wallet QR signing/submission flows".to_string()))
 }
 
 #[derive(Debug, Serialize)]
@@ -1471,118 +2968,12 @@ pub struct ClaimResult {
 
 #[tauri::command(rename_all = "camelCase")]
 pub async fn wait_for_claim(
-    state: State<'_, Arc<AppState>>,
-    payload_uuid: String,
-    websocket_url: String,
-    offer_index: Option<String>,
+    _state: State<'_, Arc<AppState>>,
+    _payload_uuid: String,
+    _websocket_url: String,
+    _offer_index: Option<String>,
 ) -> Result<ClaimResult> {
-    let api_key = std::env::var("XAMAN_API_KEY")
-        .map_err(|_| ClientError::Auth("XAMAN_API_KEY not set".into()))?;
-    let api_secret = String::new();
-    let xaman = crate::auth::xaman::XamanAuth::new(api_key, api_secret);
-
-    let payload = crate::auth::xaman::XamanPayload {
-        uuid: payload_uuid,
-        qr_png: String::new(),
-        qr_uri: String::new(),
-        websocket_url,
-        expires_at: None,
-    };
-
-    let result = xaman.wait_for_signature(&payload, 300).await?;
-    tracing::info!("Claim signed: txid={}", result.txid);
-
-    // === POST-PROCESSING: non-fatal — claim already succeeded on XRPL ===
-    // Extract what we need before the timeout block
-    let txid_for_post = result.txid.clone();
-    let xrpl_url = state.config.xrpl_node_url
-        .replace("wss://", "https://")
-        .replace("ws://", "http://")
-        .replace(":51233", ":51234");
-    let oracle_url = state.config.oracle_url.clone();
-    let client1 = state.create_authed_client().await;
-    let client2 = state.create_authed_client().await;
-    let offer_clone = offer_index.clone();
-
-    let nft_token_id: Option<String> = match tokio::time::timeout(
-        std::time::Duration::from_secs(20),
-        async move {
-            // 1. Try to get NFT token ID from XRPL tx
-            let nft_id: Option<String> = match client1
-                .post(&xrpl_url)
-                .timeout(std::time::Duration::from_secs(10))
-                .json(&serde_json::json!({
-                    "method": "tx",
-                    "params": [{"transaction": &txid_for_post, "binary": false}]
-                }))
-                .send()
-                .await
-            {
-                Ok(resp) => {
-                    match resp.json::<serde_json::Value>().await {
-                        Ok(tx) => {
-                            tx.get("result")
-                                .and_then(|r| r.get("meta"))
-                                .and_then(|m| m.get("AffectedNodes"))
-                                .and_then(|nodes| nodes.as_array())
-                                .and_then(|arr| {
-                                    for node in arr {
-                                        if let Some(deleted) = node.get("DeletedNode") {
-                                            if deleted.get("LedgerEntryType").and_then(|t| t.as_str()) == Some("NFTokenOffer") {
-                                                return deleted.get("FinalFields")
-                                                    .and_then(|f| f.get("NFTokenID"))
-                                                    .and_then(|id| id.as_str())
-                                                    .map(|s| s.to_string());
-                                            }
-                                        }
-                                    }
-                                    None
-                                })
-                        }
-                        Err(e) => { tracing::warn!("Failed to parse XRPL tx response: {}", e); None }
-                    }
-                }
-                Err(e) => { tracing::warn!("Failed to fetch XRPL tx: {}", e); None }
-            };
-
-            // 2. Try to finalize transfer in Oracle (best-effort)
-            if let Some(ref offer_idx) = offer_clone {
-                tracing::info!("Looking for transfer by offer_index: {}", offer_idx);
-                let transfer_url = format!("{}/api/v1/transfers/by-offer/{}", oracle_url, offer_idx);
-                if let Ok(resp) = client2.get(&transfer_url).send().await {
-                    if let Ok(info) = resp.json::<serde_json::Value>().await {
-                        if let Some(tid) = info.get("transfer_id").and_then(|t| t.as_str()) {
-                            tracing::info!("Found transfer_id: {}", tid);
-                            let complete_url = format!("{}/api/v1/transfers/complete", oracle_url);
-                            let body = serde_json::json!({"transfer_id": tid, "xrpl_tx_hash": &txid_for_post});
-                            if let Ok(r) = client2.post(&complete_url).json(&body).send().await {
-                                if r.status().is_success() { tracing::info!("Transfer completed"); }
-                                else { tracing::warn!("complete_transfer failed: {}", r.status()); }
-                            }
-                        }
-                    }
-                }
-                // Fallback finalize
-                let finalize_url = format!("{}/api/v1/transfers/finalize-by-offer", oracle_url);
-                let body = serde_json::json!({"offerIndex": offer_idx, "xrplTxHash": &txid_for_post});
-                let _ = client2.post(&finalize_url).json(&body).send().await;
-            }
-
-            nft_id
-        }
-    ).await {
-        Ok(id) => id,
-        Err(_) => {
-            tracing::warn!("Post-processing timed out after 20s (non-fatal, claim already on XRPL)");
-            None
-        }
-    };
-
-    Ok(ClaimResult {
-        success: true,
-        tx_hash: result.txid,
-        nft_token_id,
-    })
+    Err(ClientError::Auth("Legacy external-wallet signing is disabled in Vaulted wallet mode; use Vaulted XRPL wallet QR signing/submission flows".to_string()))
 }
 // ==================== Incoming Offers ====================
 
@@ -1599,7 +2990,9 @@ pub struct IncomingOffer {
 pub async fn get_incoming_offers(state: State<'_, Arc<AppState>>) -> Result<Vec<IncomingOffer>> {
     let session = state.get_session().await?;
 
-    let http_url = state.config.xrpl_node_url
+    let http_url = state
+        .config
+        .xrpl_node_url
         .replace("wss://", "https://")
         .replace("ws://", "http://")
         .replace(":51233", ":51234");
@@ -1607,19 +3000,17 @@ pub async fn get_incoming_offers(state: State<'_, Arc<AppState>>) -> Result<Vec<
     let client = state.create_authed_client().await;
 
     // Запрашиваем у Oracle pending transfers где мы получатель
-    let oracle_url = format!("{}/api/v1/transfers/incoming/{}",
-                             state.config.oracle_url,
-                             session.wallet_address
+    let oracle_url = format!(
+        "{}/api/v1/transfers/incoming/{}",
+        state.config.oracle_url, session.wallet_address
     );
 
     let incoming: Vec<IncomingOffer> = match client.get(&oracle_url).send().await {
-        Ok(resp) if resp.status().is_success() => {
-            resp.json().await.unwrap_or_default()
-        }
+        Ok(resp) if resp.status().is_success() => resp.json().await.unwrap_or_default(),
         _ => {
             tracing::warn!("Oracle incoming endpoint not available, using fallback");
             vec![]
-        }
+        },
     };
 
     // Verify each offer still exists on XRPL — filter out already-claimed ones
@@ -1642,20 +3033,25 @@ pub async fn get_incoming_offers(state: State<'_, Arc<AppState>>) -> Result<Vec<
                 // Can't verify — keep the offer to be safe
                 valid_offers.push(offer.clone());
                 continue;
-            }
+            },
         };
 
-        let exists = check.get("result")
-            .and_then(|r| r.get("node"))
-            .is_some();
+        let exists = check.get("result").and_then(|r| r.get("node")).is_some();
 
         if exists {
             valid_offers.push(offer.clone());
         } else {
             // Offer no longer exists on XRPL — auto-finalize in Oracle
-            tracing::info!("Offer {} no longer exists on XRPL, auto-finalizing", offer.offer_index);
-            let finalize_url = format!("{}/api/v1/transfers/finalize-by-offer", state.config.oracle_url);
-            let _ = client.post(&finalize_url)
+            tracing::info!(
+                "Offer {} no longer exists on XRPL, auto-finalizing",
+                offer.offer_index
+            );
+            let finalize_url = format!(
+                "{}/api/v1/transfers/finalize-by-offer",
+                state.config.oracle_url
+            );
+            let _ = client
+                .post(&finalize_url)
                 .json(&serde_json::json!({
                     "offerIndex": offer.offer_index,
                     "xrplTxHash": "auto-finalized-stale-offer"
@@ -1665,8 +3061,12 @@ pub async fn get_incoming_offers(state: State<'_, Arc<AppState>>) -> Result<Vec<
         }
     }
 
-    tracing::info!("Found {} incoming offers for {} ({} verified on XRPL)",
-        incoming.len(), session.wallet_address, valid_offers.len());
+    tracing::info!(
+        "Found {} incoming offers for {} ({} verified on XRPL)",
+        incoming.len(),
+        session.wallet_address,
+        valid_offers.len()
+    );
     Ok(valid_offers)
 }
 
@@ -1689,9 +3089,9 @@ pub async fn get_outgoing_offers(state: State<'_, Arc<AppState>>) -> Result<Vec<
     let client = state.create_authed_client().await;
 
     // Запрашиваем историю трансферов у Oracle
-    let oracle_url = format!("{}/api/v1/transfers/history/{}",
-                             state.config.oracle_url,
-                             session.wallet_address
+    let oracle_url = format!(
+        "{}/api/v1/transfers/history/{}",
+        state.config.oracle_url, session.wallet_address
     );
 
     #[derive(Debug, Deserialize)]
@@ -1716,25 +3116,35 @@ pub async fn get_outgoing_offers(state: State<'_, Arc<AppState>>) -> Result<Vec<
     let outgoing: Vec<OutgoingOffer> = match client.get(&oracle_url).send().await {
         Ok(resp) if resp.status().is_success() => {
             if let Ok(history) = resp.json::<TransferHistory>().await {
-                history.sent.into_iter().map(|t| OutgoingOffer {
-                    offer_index: t.offer_index.unwrap_or_default(),
-                    nft_token_id: t.nft_token_id,
-                    to_address: t.to_address,
-                    filename: t.encrypted_filename.unwrap_or_else(|| "Unknown".to_string()),
-                    status: t.status,
-                    created_at: t.created_at,
-                }).collect()
+                history
+                    .sent
+                    .into_iter()
+                    .map(|t| OutgoingOffer {
+                        offer_index: t.offer_index.unwrap_or_default(),
+                        nft_token_id: t.nft_token_id,
+                        to_address: t.to_address,
+                        filename: t
+                            .encrypted_filename
+                            .unwrap_or_else(|| "Unknown".to_string()),
+                        status: t.status,
+                        created_at: t.created_at,
+                    })
+                    .collect()
             } else {
                 vec![]
             }
-        }
+        },
         _ => {
             tracing::warn!("Oracle history endpoint not available");
             vec![]
-        }
+        },
     };
 
-    tracing::info!("Found {} outgoing offers for {}", outgoing.len(), session.wallet_address);
+    tracing::info!(
+        "Found {} outgoing offers for {}",
+        outgoing.len(),
+        session.wallet_address
+    );
     Ok(outgoing)
 }
 
@@ -1766,8 +3176,7 @@ pub async fn get_transfer_history(state: State<'_, Arc<AppState>>) -> Result<Tra
     let client = state.create_authed_client().await;
     let oracle_url = format!(
         "{}/api/v1/transfers/history/{}",
-        state.config.oracle_url,
-        session.wallet_address
+        state.config.oracle_url, session.wallet_address
     );
 
     let history: TransferHistory = client
@@ -1776,7 +3185,10 @@ pub async fn get_transfer_history(state: State<'_, Arc<AppState>>) -> Result<Tra
         .await?
         .json()
         .await
-        .unwrap_or(TransferHistory { sent: vec![], received: vec![] });
+        .unwrap_or(TransferHistory {
+            sent: vec![],
+            received: vec![],
+        });
 
     tracing::info!(
         "Transfer history: {} sent, {} received",
@@ -1807,8 +3219,7 @@ pub async fn cancel_transfer(
     let client = state.create_authed_client().await;
     let oracle_url = format!(
         "{}/api/v1/transfers/{}/cancel",
-        state.config.oracle_url,
-        transfer_id
+        state.config.oracle_url, transfer_id
     );
 
     let response = client
@@ -1829,11 +3240,7 @@ pub async fn cancel_transfer(
 
     let result: CancelTransferResponse = response.json().await?;
 
-    tracing::info!(
-        "Transfer {} cancelled: {}",
-        transfer_id,
-        result.message
-    );
+    tracing::info!("Transfer {} cancelled: {}", transfer_id, result.message);
 
     Ok(result)
 }
@@ -1858,8 +3265,7 @@ pub async fn delete_vault(
     let client = state.create_authed_client().await;
     let oracle_url = format!(
         "{}/api/v1/vault/{}/delete",
-        state.config.oracle_url,
-        nft_token_id
+        state.config.oracle_url, nft_token_id
     );
 
     let response = client
@@ -1901,95 +3307,20 @@ pub struct BurnNftResult {
 
 #[tauri::command(rename_all = "camelCase")]
 pub async fn burn_nft(
-    state: State<'_, Arc<AppState>>,
-    nft_token_id: String,
-) -> Result<crate::auth::xaman::XamanPayload> {
-    let session = state.get_session().await?;
-
-    // Создаём транзакцию NFTokenBurn
-    let tx_json = serde_json::json!({
-        "TransactionType": "NFTokenBurn",
-        "Account": session.wallet_address,
-        "NFTokenID": nft_token_id
-    });
-
-    let api_key = std::env::var("XAMAN_API_KEY")
-        .map_err(|_| ClientError::Auth("XAMAN_API_KEY not set".into()))?;
-    let api_secret = String::new();
-
-    let xaman = crate::auth::xaman::XamanAuth::new(api_key, api_secret);
-    let payload = xaman.create_payload(serde_json::json!({"txjson": tx_json})).await?;
-
-    tracing::info!("Burn NFT payload created for {}", nft_token_id);
-    Ok(payload)
+    _state: State<'_, Arc<AppState>>,
+    _nft_token_id: String,
+) -> Result<crate::auth::VaultedSigningRequest> {
+    Err(ClientError::Auth("Legacy external-wallet signing is disabled in Vaulted wallet mode; use Vaulted XRPL wallet QR signing/submission flows".to_string()))
 }
 
 #[tauri::command(rename_all = "camelCase")]
 pub async fn wait_for_burn(
-    state: State<'_, Arc<AppState>>,
-    payload_uuid: String,
-    websocket_url: String,
-    nft_token_id: String,
+    _state: State<'_, Arc<AppState>>,
+    _payload_uuid: String,
+    _websocket_url: String,
+    _nft_token_id: String,
 ) -> Result<BurnNftResult> {
-    let api_key = std::env::var("XAMAN_API_KEY")
-        .map_err(|_| ClientError::Auth("XAMAN_API_KEY not set".into()))?;
-    let api_secret = String::new();
-
-    let xaman = crate::auth::xaman::XamanAuth::new(api_key, api_secret);
-
-    // Создаём payload структуру для wait_for_signature
-    let payload = crate::auth::xaman::XamanPayload {
-        uuid: payload_uuid,
-        qr_png: String::new(),
-        qr_uri: String::new(),
-        websocket_url: websocket_url,
-        expires_at: None,
-    };
-
-    // Ждём подпись
-    let sign_result = xaman.wait_for_signature(&payload, 300).await?;
-
-    if sign_result.txid.is_empty() {
-        return Err(ClientError::Auth("Burn transaction was rejected".into()));
-    }
-
-    tracing::info!("NFT {} burned, tx: {}", nft_token_id, sign_result.txid);
-
-    // Удаляем данные из Oracle
-    let session = state.get_session().await?;
-    let client = state.create_authed_client().await;
-    let oracle_url = format!(
-        "{}/api/v1/vault/{}/delete",
-        state.config.oracle_url,
-        nft_token_id
-    );
-
-    let response = client
-        .post(&oracle_url)
-        .json(&serde_json::json!({
-            "wallet_address": session.wallet_address
-        }))
-        .send()
-        .await;
-
-    // Не критично если Oracle delete не сработал - NFT уже сожжён
-    match response {
-        Ok(resp) if resp.status().is_success() => {
-            tracing::info!("Oracle data deleted for NFT {}", nft_token_id);
-        }
-        Ok(resp) => {
-            tracing::warn!("Oracle delete returned {}: NFT burned but data may remain", resp.status());
-        }
-        Err(e) => {
-            tracing::warn!("Oracle delete failed: {}. NFT burned but data may remain", e);
-        }
-    }
-
-    Ok(BurnNftResult {
-        success: true,
-        tx_hash: sign_result.txid,
-        message: "NFT burned successfully".to_string(),
-    })
+    Err(ClientError::Auth("Legacy external-wallet signing is disabled in Vaulted wallet mode; use Vaulted XRPL wallet QR signing/submission flows".to_string()))
 }
 
 // ==================== Secure Notes ====================
@@ -2012,7 +3343,7 @@ pub struct SecureNoteResult {
     pub vault_id: String,
     pub nft_token_id: String,
     pub offer_index: String,
-    pub xaman_link: String,
+    pub signing_request_uri: String,
     pub title: String,
     pub size: u64,
 }
@@ -2044,7 +3375,9 @@ pub async fn encrypt_secure_note(
 
     tracing::info!(
         "Creating secure note '{}' ({} bytes, type: {})",
-        title, content_size, note_type
+        title,
+        content_size,
+        note_type
     );
 
     // Progress
@@ -2072,7 +3405,7 @@ pub async fn encrypt_secure_note(
         &content_bytes,
         &format!("{}.secure", title),
         mime_type,
-        &public_key
+        &public_key,
     )?;
 
     // 🔒 ВАЖНО: Очищаем plaintext из памяти
@@ -2137,11 +3470,12 @@ pub async fn encrypt_secure_note(
 
     let upload_url = format!(
         "{}/api/v1/files/upload?nft_token_id={}",
-        state.config.oracle_url,
-        vault_response.nft_token_id
+        state.config.oracle_url, vault_response.nft_token_id
     );
 
-    let response = state.create_authed_client().await
+    let response = state
+        .create_authed_client()
+        .await
         .post(&upload_url)
         .header("Content-Type", "application/octet-stream")
         .body(encrypted_bytes)
@@ -2162,13 +3496,13 @@ pub async fn encrypt_secure_note(
     progress.message = "Secure note saved!".to_string();
     progress.emit(&app);
 
-    tracing::info!("Secure note '{}' saved successfully", title);
+    tracing::info!("Secure note saved successfully");
 
     Ok(SecureNoteResult {
         vault_id: vault_response.vault_id,
         nft_token_id: vault_response.nft_token_id,
         offer_index: vault_response.offer_index,
-        xaman_link: vault_response.xaman_link,
+        signing_request_uri: vault_response.signing_request_uri,
         title,
         size: content_size,
     })
@@ -2183,7 +3517,7 @@ pub async fn decrypt_secure_note(
 ) -> Result<SecureNoteContent> {
     let _session = state.get_session().await?;
 
-    tracing::info!("Decrypting secure note: {}", nft_token_id);
+    tracing::info!("Decrypting secure note payload");
 
     // Получаем метаданные
     let client = state.create_authed_client().await;
@@ -2192,20 +3526,13 @@ pub async fn decrypt_secure_note(
         state.config.oracle_url, nft_token_id
     );
 
-    let file_info: serde_json::Value = client
-        .get(&oracle_url)
-        .send()
-        .await?
-        .json()
-        .await?;
+    let file_info: serde_json::Value = client.get(&oracle_url).send().await?.json().await?;
 
     let encrypted_aes_key = file_info["encrypted_aes_key"]
         .as_str()
         .ok_or_else(|| ClientError::Oracle("Missing encrypted_aes_key".into()))?;
 
-    let is_re_encrypted = file_info["is_re_encrypted"]
-        .as_bool()
-        .unwrap_or(false);
+    let is_re_encrypted = file_info["is_re_encrypted"].as_bool().unwrap_or(false);
 
     let mime_type = file_info["manifest"]["mime_type"]
         .as_str()
@@ -2225,13 +3552,16 @@ pub async fn decrypt_secure_note(
         let error_body = response.text().await.unwrap_or_default();
         tracing::error!(
             "Failed to download note {}: {} - {}",
-            nft_token_id, status, error_body
+            nft_token_id,
+            status,
+            error_body
         );
         return Err(ClientError::Oracle(format!(
             "Failed to download note ({}): {}",
             status,
             if error_body.contains("missing from all storage nodes") {
-                "Encrypted data is missing from storage. The note may need to be re-created.".to_string()
+                "Encrypted data is missing from storage. The note may need to be re-created."
+                    .to_string()
             } else {
                 error_body
             }
@@ -2244,14 +3574,18 @@ pub async fn decrypt_secure_note(
     let keypair = state.get_keypair().await?;
 
     let aes_key_bytes = if is_re_encrypted {
-        tracing::info!("Decrypting re-encrypted AES key");
-        let re_encrypted_data = xrpl_vault_crypto_core::pre::ReEncryptedData::from_base64(encrypted_aes_key)
-            .map_err(|e| ClientError::Crypto(e))?;
-        state.pre().decrypt_reencrypted_data(&keypair, &re_encrypted_data)?
+        tracing::info!("Unwrapping transferred secure-note content key");
+        let re_encrypted_data =
+            xrpl_vault_crypto_core::pre::ReEncryptedData::from_base64(encrypted_aes_key)
+                .map_err(|e| ClientError::Crypto(e))?;
+        state
+            .pre()
+            .decrypt_reencrypted_data(&keypair, &re_encrypted_data)?
     } else {
-        tracing::info!("Decrypting original AES key");
-        let encrypted_pre_data = xrpl_vault_crypto_core::EncryptedPreData::from_base64(encrypted_aes_key)
-            .map_err(|e| ClientError::Crypto(e))?;
+        tracing::info!("Unwrapping owner content key");
+        let encrypted_pre_data =
+            xrpl_vault_crypto_core::EncryptedPreData::from_base64(encrypted_aes_key)
+                .map_err(|e| ClientError::Crypto(e))?;
         state.pre().decrypt(&keypair, &encrypted_pre_data)?
     };
 
@@ -2270,9 +3604,10 @@ pub async fn decrypt_secure_note(
         "application/x-seed-phrase" => "seed",
         "application/x-api-key" => "key",
         _ => "note",
-    }.to_string();
+    }
+    .to_string();
 
-    tracing::info!("Secure note decrypted: {} bytes", content.len());
+    tracing::info!("Secure note payload decrypted");
 
     Ok(SecureNoteContent {
         nft_token_id,
@@ -2294,9 +3629,7 @@ pub struct SecureNoteContent {
 
 /// Получить список secure notes пользователя
 #[tauri::command]
-pub async fn list_secure_notes(
-    state: State<'_, Arc<AppState>>,
-) -> Result<Vec<SecureNote>> {
+pub async fn list_secure_notes(state: State<'_, Arc<AppState>>) -> Result<Vec<SecureNote>> {
     let _session = state.get_session().await?;
 
     // Получаем все файлы и фильтруем по MIME type
@@ -2304,10 +3637,7 @@ pub async fn list_secure_notes(
 
     let secure_notes: Vec<SecureNote> = files
         .into_iter()
-        .filter(|f| {
-            f.mime_type.starts_with("application/x-") ||
-                f.mime_type == "text/plain"
-        })
+        .filter(|f| f.mime_type.starts_with("application/x-") || f.mime_type == "text/plain")
         .filter(|f| f.filename.ends_with(".secure"))
         .map(|f| {
             let note_type = match f.mime_type.as_str() {
@@ -2315,9 +3645,11 @@ pub async fn list_secure_notes(
                 "application/x-seed-phrase" => "seed",
                 "application/x-api-key" => "key",
                 _ => "note",
-            }.to_string();
+            }
+            .to_string();
 
-            let title = f.filename
+            let title = f
+                .filename
                 .strip_suffix(".secure")
                 .unwrap_or(&f.filename)
                 .to_string();
@@ -2354,7 +3686,11 @@ pub async fn check_claim_status(
     nft_token_id: String,
     offer_index: String,
 ) -> Result<ClaimStatus> {
-    tracing::info!("Checking claim status for NFT: {}, offer: {}", nft_token_id, offer_index);
+    tracing::info!(
+        "Checking claim status for NFT: {}, offer: {}",
+        nft_token_id,
+        offer_index
+    );
 
     let _session = state.get_session().await?;
 
@@ -2363,16 +3699,19 @@ pub async fn check_claim_status(
         state.config.oracle_url, nft_token_id, offer_index
     );
 
-    let response = state.create_authed_client().await
-        .get(&url)
-        .send()
-        .await?;
+    let response = state.create_authed_client().await.get(&url).send().await?;
 
     if response.status().is_success() {
-        let status: ClaimStatus = response.json().await
+        let status: ClaimStatus = response
+            .json()
+            .await
             .map_err(|e| ClientError::Oracle(format!("Failed to parse claim status: {}", e)))?;
 
-        tracing::info!("Claim status: claimed={}, expired={}", status.claimed, status.expired);
+        tracing::info!(
+            "Claim status: claimed={}, expired={}",
+            status.claimed,
+            status.expired
+        );
         Ok(status)
     } else {
         tracing::warn!("Oracle claim-status endpoint error, assuming not claimed");
@@ -2392,13 +3731,19 @@ pub async fn cancel_secure_note_offer(
     nft_token_id: String,
     offer_index: String,
 ) -> Result<()> {
-    tracing::info!("Cancelling secure note offer: NFT={}, offer={}", nft_token_id, offer_index);
+    tracing::info!(
+        "Cancelling secure note offer: NFT={}, offer={}",
+        nft_token_id,
+        offer_index
+    );
 
     let _session = state.get_session().await?;
 
     let url = format!("{}/api/v1/vault/cancel-offer", state.config.oracle_url);
 
-    let response = state.create_authed_client().await
+    let response = state
+        .create_authed_client()
+        .await
         .post(&url)
         .json(&serde_json::json!({
             "nft_token_id": nft_token_id,
@@ -2413,7 +3758,10 @@ pub async fn cancel_secure_note_offer(
     } else {
         let error_text = response.text().await.unwrap_or_default();
         tracing::error!("Failed to cancel offer: {}", error_text);
-        Err(ClientError::Oracle(format!("Failed to cancel offer: {}", error_text)))
+        Err(ClientError::Oracle(format!(
+            "Failed to cancel offer: {}",
+            error_text
+        )))
     }
 }
 
@@ -2435,7 +3783,8 @@ pub struct OracleAuthStatus {
 }
 
 /// Track if Oracle was ever authenticated (for session expiry detection)
-static WAS_EVER_ORACLE_AUTHED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static WAS_EVER_ORACLE_AUTHED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// Reset the "was ever authenticated" flag (called on logout)
 pub fn reset_oracle_auth_flag() {
@@ -2443,7 +3792,10 @@ pub fn reset_oracle_auth_flag() {
 }
 
 #[tauri::command]
-pub async fn get_oracle_auth_status(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<OracleAuthStatus> {
+pub async fn get_oracle_auth_status(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<OracleAuthStatus> {
     let has_token = state.has_oracle_token().await;
     tracing::info!("[AUTH_CHECK] has_oracle_token={}", has_token);
 
@@ -2462,10 +3814,13 @@ pub async fn get_oracle_auth_status(app: AppHandle, state: State<'_, Arc<AppStat
                     });
                 }
                 tracing::warn!("[AUTH_CHECK] get_me failed, falling through to refresh");
-            }
+            },
             Err(e) => {
-                tracing::warn!("[AUTH_CHECK] get_oracle_client failed: {}, falling through to refresh", e);
-            }
+                tracing::warn!(
+                    "[AUTH_CHECK] get_oracle_client failed: {}, falling through to refresh",
+                    e
+                );
+            },
         }
     }
 
@@ -2485,13 +3840,19 @@ pub async fn get_oracle_auth_status(app: AppHandle, state: State<'_, Arc<AppStat
                     });
                 }
             }
-            Ok(OracleAuthStatus { authenticated: true, wallet_address: None, expires_at: None })
-        }
+            Ok(OracleAuthStatus {
+                authenticated: true,
+                wallet_address: None,
+                expires_at: None,
+            })
+        },
         _ => {
             tracing::warn!("[AUTH_CHECK] → authenticated=false (no token, refresh failed)");
             // If was ever authenticated → session expired → force logout
             if WAS_EVER_ORACLE_AUTHED.load(std::sync::atomic::Ordering::Relaxed) {
-                tracing::warn!("[AUTH_CHECK] SESSION EXPIRED — forcing full logout and page reload");
+                tracing::warn!(
+                    "[AUTH_CHECK] SESSION EXPIRED — forcing full logout and page reload"
+                );
                 WAS_EVER_ORACLE_AUTHED.store(false, std::sync::atomic::Ordering::Relaxed);
 
                 // Clear ALL session state on Rust side
@@ -2502,61 +3863,26 @@ pub async fn get_oracle_auth_status(app: AppHandle, state: State<'_, Arc<AppStat
                     let _ = window.eval("window.location.reload();");
                 }
             }
-            Ok(OracleAuthStatus { authenticated: false, wallet_address: None, expires_at: None })
-        }
+            Ok(OracleAuthStatus {
+                authenticated: false,
+                wallet_address: None,
+                expires_at: None,
+            })
+        },
     }
 }
 
-/// Start Oracle login - returns Xaman payload for signing
+/// Start Oracle login through Vaulted QR login
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OracleLoginPayload {
     pub challenge: String,
-    pub xaman_payload: crate::auth::xaman::XamanPayload,
+    pub signing_request: crate::auth::VaultedSigningRequest,
 }
 
 #[tauri::command]
-pub async fn oracle_login_start(
-    state: State<'_, Arc<AppState>>,
-) -> Result<OracleLoginPayload> {
-    let session = state.get_session().await?;
-    let wallet_address = &session.wallet_address;
-
-    // Get challenge from Oracle
-    let oracle = OracleClient::new(OracleConfig {
-        base_url: state.config.oracle_url.clone(),
-        timeout_secs: 30,
-        ..Default::default()
-    })?;
-
-    let challenge_response = oracle.get_auth_challenge(wallet_address).await?;
-    let challenge = challenge_response.challenge;
-
-    // Create Xaman SignIn payload
-    let api_key = std::env::var("XAMAN_API_KEY")
-        .map_err(|_| ClientError::Auth("XAMAN_API_KEY not set".into()))?;
-    let api_secret = String::new();
-
-    let xaman = crate::auth::xaman::XamanAuth::new(api_key, api_secret);
-
-    // SignIn request with custom instruction
-    let payload_request = serde_json::json!({
-        "txjson": {
-            "TransactionType": "SignIn"
-        },
-        "options": {
-            "instruction": format!("Sign to authenticate: {}", challenge)
-        }
-    });
-
-    let payload = xaman.create_payload(payload_request).await?;
-
-    tracing::info!("Oracle login started for {}, challenge: {}", wallet_address, challenge);
-
-    Ok(OracleLoginPayload {
-        challenge,
-        xaman_payload: payload,
-    })
+pub async fn oracle_login_start(_state: State<'_, Arc<AppState>>) -> Result<OracleLoginPayload> {
+    Err(ClientError::Auth("Legacy external-wallet signing is disabled in Vaulted wallet mode; use Vaulted XRPL wallet QR signing/submission flows".to_string()))
 }
 
 /// Complete Oracle login - exchange signature for JWT
@@ -2582,22 +3908,26 @@ pub async fn oracle_login_complete(
         ..Default::default()
     })?;
 
-    let token_response = oracle.get_auth_token(&crate::oracle::api::AuthTokenRequest {
-        wallet_address: session.wallet_address.clone(),
-        public_key: login_data.public_key,
-        signature: login_data.signature,
-        challenge: login_data.challenge,
-        device_fingerprint: Some(state.device_fingerprint().to_string()),
-    }).await?;
+    let token_response = oracle
+        .get_auth_token(&crate::oracle::api::AuthTokenRequest {
+            wallet_address: session.wallet_address.clone(),
+            public_key: login_data.public_key,
+            signature: login_data.signature,
+            challenge: login_data.challenge,
+            device_fingerprint: Some(state.device_fingerprint().to_string()),
+        })
+        .await?;
 
     // Save all tokens
     let expires_in = token_response.expires_in;
-    state.save_oracle_tokens(
-        token_response.access_token,
-        expires_in,
-        token_response.refresh_token,
-        token_response.role,
-    ).await?;
+    state
+        .save_oracle_tokens(
+            token_response.access_token,
+            expires_in,
+            token_response.refresh_token,
+            token_response.role,
+        )
+        .await?;
 
     tracing::info!(
         "Oracle login successful for {} (expires in {}s)",
@@ -2608,74 +3938,18 @@ pub async fn oracle_login_complete(
     Ok(true)
 }
 
-/// Wait for Xaman SignIn and complete Oracle login
+/// Legacy external-wallet login wait is disabled
 #[tauri::command]
 pub async fn oracle_login_wait(
-    state: State<'_, Arc<AppState>>,
-    payload_uuid: String,
-    websocket_url: String,
-    qr_png: String,
-    challenge: String,
+    _state: State<'_, Arc<AppState>>,
+    _payload_uuid: String,
+    _websocket_url: String,
+    _qr_png: String,
+    _challenge: String,
 ) -> Result<bool> {
-    let session = state.get_session().await?;
-
-    // Wait for Xaman signature
-    let api_key = std::env::var("XAMAN_API_KEY")
-        .map_err(|_| ClientError::Auth("XAMAN_API_KEY not set".into()))?;
-    let api_secret = String::new();
-
-    let xaman = crate::auth::xaman::XamanAuth::new(api_key, api_secret);
-
-    // Create XamanPayload from parameters
-    let payload = crate::auth::xaman::XamanPayload {
-        uuid: payload_uuid,
-        qr_png,
-        qr_uri: String::new(),
-        websocket_url,
-        expires_at: None,
-    };
-
-    // This will wait for the user to sign
-    let sign_result = xaman.wait_for_signature(&payload, 300).await?;
-
-    let public_key = sign_result.public_key
-        .ok_or_else(|| ClientError::Auth("No public key in Xaman response".into()))?;
-    let signature = sign_result.txn_signature
-        .ok_or_else(|| ClientError::Auth("No signature in Xaman response".into()))?;
-
-    // Exchange for JWT
-    let oracle = OracleClient::new(OracleConfig {
-        base_url: state.config.oracle_url.clone(),
-        timeout_secs: 30,
-        ..Default::default()
-    })?;
-
-    let token_response = oracle.get_auth_token(&crate::oracle::api::AuthTokenRequest {
-        wallet_address: session.wallet_address.clone(),
-        public_key,
-        signature,
-        challenge,
-        device_fingerprint: Some(state.device_fingerprint().to_string()),
-    }).await?;
-
-    // Save all tokens (access + refresh + device fingerprint + role)
-    let expires_in = token_response.expires_in;
-    let has_refresh = token_response.refresh_token.is_some();
-    state.save_oracle_tokens(
-        token_response.access_token,
-        token_response.expires_in,
-        token_response.refresh_token,
-        token_response.role,
-    ).await?;
-
-    tracing::info!(
-        "Oracle login successful for {} (expires in {}s, has refresh: {})",
-        session.wallet_address,
-        expires_in,
-        has_refresh
-    );
-
-    Ok(true)
+    Err(ClientError::Auth(
+        "Legacy external-wallet auth is disabled in Vaulted wallet mode; use Vaulted QR login or Vaulted XRPL wallet signing".to_string(),
+    ))
 }
 #[tauri::command]
 pub async fn oracle_logout(state: State<'_, Arc<AppState>>) -> Result<bool> {
@@ -2723,7 +3997,9 @@ pub struct OracleAuthStatusExtended {
 }
 
 #[tauri::command]
-pub async fn get_oracle_auth_status_extended(state: State<'_, Arc<AppState>>) -> Result<OracleAuthStatusExtended> {
+pub async fn get_oracle_auth_status_extended(
+    state: State<'_, Arc<AppState>>,
+) -> Result<OracleAuthStatusExtended> {
     let dfp = state.device_fingerprint().to_string();
 
     if let Ok(session) = state.get_session().await {

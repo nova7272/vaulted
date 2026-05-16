@@ -4,18 +4,18 @@
 
 use crate::error::{ApiError, Result};
 use serde::Serialize;
-use tracing::{info, warn, debug};
 use std::time::Duration;
+use tracing::{debug, info, warn};
 
 use xrpl_mithril::client::JsonRpcClient;
 use xrpl_mithril::models::transactions::{
-    Transaction, TransactionCommon,
-    nft::{NFTokenMint, NFTokenCreateOffer, NFTokenCancelOffer, NFTokenBurn},
+    nft::{NFTokenBurn, NFTokenCancelOffer, NFTokenCreateOffer, NFTokenMint},
     wrapper::UnsignedTransaction,
+    Transaction, TransactionCommon,
 };
 use xrpl_mithril::tx::autofill::autofill;
 use xrpl_mithril::tx::sign_transaction;
-use xrpl_mithril::types::{AccountId, Amount, Blob, XrpAmount, Hash256};
+use xrpl_mithril::types::{AccountId, Amount, Blob, Hash256, XrpAmount};
 use xrpl_mithril::wallet::Wallet;
 
 /// Конфигурация XRPL
@@ -53,6 +53,15 @@ pub struct OfferResult {
     pub tx_hash: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct LocalMintVerification {
+    pub tx_hash: String,
+    pub nft_token_id: String,
+    pub owner: String,
+    pub uri: String,
+    pub validated: bool,
+}
+
 /// XRPL сервис
 pub struct XrplService {
     config: XrplConfig,
@@ -81,10 +90,14 @@ impl XrplService {
     pub fn with_wallet(config: XrplConfig) -> Result<Self> {
         let wallet = if let Some(ref seed) = config.wallet_seed {
             let w = if seed.starts_with("sEd") {
-                Wallet::from_seed_encoded_with_algorithm(seed, xrpl_mithril::wallet::Algorithm::Ed25519)
+                Wallet::from_seed_encoded_with_algorithm(
+                    seed,
+                    xrpl_mithril::wallet::Algorithm::Ed25519,
+                )
             } else {
                 Wallet::from_seed_encoded(seed)
-            }.map_err(|e| ApiError::Xrpl(format!("Invalid seed: {}", e)))?;
+            }
+            .map_err(|e| ApiError::Xrpl(format!("Invalid seed: {}", e)))?;
             info!("XRPL Oracle wallet: {}", w.account_id());
             Some(w)
         } else {
@@ -128,7 +141,7 @@ impl XrplService {
                 Err(e) => {
                     tracing::warn!("RPC {} attempt {} failed: {}", method, attempt + 1, e);
                     last_error = Some(e);
-                }
+                },
             }
         }
 
@@ -137,7 +150,9 @@ impl XrplService {
 
     /// Один RPC вызов без retry
     async fn rpc_once(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
-        let resp = self.http.post(&self.config.node_url)
+        let resp = self
+            .http
+            .post(&self.config.node_url)
             .json(&serde_json::json!({
                 "method": method,
                 "params": [params]
@@ -146,7 +161,9 @@ impl XrplService {
             .await
             .map_err(|e| ApiError::Xrpl(format!("HTTP error: {}", e)))?;
 
-        let data: serde_json::Value = resp.json().await
+        let data: serde_json::Value = resp
+            .json()
+            .await
             .map_err(|e| ApiError::Xrpl(format!("JSON error: {}", e)))?;
 
         if let Some(error) = data["result"]["error"].as_str() {
@@ -163,9 +180,15 @@ impl XrplService {
     /// but the transaction actually made it to the network.
     async fn submit_and_wait_validation(&self, tx_blob: &str, tx_hash: &str) -> Result<()> {
         // Try to submit - use rpc_once to avoid automatic retry with same sequence
-        let submit_result = match self.rpc_once("submit", serde_json::json!({
-            "tx_blob": tx_blob
-        })).await {
+        let submit_result = match self
+            .rpc_once(
+                "submit",
+                serde_json::json!({
+                    "tx_blob": tx_blob
+                }),
+            )
+            .await
+        {
             Ok(result) => result,
             Err(e) => {
                 // HTTP error - the tx might have actually been submitted
@@ -176,10 +199,16 @@ impl XrplService {
                 tokio::time::sleep(Duration::from_secs(2)).await;
 
                 // Check if tx exists in ledger
-                if let Ok(tx_data) = self.rpc_once("tx", serde_json::json!({
-                    "transaction": tx_hash,
-                    "binary": false
-                })).await {
+                if let Ok(tx_data) = self
+                    .rpc_once(
+                        "tx",
+                        serde_json::json!({
+                            "transaction": tx_hash,
+                            "binary": false
+                        }),
+                    )
+                    .await
+                {
                     // Transaction found - it was actually submitted!
                     if tx_data["result"]["validated"].as_bool() == Some(true) {
                         let final_result = tx_data["result"]["meta"]["TransactionResult"]
@@ -187,14 +216,23 @@ impl XrplService {
                             .unwrap_or("unknown");
 
                         if final_result == "tesSUCCESS" {
-                            info!("Transaction was actually submitted despite HTTP error: {}", tx_hash);
+                            info!(
+                                "Transaction was actually submitted despite HTTP error: {}",
+                                tx_hash
+                            );
                             return Ok(());
                         } else {
-                            return Err(ApiError::Xrpl(format!("Transaction failed: {}", final_result)));
+                            return Err(ApiError::Xrpl(format!(
+                                "Transaction failed: {}",
+                                final_result
+                            )));
                         }
                     }
                     // Found but not validated yet - continue to polling below
-                    info!("Transaction found in ledger (pending validation): {}", tx_hash);
+                    info!(
+                        "Transaction found in ledger (pending validation): {}",
+                        tx_hash
+                    );
                 } else {
                     // Transaction not found - retry submit with backoff
                     debug!("Transaction not found, retrying submit...");
@@ -203,9 +241,15 @@ impl XrplService {
                         tokio::time::sleep(Duration::from_secs(2)).await;
                         debug!("RPC retry attempt {} for submit", retry + 1);
 
-                        match self.rpc_once("submit", serde_json::json!({
-                            "tx_blob": tx_blob
-                        })).await {
+                        match self
+                            .rpc_once(
+                                "submit",
+                                serde_json::json!({
+                                    "tx_blob": tx_blob
+                                }),
+                            )
+                            .await
+                        {
                             Ok(result) => {
                                 let engine_result = result["result"]["engine_result"]
                                     .as_str()
@@ -217,24 +261,37 @@ impl XrplService {
                                     break; // Exit retry loop, continue to validation polling
                                 }
 
-                                info!("Transaction submitted on retry: {} (hash: {})", engine_result, tx_hash);
+                                info!(
+                                    "Transaction submitted on retry: {} (hash: {})",
+                                    engine_result, tx_hash
+                                );
 
                                 if engine_result.starts_with("tem") {
-                                    return Err(ApiError::Xrpl(format!("Transaction failed: {}", engine_result)));
+                                    return Err(ApiError::Xrpl(format!(
+                                        "Transaction failed: {}",
+                                        engine_result
+                                    )));
                                 }
                                 break; // Successfully submitted
-                            }
+                            },
                             Err(retry_err) => {
                                 warn!("RPC submit attempt {} failed: {}", retry + 1, retry_err);
                                 if retry == 2 {
                                     // Last resort: check if tx made it despite errors
                                     tokio::time::sleep(Duration::from_secs(2)).await;
-                                    if let Ok(tx_data) = self.rpc_once("tx", serde_json::json!({
-                                        "transaction": tx_hash,
-                                        "binary": false
-                                    })).await {
+                                    if let Ok(tx_data) = self
+                                        .rpc_once(
+                                            "tx",
+                                            serde_json::json!({
+                                                "transaction": tx_hash,
+                                                "binary": false
+                                            }),
+                                        )
+                                        .await
+                                    {
                                         if tx_data["result"]["validated"].as_bool() == Some(true) {
-                                            let final_result = tx_data["result"]["meta"]["TransactionResult"]
+                                            let final_result = tx_data["result"]["meta"]
+                                                ["TransactionResult"]
                                                 .as_str()
                                                 .unwrap_or("unknown");
                                             if final_result == "tesSUCCESS" {
@@ -243,44 +300,62 @@ impl XrplService {
                                             }
                                         }
                                     }
-                                    return Err(ApiError::Xrpl(format!("Submit failed after retries: {}", retry_err)));
+                                    return Err(ApiError::Xrpl(format!(
+                                        "Submit failed after retries: {}",
+                                        retry_err
+                                    )));
                                 }
-                            }
+                            },
                         }
                     }
                 }
 
                 // Continue to validation polling with a synthetic "submitted" result
                 serde_json::json!({"result": {"engine_result": "tesSUCCESS"}})
-            }
+            },
         };
 
         let engine_result = submit_result["result"]["engine_result"]
             .as_str()
             .unwrap_or("unknown");
 
-        info!("Transaction submitted: {} (hash: {})", engine_result, tx_hash);
+        info!(
+            "Transaction submitted: {} (hash: {})",
+            engine_result, tx_hash
+        );
 
         // Check for immediate failures (except tefPAST_SEQ which we handle specially)
         if engine_result.starts_with("tem") {
-            return Err(ApiError::Xrpl(format!("Transaction failed: {}", engine_result)));
+            return Err(ApiError::Xrpl(format!(
+                "Transaction failed: {}",
+                engine_result
+            )));
         }
 
         // tefPAST_SEQ means original submission worked - the tx should be in ledger
         if engine_result == "tefPAST_SEQ" {
             debug!("tefPAST_SEQ received - checking if original tx was validated");
         } else if engine_result.starts_with("tef") && engine_result != "tefPAST_SEQ" {
-            return Err(ApiError::Xrpl(format!("Transaction failed: {}", engine_result)));
+            return Err(ApiError::Xrpl(format!(
+                "Transaction failed: {}",
+                engine_result
+            )));
         }
 
         // For tesSUCCESS, tec* codes, or tefPAST_SEQ - poll for validation (up to 30 seconds)
         for i in 0..30 {
             tokio::time::sleep(Duration::from_secs(1)).await;
 
-            match self.rpc_once("tx", serde_json::json!({
-                "transaction": tx_hash,
-                "binary": false
-            })).await {
+            match self
+                .rpc_once(
+                    "tx",
+                    serde_json::json!({
+                        "transaction": tx_hash,
+                        "binary": false
+                    }),
+                )
+                .await
+            {
                 Ok(tx_data) => {
                     if tx_data["result"]["validated"].as_bool() == Some(true) {
                         let final_result = tx_data["result"]["meta"]["TransactionResult"]
@@ -291,17 +366,20 @@ impl XrplService {
                             debug!("Transaction validated after {}s: {}", i + 1, tx_hash);
                             return Ok(());
                         } else {
-                            return Err(ApiError::Xrpl(format!("Transaction failed: {}", final_result)));
+                            return Err(ApiError::Xrpl(format!(
+                                "Transaction failed: {}",
+                                final_result
+                            )));
                         }
                     }
-                }
+                },
                 Err(e) => {
                     // txnNotFound is expected while waiting
                     let err_str = e.to_string();
                     if !err_str.contains("txnNotFound") && !err_str.contains("notFound") {
                         debug!("Poll {} error: {}", i, e);
                     }
-                }
+                },
             }
         }
 
@@ -310,16 +388,22 @@ impl XrplService {
 
     /// Получает баланс аккаунта в XRP
     pub async fn get_balance(&self, address: &str) -> Result<f64> {
-        let data = self.rpc("account_info", serde_json::json!({
-            "account": address,
-            "ledger_index": "validated"
-        })).await?;
+        let data = self
+            .rpc(
+                "account_info",
+                serde_json::json!({
+                    "account": address,
+                    "ledger_index": "validated"
+                }),
+            )
+            .await?;
 
         let balance_str = data["result"]["account_data"]["Balance"]
             .as_str()
             .ok_or_else(|| ApiError::Xrpl("No balance".into()))?;
 
-        let drops: u64 = balance_str.parse()
+        let drops: u64 = balance_str
+            .parse()
             .map_err(|_| ApiError::Xrpl("Invalid balance".into()))?;
 
         Ok(drops as f64 / 1_000_000.0)
@@ -327,7 +411,8 @@ impl XrplService {
 
     /// Проверяет баланс Oracle
     pub async fn check_oracle_balance(&self) -> Result<f64> {
-        let address = self.oracle_address()
+        let address = self
+            .oracle_address()
             .ok_or_else(|| ApiError::Xrpl("No wallet".into()))?;
 
         let balance = self.get_balance(&address).await?;
@@ -337,7 +422,8 @@ impl XrplService {
         }
         if balance < 12.0 {
             return Err(ApiError::Xrpl(format!(
-                "Balance critically low: {} XRP", balance
+                "Balance critically low: {} XRP",
+                balance
             )));
         }
 
@@ -346,7 +432,9 @@ impl XrplService {
 
     /// Минтит NFT с указанным URI
     pub async fn mint_nft(&self, uri: &str, transfer_fee: u16) -> Result<MintResult> {
-        let wallet = self.wallet.as_ref()
+        let wallet = self
+            .wallet
+            .as_ref()
             .ok_or_else(|| ApiError::Xrpl("No wallet for minting".into()))?;
 
         self.check_oracle_balance().await?;
@@ -360,7 +448,11 @@ impl XrplService {
         let fields = NFTokenMint {
             nftoken_taxon: 0,
             issuer: None,
-            transfer_fee: if transfer_fee > 0 { Some(transfer_fee) } else { None },
+            transfer_fee: if transfer_fee > 0 {
+                Some(transfer_fee)
+            } else {
+                None
+            },
             uri: Some(Blob::new(uri_bytes)),
         };
 
@@ -385,7 +477,8 @@ impl XrplService {
         let mut unsigned = UnsignedTransaction::new(tx);
 
         // Autofill sequence, fee, last_ledger_sequence
-        autofill(&client, &mut unsigned).await
+        autofill(&client, &mut unsigned)
+            .await
             .map_err(|e| ApiError::Xrpl(format!("Autofill error: {}", e)))?;
 
         // Sign
@@ -401,10 +494,16 @@ impl XrplService {
         // Получаем NFT ID из метаданных транзакции - retry несколько раз
         let mut nft_token_id = None;
         for _ in 0..5 {
-            if let Ok(tx_meta) = self.rpc("tx", serde_json::json!({
-                "transaction": tx_hash,
-                "binary": false
-            })).await {
+            if let Ok(tx_meta) = self
+                .rpc(
+                    "tx",
+                    serde_json::json!({
+                        "transaction": tx_hash,
+                        "binary": false
+                    }),
+                )
+                .await
+            {
                 if let Some(id) = extract_nft_id_from_meta(&tx_meta["result"]) {
                     nft_token_id = Some(id);
                     break;
@@ -413,8 +512,8 @@ impl XrplService {
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
-        let nft_token_id = nft_token_id
-            .ok_or_else(|| ApiError::Xrpl("NFT ID not found in tx meta".into()))?;
+        let nft_token_id =
+            nft_token_id.ok_or_else(|| ApiError::Xrpl("NFT ID not found in tx meta".into()))?;
 
         info!("Minted NFT: {} (tx: {})", nft_token_id, tx_hash);
 
@@ -430,12 +529,15 @@ impl XrplService {
         nft_token_id: &str,
         destination: &str,
     ) -> Result<OfferResult> {
-        let wallet = self.wallet.as_ref()
+        let wallet = self
+            .wallet
+            .as_ref()
             .ok_or_else(|| ApiError::Xrpl("No wallet".into()))?;
 
         let client = self.client()?;
 
-        let dest_account: AccountId = destination.parse()
+        let dest_account: AccountId = destination
+            .parse()
             .map_err(|e| ApiError::Xrpl(format!("Invalid destination: {}", e)))?;
 
         let nft_id = Hash256::from_hex(nft_token_id)
@@ -469,7 +571,8 @@ impl XrplService {
         let mut unsigned = UnsignedTransaction::new(tx);
 
         // Autofill
-        autofill(&client, &mut unsigned).await
+        autofill(&client, &mut unsigned)
+            .await
             .map_err(|e| ApiError::Xrpl(format!("Autofill error: {}", e)))?;
 
         // Sign
@@ -485,10 +588,16 @@ impl XrplService {
         // Получаем offer index - retry несколько раз
         let mut offer_index = None;
         for _ in 0..5 {
-            if let Ok(tx_meta) = self.rpc("tx", serde_json::json!({
-                "transaction": tx_hash,
-                "binary": false
-            })).await {
+            if let Ok(tx_meta) = self
+                .rpc(
+                    "tx",
+                    serde_json::json!({
+                        "transaction": tx_hash,
+                        "binary": false
+                    }),
+                )
+                .await
+            {
                 if let Some(id) = extract_offer_id_from_meta(&tx_meta["result"]) {
                     offer_index = Some(id);
                     break;
@@ -497,10 +606,12 @@ impl XrplService {
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
-        let offer_index = offer_index
-            .ok_or_else(|| ApiError::Xrpl("Offer ID not found".into()))?;
+        let offer_index = offer_index.ok_or_else(|| ApiError::Xrpl("Offer ID not found".into()))?;
 
-        info!("Created sell offer {} for NFT {} to {}", offer_index, nft_token_id, destination);
+        info!(
+            "Created sell offer {} for NFT {} to {}",
+            offer_index, nft_token_id, destination
+        );
 
         Ok(OfferResult {
             offer_index,
@@ -508,16 +619,157 @@ impl XrplService {
         })
     }
 
-    /// Верифицирует владение NFT
-    pub async fn verify_nft_owner(
+    /// Verifies a client-side Vaulted NFTokenMint directly against the XRPL ledger.
+    ///
+    /// This is used by `/vault/finalize-mint` so Oracle does not blindly trust
+    /// client-submitted `tx_hash` / `nft_token_id` pairs. The check is deliberately
+    /// strict: validated `tesSUCCESS`, `NFTokenMint`, matching Account, matching
+    /// minted NFTokenID, matching URI, and current account ownership.
+    pub async fn verify_local_nft_mint(
         &self,
+        tx_hash: &str,
         nft_token_id: &str,
         expected_owner: &str,
-    ) -> Result<bool> {
-        let data = self.rpc("account_nfts", serde_json::json!({
-            "account": expected_owner,
-            "ledger_index": "validated"
-        })).await?;
+        expected_uri: &str,
+    ) -> Result<LocalMintVerification> {
+        if tx_hash.len() != 64 || !tx_hash.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(ApiError::Validation("Invalid XRPL transaction hash".into()));
+        }
+        if nft_token_id.len() != 64 || !nft_token_id.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(ApiError::Validation("Invalid NFTokenID".into()));
+        }
+
+        let tx_data = self
+            .rpc(
+                "tx",
+                serde_json::json!({
+                    "transaction": tx_hash,
+                    "binary": false
+                }),
+            )
+            .await?;
+        let result = tx_data
+            .get("result")
+            .ok_or_else(|| ApiError::Xrpl("No transaction result".into()))?;
+
+        if result.get("validated").and_then(|v| v.as_bool()) != Some(true) {
+            return Err(ApiError::Xrpl(format!(
+                "Transaction {} is not validated yet",
+                tx_hash
+            )));
+        }
+
+        let tx_result = result
+            .pointer("/meta/TransactionResult")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        if tx_result != "tesSUCCESS" {
+            return Err(ApiError::Xrpl(format!(
+                "Transaction {} did not succeed: {}",
+                tx_hash, tx_result
+            )));
+        }
+
+        let tx_type = result
+            .get("TransactionType")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        if tx_type != "NFTokenMint" {
+            return Err(ApiError::Xrpl(format!(
+                "Transaction {} is {}, not NFTokenMint",
+                tx_hash, tx_type
+            )));
+        }
+
+        let account = result
+            .get("Account")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ApiError::Xrpl("NFTokenMint transaction has no Account".into()))?;
+        if !account.eq_ignore_ascii_case(expected_owner) {
+            return Err(ApiError::Forbidden(format!(
+                "Mint transaction account {} does not match expected owner {}",
+                account, expected_owner
+            )));
+        }
+
+        let minted_id = extract_nft_id_from_meta(result).ok_or_else(|| {
+            ApiError::Xrpl("Minted NFTokenID not found in transaction metadata".into())
+        })?;
+        if !minted_id.eq_ignore_ascii_case(nft_token_id) {
+            return Err(ApiError::Xrpl(format!(
+                "Minted NFTokenID mismatch: tx has {}, request has {}",
+                minted_id, nft_token_id
+            )));
+        }
+
+        let uri_hex = result
+            .get("URI")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ApiError::Xrpl("NFTokenMint transaction has no URI".into()))?;
+        let uri = decode_xrpl_uri(uri_hex)?;
+        if uri != expected_uri {
+            return Err(ApiError::Xrpl(
+                "Mint URI does not match prepared manifest URI".into(),
+            ));
+        }
+
+        let nfts = self.account_nfts(expected_owner).await?;
+        let owned = nfts.iter().any(|nft| {
+            nft.get("NFTokenID")
+                .and_then(|v| v.as_str())
+                .map(|id| id.eq_ignore_ascii_case(nft_token_id))
+                .unwrap_or(false)
+                && nft
+                    .get("URI")
+                    .and_then(|v| v.as_str())
+                    .and_then(|hex_uri| decode_xrpl_uri(hex_uri).ok())
+                    .map(|ledger_uri| ledger_uri == expected_uri)
+                    .unwrap_or(false)
+        });
+        if !owned {
+            return Err(ApiError::NotNftOwner);
+        }
+
+        Ok(LocalMintVerification {
+            tx_hash: tx_hash.to_ascii_uppercase(),
+            nft_token_id: nft_token_id.to_ascii_uppercase(),
+            owner: account.to_string(),
+            uri,
+            validated: true,
+        })
+    }
+
+    /// Returns raw account_nfts entries from XRPL for verification paths that need
+    /// fields beyond the legacy typed helpers.
+    async fn account_nfts(&self, account: &str) -> Result<Vec<serde_json::Value>> {
+        let data = self
+            .rpc(
+                "account_nfts",
+                serde_json::json!({
+                    "account": account,
+                    "ledger_index": "validated",
+                    "limit": 400
+                }),
+            )
+            .await?;
+
+        Ok(data["result"]["account_nfts"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    /// Верифицирует владение NFT
+    pub async fn verify_nft_owner(&self, nft_token_id: &str, expected_owner: &str) -> Result<bool> {
+        let data = self
+            .rpc(
+                "account_nfts",
+                serde_json::json!({
+                    "account": expected_owner,
+                    "ledger_index": "validated"
+                }),
+            )
+            .await?;
 
         if let Some(nfts) = data["result"]["account_nfts"].as_array() {
             for nft in nfts {
@@ -532,7 +784,9 @@ impl XrplService {
 
     /// Отменяет NFT offer (только Oracle может отменить свои offers)
     pub async fn cancel_offer(&self, offer_index: &str) -> Result<String> {
-        let wallet = self.wallet.as_ref()
+        let wallet = self
+            .wallet
+            .as_ref()
             .ok_or_else(|| ApiError::Xrpl("No wallet".into()))?;
 
         let client = self.client()?;
@@ -563,7 +817,8 @@ impl XrplService {
         let tx = Transaction::NFTokenCancelOffer { common, fields };
         let mut unsigned = UnsignedTransaction::new(tx);
 
-        autofill(&client, &mut unsigned).await
+        autofill(&client, &mut unsigned)
+            .await
             .map_err(|e| ApiError::Xrpl(format!("Autofill error: {}", e)))?;
 
         let signed = sign_transaction(&unsigned, wallet)
@@ -582,7 +837,9 @@ impl XrplService {
     /// Сжигает NFT (только владелец NFT может это сделать)
     /// Этот метод используется когда Oracle ещё владеет NFT (до accept offer)
     pub async fn burn_nft(&self, nft_token_id: &str) -> Result<String> {
-        let wallet = self.wallet.as_ref()
+        let wallet = self
+            .wallet
+            .as_ref()
             .ok_or_else(|| ApiError::Xrpl("No wallet".into()))?;
 
         let client = self.client()?;
@@ -614,7 +871,8 @@ impl XrplService {
         let tx = Transaction::NFTokenBurn { common, fields };
         let mut unsigned = UnsignedTransaction::new(tx);
 
-        autofill(&client, &mut unsigned).await
+        autofill(&client, &mut unsigned)
+            .await
             .map_err(|e| ApiError::Xrpl(format!("Autofill error: {}", e)))?;
 
         let signed = sign_transaction(&unsigned, wallet)
@@ -633,14 +891,20 @@ impl XrplService {
     /// Получает текущего владельца NFT
     /// Проверяет есть ли NFT на Oracle кошельке
     pub async fn check_nft_on_oracle(&self, nft_token_id: &str) -> Result<bool> {
-        let oracle_address = self.oracle_address()
+        let oracle_address = self
+            .oracle_address()
             .ok_or_else(|| ApiError::Internal("Oracle wallet not configured".to_string()))?;
 
         // Получаем все NFT на Oracle кошельке
-        let response = self.rpc("account_nfts", serde_json::json!({
-            "account": oracle_address,
-            "limit": 400
-        })).await?;
+        let response = self
+            .rpc(
+                "account_nfts",
+                serde_json::json!({
+                    "account": oracle_address,
+                    "limit": 400
+                }),
+            )
+            .await?;
 
         // Проверяем есть ли наш NFT в списке
         if let Some(nfts) = response["result"]["account_nfts"].as_array() {
@@ -656,7 +920,8 @@ impl XrplService {
 
     /// Получает текущего владельца NFT (legacy метод для совместимости)
     pub async fn get_nft_owner(&self, nft_token_id: &str) -> Result<String> {
-        let oracle_address = self.oracle_address()
+        let oracle_address = self
+            .oracle_address()
             .ok_or_else(|| ApiError::Internal("Oracle wallet not configured".to_string()))?;
 
         // Проверяем есть ли NFT на Oracle
@@ -668,6 +933,12 @@ impl XrplService {
         // Возвращаем пустую строку чтобы отличить от Oracle
         Err(ApiError::NftNotFound(nft_token_id.to_string()))
     }
+}
+
+fn decode_xrpl_uri(hex_uri: &str) -> Result<String> {
+    let bytes =
+        hex::decode(hex_uri).map_err(|_| ApiError::Xrpl("Invalid XRPL NFT URI hex".into()))?;
+    String::from_utf8(bytes).map_err(|_| ApiError::Xrpl("XRPL NFT URI is not valid UTF-8".into()))
 }
 
 /// Извлекает NFTokenID из метаданных транзакции
@@ -688,14 +959,16 @@ fn extract_nft_id_from_meta(meta: &serde_json::Value) -> Option<String> {
             let nftokens = final_fields.get("NFTokens")?.as_array()?;
 
             // Последний токен в списке - новый
-            let prev_nftokens = modified.get("PreviousFields")
+            let prev_nftokens = modified
+                .get("PreviousFields")
                 .and_then(|pf| pf.get("NFTokens"))
                 .and_then(|t| t.as_array())
                 .map(|a| a.len())
                 .unwrap_or(0);
 
             if nftokens.len() > prev_nftokens {
-                nftokens.last()
+                nftokens
+                    .last()
                     .and_then(|t| t.get("NFToken"))
                     .and_then(|nft| nft.get("NFTokenID"))
                     .and_then(|id| id.as_str())
@@ -714,7 +987,8 @@ fn extract_nft_id_from_meta(meta: &serde_json::Value) -> Option<String> {
                     let new_fields = created.get("NewFields")?;
                     let nftokens = new_fields.get("NFTokens")?.as_array()?;
 
-                    nftokens.last()
+                    nftokens
+                        .last()
                         .and_then(|t| t.get("NFToken"))
                         .and_then(|nft| nft.get("NFTokenID"))
                         .and_then(|id| id.as_str())
@@ -734,7 +1008,8 @@ fn extract_offer_id_from_meta(meta: &serde_json::Value) -> Option<String> {
             let entry_type = created.get("LedgerEntryType")?.as_str()?;
 
             if entry_type == "NFTokenOffer" {
-                created.get("LedgerIndex")
+                created
+                    .get("LedgerIndex")
                     .and_then(|id| id.as_str())
                     .map(|s| s.to_string())
             } else {
