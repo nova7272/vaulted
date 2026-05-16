@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback, type ReactNode } from 'react'
+import { useEffect, useRef, useCallback, useId, type ReactNode } from 'react'
 
 interface ModalProps {
     /** Controls visibility */
@@ -29,7 +29,8 @@ interface ModalProps {
 export default function Modal({ open, onClose, preventClose, title, width, children }: ModalProps) {
     const modalRef = useRef<HTMLDivElement>(null)
     const previousFocus = useRef<HTMLElement | null>(null)
-    const titleId = useRef(`modal-title-${Math.random().toString(36).slice(2, 8)}`).current
+    const reactId = useId()
+    const titleId = `modal-title-${reactId.replace(/:/g, '')}`
 
     // Save + restore focus
     useEffect(() => {

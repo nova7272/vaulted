@@ -2,9 +2,9 @@
 //!
 //! Используется для безопасной передачи NFT с гарантией оплаты.
 
-use serde::{Deserialize, Serialize};
-use crate::error::Result;
 use super::client::XrplClient;
+use crate::error::Result;
+use serde::{Deserialize, Serialize};
 
 /// Операции с Escrow
 pub struct EscrowOperations<'a> {

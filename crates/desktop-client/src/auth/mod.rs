@@ -1,11 +1,12 @@
-//! Модуль авторизации
+//! Vaulted authentication module.
 //!
-//! Двухшаговый auth flow:
-//! 1. SignIn через Xaman — получаем wallet_address
-//! 2. Sign Challenge — получаем signature для деривации PRE ключей
+//! Primary auth is Vaulted seed identity + QR login.
+//! The `wallet_signing` module contains disabled external-wallet compatibility shims.
 
 pub mod session;
-pub mod xaman;
+pub mod wallet_signing;
 
 pub use session::Session;
-pub use xaman::{XamanAuth, XamanPayload, KeyDerivationResult, SignInResult};
+pub use wallet_signing::{
+    KeyDerivationResult, SignInResult, VaultedSigningRequest, WalletSigningAuth,
+};

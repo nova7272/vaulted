@@ -1,4 +1,5 @@
-import { useEffect, useState, useCallback } from 'react'
+/* eslint-disable react-refresh/only-export-components */
+import { useEffect, useState } from 'react'
 
 export interface ToastData {
     id: number
@@ -36,17 +37,13 @@ function Toast({ toast, onRemove }: ToastProps) {
     }
     const c = colors[toast.type]
 
-    const Icon = () => {
-        if (toast.type === 'success') return (
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5" /></svg>
-        )
-        if (toast.type === 'error') return (
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10" /><line x1="15" y1="9" x2="9" y2="15" /><line x1="9" y1="9" x2="15" y2="15" /></svg>
-        )
-        return (
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10" /><line x1="12" y1="16" x2="12" y2="12" /><line x1="12" y1="8" x2="12.01" y2="8" /></svg>
-        )
-    }
+    const icon = toast.type === 'success' ? (
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5" /></svg>
+    ) : toast.type === 'error' ? (
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10" /><line x1="15" y1="9" x2="9" y2="15" /><line x1="9" y1="9" x2="15" y2="15" /></svg>
+    ) : (
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10" /><line x1="12" y1="16" x2="12" y2="12" /><line x1="12" y1="8" x2="12.01" y2="8" /></svg>
+    )
 
     return (
         <div
@@ -63,7 +60,7 @@ function Toast({ toast, onRemove }: ToastProps) {
                 transform: visible ? 'translateY(0) scale(1)' : 'translateY(12px) scale(0.95)',
             }}>
             <div style={{ width: 30, height: 30, borderRadius: 8, background: c.ibg, display: 'flex', alignItems: 'center', justifyContent: 'center', color: c.ico, flexShrink: 0 }}>
-                <Icon />
+                {icon}
             </div>
             <div style={{ flex: 1, minWidth: 0 }}>
                 <p style={{ fontSize: 13, fontWeight: 600, color: '#f2f3f7', margin: 0, lineHeight: 1.3 }}>{toast.title}</p>
