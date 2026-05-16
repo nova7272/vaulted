@@ -3,9 +3,7 @@
 //! Интеграция с crypto-core для PRE операций.
 
 use xrpl_vault_crypto_core::{
-    PreKeyPair, PrePublicKey, ProxyReEncryption,
-    DerivedKeys,
-    EncryptedPreData,
+    DerivedKeys, EncryptedPreData, PreKeyPair, PrePublicKey, ProxyReEncryption,
 };
 
 use crate::error::Result;
@@ -30,7 +28,9 @@ impl KeyManager {
 
     /// Генерирует keypair из seed (детерминистично)
     pub fn generate_keypair_from_seed(&self, seed: &[u8; 32]) -> Result<PreKeyPair> {
-        self.pre.generate_keypair_from_seed(seed).map_err(Into::into)
+        self.pre
+            .generate_keypair_from_seed(seed)
+            .map_err(Into::into)
     }
 
     /// Деривирует PRE ключи из подписи XRPL кошелька

@@ -1,180 +1,188 @@
-# XRPL Vault Security Guide
+# Vaulted Security Guide
 
 ## Overview
 
-This document describes security features and configuration for XRPL Vault components.
+Vaulted protects files by keeping seed material, private keys, file keys, and plaintext file data on the client. Oracle provides registry, auth, manifest verification, QR coordination, grant state, and storage-token services. Storage nodes store encrypted fragments only.
 
-## Environment Variables
+## Environment variables
 
 ### Oracle Server
 
 | Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `ENVIRONMENT` | No | `development` | Set to `production` for strict security |
-| `ORACLE_SIGNING_KEY` | **Yes** (prod) | generated | Ed25519 private key for JWT signing (64 hex chars) |
-| `CORS_ORIGINS` | **Yes** (prod) | permissive | Comma-separated allowed origins (e.g., `https://app.example.com`) |
+| --- | --- | --- | --- |
+| `ENVIRONMENT` | No | `development` | Set to `production` for strict security settings |
+| `ORACLE_SIGNING_KEY` | Yes in prod | generated in dev | Ed25519 private key for JWT/storage-token signing |
+| `CORS_ORIGINS` | Yes in prod | permissive in dev | Comma-separated allowed origins |
 | `RATE_LIMIT_RPM` | No | `60` | Requests per minute per IP |
-| `JWT_SECRET` | No | `development_...` | Legacy, use ORACLE_SIGNING_KEY |
 | `JWT_EXPIRATION_HOURS` | No | `24` | Token lifetime in hours |
+| `XRPL_NODE_URL` | No | XRPL testnet WebSocket | XRPL node used for ledger verification/submission |
 
 ### Storage Node
 
 | Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `REQUIRE_AUTH` | No | `false` | Set to `true` to require signed tokens |
-| `ORACLE_PUBLIC_KEY` | Required if REQUIRE_AUTH | - | Oracle's Ed25519 public key (64 hex chars) |
-| `NODE_ID` | No | `node-local-1` | Unique node identifier |
+| --- | --- | --- | --- |
+| `REQUIRE_AUTH` | No | `false` | Require Oracle-signed storage tokens |
+| `ORACLE_PUBLIC_KEY` | Required when auth is enabled | - | Oracle Ed25519 public key |
+| `NODE_ID` | No | `node-local-1` | Unique storage node identifier |
 | `ORACLE_URL` | No | - | Oracle URL for registration/heartbeat |
 
 ### Desktop Client
 
 | Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
+| --- | --- | --- | --- |
 | `ORACLE_URL` | No | `http://localhost:3000` | Oracle server URL |
-| `XAMAN_API_KEY` | Yes | - | Xaman (formerly XUMM) API key |
-| `XAMAN_API_SECRET` | Yes | - | Xaman API secret |
 
----
+## Authentication and trust flows
 
-## Authentication Flow
+### Vaulted identity
 
-### 1. User Login via Xaman
-
-```
-Client                    Xaman                    Oracle
-   |                        |                        |
-   |---(1) Create Payload-->|                        |
-   |<--(2) QR Code/DeepLink-|                        |
-   |                        |                        |
-   |      [User signs in Xaman]                      |
-   |                        |                        |
-   |<--(3) Signature--------|                        |
-   |                        |                        |
-   |---(4) Get Challenge------------------------>    |
-   |<--(5) Challenge: "xrpl-vault-auth:{wallet}"    |
-   |                        |                        |
-   |---(6) POST /auth/token {wallet, signature, challenge}->|
-   |<--(7) JWT Token---------------------------------|
-   |                        |                        |
-   [Client stores token, uses in Authorization header]
+```text
+Vaulted seed phrase
+├─ identity signing key
+├─ identity encryption key
+├─ device key
+└─ XRPL wallet keypair
 ```
 
-### 2. Protected API Requests
+The seed phrase is the user recovery root. Losing it can make encrypted data unrecoverable.
 
-All protected endpoints require:
+### QR login / pairing / approvals
+
+Vaulted QR payloads use a canonical JSON body, a protocol marker, intent-specific validation, and Vaulted identity signatures. Current intents include:
+
+- login;
+- pair device;
+- sign XRPL transaction;
+- approve file grant.
+
+### File sharing
+
+New sharing grants use recipient-bound `KeyEnvelope` objects:
+
+```text
+file key → sealed to recipient identity encryption public key
+         → bound to vault object id + recipient identity id + recipient key id
+```
+
+Oracle stores and verifies grant state, but does not receive plaintext file keys.
+
+## Protected API requests
+
+Protected endpoints require:
+
 ```http
 Authorization: Bearer <jwt_token>
 ```
 
-### 3. Storage Node Access
+When storage auth is enabled, storage nodes additionally require Oracle-signed operation tokens.
 
-When `REQUIRE_AUTH=true`, storage nodes require signed tokens:
-
-```
-Client                    Oracle                  Storage Node
-   |                        |                        |
-   |---(1) Request file access with JWT------------>|
-   |<--(2) Signed download URLs---------------------|
-   |                        |                        |
-   |---(3) GET /fragments/{key}?token={signed_token}------->|
-   |<--(4) Encrypted fragment data------------------|
-```
-
----
-
-## Production Checklist
+## Production checklist
 
 ### Oracle
 
-- [ ] Set `ENVIRONMENT=production`
-- [ ] Generate and set `ORACLE_SIGNING_KEY`:
-  ```bash
-  openssl rand -hex 32
-  ```
-- [ ] Configure `CORS_ORIGINS` with your domains
-- [ ] Use HTTPS (TLS termination via reverse proxy)
-- [ ] Set up PostgreSQL with strong credentials
-- [ ] Enable audit logging to external system
+- [ ] Set `ENVIRONMENT=production`.
+- [ ] Generate and store `ORACLE_SIGNING_KEY` securely.
+- [ ] Configure restricted `CORS_ORIGINS`.
+- [ ] Use HTTPS behind a reverse proxy.
+- [ ] Use strong PostgreSQL credentials.
+- [ ] Enable external audit logging.
+- [ ] Review rate limits for auth, QR, identity, grants, and storage-token endpoints.
+- [ ] Run dependency audits in CI.
 
 ### Storage Nodes
 
-- [ ] Set `REQUIRE_AUTH=true`
-- [ ] Set `ORACLE_PUBLIC_KEY` (get from Oracle logs at startup)
-- [ ] Use HTTPS
-- [ ] Firewall: allow only Oracle IP for management endpoints
-- [ ] Regular backups of fragment data
+- [ ] Set `REQUIRE_AUTH=true`.
+- [ ] Configure `ORACLE_PUBLIC_KEY`.
+- [ ] Use HTTPS.
+- [ ] Restrict management endpoints to trusted networks.
+- [ ] Back up encrypted fragment data.
+- [ ] Enforce upload/download size and rate limits.
 
 ### Desktop Client
 
-- [ ] Distribute with correct Oracle URL
-- [ ] Use secure storage for Xaman credentials
-- [ ] Enable certificate pinning if possible
+- [ ] Distribute with the correct Oracle URL.
+- [ ] Store local secrets only in secure OS storage.
+- [ ] Disable sensitive logging around seed phrases, file keys, private keys, and plaintext metadata.
+- [ ] Consider certificate pinning for production builds.
 
----
+## Cryptographic details
 
-## Security Architecture
+### File encryption
 
-### Data Protection
+- File content is encrypted client-side.
+- File keys are random per file.
+- Sharing uses X25519 + HKDF-SHA256 + XChaCha20-Poly1305 `KeyEnvelope` sealing.
 
-1. **At Rest**: Files are AES-256-GCM encrypted client-side before upload
-2. **In Transit**: TLS for all communications
-3. **Key Management**: PRE (Proxy Re-Encryption) allows secure transfer without exposing keys
+### Identity and signing
 
-### Access Control
+- Vaulted identity signing uses Ed25519.
+- QR payloads and manifests are signed over canonical, domain-separated bytes.
+- XRPL NFT mint transactions are built and signed locally by the client.
 
-1. **NFT Ownership**: Only NFT holder can access file data
-2. **JWT Authentication**: All mutating API calls require valid JWT
-3. **Signed Storage Tokens**: Storage nodes verify Oracle-signed tokens
+### Storage tokens
 
-### Threat Model
+- Algorithm: Ed25519.
+- Payload includes storage key, operation, issued-at, and expiration data.
 
-| Threat | Mitigation |
-|--------|------------|
-| Stolen JWT | Short expiration (24h), logout invalidation |
-| Man-in-the-Middle | TLS required in production |
-| Storage node compromise | Data is encrypted, tokens are time-limited |
-| Oracle compromise | Cannot decrypt files (no AES keys) |
-| Replay attacks | Tokens include timestamp, expiration |
-| Rate abuse | IP-based rate limiting |
+## Incident response
 
----
+### Oracle signing key compromise
 
-## Cryptographic Details
+1. Generate a new `ORACLE_SIGNING_KEY`.
+2. Restart Oracle.
+3. Re-authenticate clients.
+4. Invalidate old token families where applicable.
 
-### JWT Signing
-- Algorithm: EdDSA (Ed25519)
-- Key size: 256 bits
-- Token format: `header.payload.signature` (base64url)
+### Storage node compromise
 
-### Storage Tokens
-- Algorithm: EdDSA (Ed25519)
-- Format: `payload.signature` (base64url)
-- Payload: JSON with `nft_token_id`, `storage_key`, `operation`, `exp`, `iat`
+1. Take the node offline.
+2. Revoke node registration in Oracle.
+3. Data remains encrypted, but rotate storage credentials and inspect logs.
+4. Re-replicate fragments to healthy nodes.
 
-### File Encryption
-- Algorithm: AES-256-GCM
-- Key derivation: HKDF-SHA256 from user's XRPL signature
-- PRE scheme: Umbral (threshold proxy re-encryption)
+### Directory or recipient-key compromise
 
----
+1. Revoke trust for affected recipient fingerprints.
+2. Revoke active grants for affected identities.
+3. Ask recipients to rotate identity/device keys if needed.
+4. Re-share only after manually confirming the new fingerprint.
 
-## Incident Response
+### Database compromise
 
-### JWT Key Compromise
+1. Rotate Oracle signing keys and database credentials.
+2. Revoke suspicious sessions and grants.
+3. Review audit events for unauthorized grant/device changes.
+4. Plaintext files should remain protected as long as client seed material and file keys were not compromised.
 
-1. Generate new `ORACLE_SIGNING_KEY`
-2. Restart Oracle
-3. All users will need to re-authenticate
+## Hardening audit commands
 
-### Storage Node Compromise
+Run the non-strict local audit before opening a release branch:
 
-1. Take node offline
-2. Revoke node registration in Oracle
-3. Data remains encrypted - no immediate user action needed
-4. Consider re-encrypting files with new keys
+```bash
+make security-audit
+```
 
-### Database Compromise
+This runs:
 
-1. Rotate `ORACLE_SIGNING_KEY`
-2. Users must re-register (new PRE keys)
-3. Encrypted AES keys in DB are useless without user's PRE private key
+- sensitive logging scan;
+- `cargo fmt -- --check`;
+- `cargo check --workspace`;
+- `cargo test --workspace`;
+- `cargo audit` when `cargo-audit` is installed;
+- frontend install, lint, typecheck, build, and `npm audit` report.
+
+For CI, use strict mode:
+
+```bash
+make security-audit-strict
+```
+
+Strict mode fails when `cargo-audit` is missing and when `npm audit --audit-level=high` reports high-or-critical advisories.
+
+To run only the sensitive logging guard:
+
+```bash
+make sensitive-log-audit
+```
+
+The sensitive logging guard is intentionally conservative. It scans logging statements for seed phrases, private keys, file keys, decrypted/plaintext content, local paths, filenames, tokens, and similar values. False positives should be fixed by changing the log message to a count, status, or redacted identifier rather than by logging the raw value.

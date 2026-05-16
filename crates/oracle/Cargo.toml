@@ -2,14 +2,14 @@
 name = "xrpl-vault-oracle"
 version.workspace = true
 edition.workspace = true
-description = "Oracle server for XRPL Vault: PRE re-encryption, file distribution"
+description = "Oracle service for Vaulted: registry, auth, manifests, QR coordination, grants, and storage tokens"
 
 [[bin]]
 name = "oracle"
 path = "src/main.rs"
 
 [dependencies]
-# Crypto (только PRE для перешифровки)
+# Crypto primitives and legacy PRE compatibility
 xrpl-vault-crypto-core = { path = "../crypto-core" }
 ed25519-dalek.workspace = true
 rand.workspace = true

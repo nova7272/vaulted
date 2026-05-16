@@ -4,13 +4,15 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Cryptographic primitives for XRPL Vault: AES-GCM, ECIES, and Proxy Re-Encryption"
+description = "Cryptographic primitives for Vaulted: AES-GCM, identity keys, KeyEnvelope, QR payloads, and local XRPL signing"
 
 [dependencies]
 # AES-256-GCM для шифрования файлов
 aes-gcm.workspace = true
+chacha20poly1305.workspace = true
+ed25519-dalek.workspace = true
 
-# Proxy Re-Encryption
+# Legacy PRE compatibility
 umbral-pre = { version = "0.11", features = ["default-serialization"] }
 
 # Генерация случайных чисел
@@ -22,6 +24,11 @@ blake3.workspace = true
 
 # Key derivation
 hkdf = "0.12"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+bip39 = { version = "2", features = ["rand"] }
+k256 = { version = "0.13", features = ["ecdsa", "sha256"] }
+ripemd = "0.1"
+bs58 = "0.5"
 
 # Кодирование
 hex.workspace = true

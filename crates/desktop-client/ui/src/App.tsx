@@ -16,7 +16,7 @@ import type { ToastData } from './components/Toast'
 import { ToastContainer, registerToastFn } from './components/Toast'
 
 type Screen = 'auth'|'files'|'upload'|'settings'|'activity'|'secure-notes'
-interface UserInfo { walletAddress:string; publicKey:string; hasPreKeys:boolean; expiresAt:string }
+interface UserInfo { walletAddress:string; publicKey:string; hasPreKeys:boolean; hasVaultedWallet?:boolean; vaultedIdentityId?:string|null; encryptionPublicKey?:string|null; signingPublicKey?:string|null; expiresAt:string }
 
 const IcoLogout = () => (
     <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -68,7 +68,6 @@ function App() {
     // Oracle auth state
     const [oracleAuthed, setOracleAuthed] = useState(false)
     const [showOracleLogin, setShowOracleLogin] = useState(false)
-    const [checkingOracleAuth, setCheckingOracleAuth] = useState(false)
 
     const addToast = useCallback((t: Omit<ToastData,'id'>) => {
         const id = Date.now()
@@ -80,7 +79,6 @@ function App() {
 
     // Check Oracle auth status
     const checkOracleAuth = useCallback(async () => {
-        setCheckingOracleAuth(true)
         try {
             const status = await invoke<{
                 authenticated: boolean
@@ -90,8 +88,6 @@ function App() {
         } catch (e) {
             console.error('Failed to check Oracle auth:', e)
             setOracleAuthed(false)
-        } finally {
-            setCheckingOracleAuth(false)
         }
     }, [])
 
@@ -102,7 +98,7 @@ function App() {
                 setUser(await invoke<UserInfo>('get_current_user'))
                 setAuthed(true)
                 setScreen('files')
-                // Check Oracle auth after Xaman auth
+                // Check Oracle auth after Vaulted auth
                 checkOracleAuth()
             }
         } catch(e){ console.error(e) } finally{ setLoading(false) }
@@ -112,7 +108,9 @@ function App() {
         try {
             await invoke('oracle_logout').catch(() => {})
             await invoke('logout')
-        } catch {}
+        } catch (e) {
+            console.error('Failed to log out:', e)
+        }
         setUser(null)
         setAuthed(false)
         setOracleAuthed(false)

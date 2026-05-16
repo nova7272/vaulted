@@ -1,4 +1,5 @@
-import { createContext, useContext, useState, useEffect, useCallback, useRef, ReactNode } from 'react'
+/* eslint-disable react-refresh/only-export-components */
+import { createContext, useContext, useState, useEffect, useCallback, useRef, type ReactNode } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 
 interface OracleAuthState {
@@ -71,7 +72,7 @@ export function OracleAuthProvider({ children, onLoginRequired }: OracleAuthProv
             }))
 
             return status.authenticated
-        } catch (e) {
+        } catch {
             try {
                 const basicStatus = await invoke<{
                     authenticated: boolean
@@ -168,7 +169,7 @@ export function OracleAuthProvider({ children, onLoginRequired }: OracleAuthProv
         try {
             const loginPayload = await invoke<{
                 challenge: string
-                xamanPayload: {
+                signingRequest: {
                     uuid: string
                     qrPng: string
                     qrUri: string
@@ -176,14 +177,14 @@ export function OracleAuthProvider({ children, onLoginRequired }: OracleAuthProv
                 }
             }>('oracle_login_start')
 
-            if (loginPayload.xamanPayload.qrUri) {
-                window.open(loginPayload.xamanPayload.qrUri, '_blank')
+            if (loginPayload.signingRequest.qrUri) {
+                window.open(loginPayload.signingRequest.qrUri, '_blank')
             }
 
             const success = await invoke<boolean>('oracle_login_wait', {
-                payloadUuid: loginPayload.xamanPayload.uuid,
-                websocketUrl: loginPayload.xamanPayload.websocketUrl,
-                qrPng: loginPayload.xamanPayload.qrPng,
+                payloadUuid: loginPayload.signingRequest.uuid,
+                websocketUrl: loginPayload.signingRequest.websocketUrl,
+                qrPng: loginPayload.signingRequest.qrPng,
                 challenge: loginPayload.challenge,
             })
 

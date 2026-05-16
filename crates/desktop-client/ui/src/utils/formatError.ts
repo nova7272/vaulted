@@ -15,7 +15,7 @@ interface ErrorMapping {
 }
 
 const ERROR_MAP: ErrorMapping[] = [
-    // ── Crypto / PRE errors ──
+    // ── Crypto / key access errors ──
     {
         patterns: ['PRE decryption failed', 'Pre decryption', 'Re-decryption failed'],
         message: 'Unable to decrypt this file.',
@@ -38,7 +38,7 @@ const ERROR_MAP: ErrorMapping[] = [
     {
         patterns: ['key derivation', 'KeyDerivationFailed'],
         message: 'Failed to derive encryption keys.',
-        hint: 'Please sign the key derivation request again in Xaman.',
+        hint: 'Please unlock your Vaulted wallet and try key derivation again.',
     },
     {
         patterns: ['PRE key mismatch', 'pre_key_mismatch'],
@@ -50,7 +50,7 @@ const ERROR_MAP: ErrorMapping[] = [
     {
         patterns: ['Not authenticated', 'Unauthorized', 'Session expired', 'Token expired'],
         message: 'Your session has expired.',
-        hint: 'Please sign in again with Xaman.',
+        hint: 'Please sign in again with Vaulted identity.',
     },
     {
         patterns: ['valid XRPL public key is required'],
@@ -72,7 +72,7 @@ const ERROR_MAP: ErrorMapping[] = [
     {
         patterns: ['Recipient', 'not registered'],
         message: 'Recipient is not registered in the vault.',
-        hint: 'Ask them to create an account first by signing in with Xaman.',
+        hint: 'Ask them to create a Vaulted identity first.',
     },
     {
         patterns: ['Only the owner can', 'Not NFT owner', 'not the owner'],
@@ -170,11 +170,11 @@ const ERROR_MAP: ErrorMapping[] = [
         hint: 'It may still go through. Check your wallet in a minute.',
     },
 
-    // ── Xaman errors ──
+    // ── Wallet signing errors ──
     {
-        patterns: ['Xaman', 'xaman', 'Sign request', 'QR expired'],
+        patterns: ['External wallet', 'Vaulted signing', 'Sign request', 'QR expired'],
         message: 'Wallet signing request failed.',
-        hint: 'Open Xaman and try again. Make sure the app is updated.',
+        hint: 'Open the Vaulted signer and try again. Make sure the app is updated.',
     },
 ]
 

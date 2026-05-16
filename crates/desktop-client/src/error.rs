@@ -11,14 +11,14 @@ pub enum ClientError {
     /// Ошибка авторизации
     #[error("Authentication failed: {0}")]
     Auth(String),
-    
+
     /// Ошибка валидации
     #[error("Validation error: {0}")]
     Validation(String),
 
-    /// Ошибка Xaman
-    #[error("Xaman error: {0}")]
-    Xaman(String),
+    /// Ошибка внешнего wallet/signing layer
+    #[error("External wallet error: {0}")]
+    ExternalWallet(String),
 
     /// Сессия не найдена
     #[error("No active session. Please login first.")]

@@ -2,8 +2,8 @@
 //!
 //! Manages fragment replication across storage nodes.
 
-use sqlx::PgPool;
 use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
 
 /// Replication settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,11 +70,13 @@ impl ReplicationService {
             .fetch_optional(&self.db)
             .await?;
 
-        Ok(row.map(|(rf, s, mar)| ReplicationSettings {
-            replication_factor: rf,
-            strategy: s,
-            min_active_replicas: mar,
-        }).unwrap_or_default())
+        Ok(row
+            .map(|(rf, s, mar)| ReplicationSettings {
+                replication_factor: rf,
+                strategy: s,
+                min_active_replicas: mar,
+            })
+            .unwrap_or_default())
     }
 
     /// Select storage nodes for a new fragment upload
@@ -87,15 +89,16 @@ impl ReplicationService {
         let settings = self.get_settings().await?;
 
         // Get all active nodes with enough space
-        let mut nodes: Vec<NodeCandidate> = sqlx::query_as::<_, (String, String, String, i64, i64)>(
-            r#"
+        let mut nodes: Vec<NodeCandidate> =
+            sqlx::query_as::<_, (String, String, String, i64, i64)>(
+                r#"
             SELECT id, endpoint_url, region, used_space_bytes, total_space_bytes
             FROM storage_nodes
             WHERE status = 'active'
               AND (total_space_bytes - used_space_bytes) > $1
             ORDER BY region, used_space_bytes ASC
-            "#
-        )
+            "#,
+            )
             .bind(fragment_size)
             .fetch_all(&self.db)
             .await?
@@ -160,7 +163,11 @@ impl ReplicationService {
     }
 
     /// Select nodes by lowest load
-    fn select_load_balanced(&self, mut nodes: Vec<NodeCandidate>, count: i32) -> Vec<NodeCandidate> {
+    fn select_load_balanced(
+        &self,
+        mut nodes: Vec<NodeCandidate>,
+        count: i32,
+    ) -> Vec<NodeCandidate> {
         nodes.sort_by(|a, b| a.usage_percent().partial_cmp(&b.usage_percent()).unwrap());
         nodes.into_iter().take(count as usize).collect()
     }
@@ -168,7 +175,8 @@ impl ReplicationService {
     /// Mixed strategy: prefer different regions, then balance by load
     fn select_mixed(&self, nodes: Vec<NodeCandidate>, count: i32) -> Vec<NodeCandidate> {
         // Group by region and sort each group by load
-        let mut by_region: std::collections::HashMap<String, Vec<NodeCandidate>> = std::collections::HashMap::new();
+        let mut by_region: std::collections::HashMap<String, Vec<NodeCandidate>> =
+            std::collections::HashMap::new();
         for node in nodes {
             by_region.entry(node.region.clone()).or_default().push(node);
         }
@@ -181,11 +189,15 @@ impl ReplicationService {
         let mut selected = Vec::new();
         let mut region_iter: Vec<_> = by_region.into_iter().collect();
         region_iter.sort_by_key(|(_, nodes)| {
-            nodes.first().map(|n| n.usage_percent() as i64).unwrap_or(i64::MAX)
+            nodes
+                .first()
+                .map(|n| n.usage_percent() as i64)
+                .unwrap_or(i64::MAX)
         });
 
         // Round-robin across regions, picking least loaded from each
-        let mut indices: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut indices: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
 
         while selected.len() < count as usize {
             let mut added = false;
@@ -221,10 +233,8 @@ impl ReplicationService {
             .into_iter()
             .enumerate()
             .map(|(replica_idx, node)| {
-                let storage_key = format!(
-                    "file_{}_frag_{}_r{}",
-                    file_id, fragment_index, replica_idx
-                );
+                let storage_key =
+                    format!("file_{}_frag_{}_r{}", file_id, fragment_index, replica_idx);
                 let upload_url = format!("{}/fragments/{}", node.endpoint_url, storage_key);
 
                 UploadTarget {
@@ -255,11 +265,11 @@ impl ReplicationService {
               AND fr.status = 'active'
               AND sn.status = 'active'
             ORDER BY sn.used_space_bytes ASC
-            "#
+            "#,
         )
-            .bind(fragment_id)
-            .fetch_all(&self.db)
-            .await?;
+        .bind(fragment_id)
+        .fetch_all(&self.db)
+        .await?;
 
         Ok(replicas)
     }
@@ -282,15 +292,21 @@ impl ReplicationService {
             LEFT JOIN fragment_replicas fr ON fr.fragment_id = ff.id
             WHERE nm.nft_token_id = $1
             GROUP BY ff.id
-            "#
+            "#,
         )
-            .bind(nft_token_id)
-            .fetch_all(&self.db)
-            .await?;
+        .bind(nft_token_id)
+        .fetch_all(&self.db)
+        .await?;
 
         let total_fragments = stats.len();
-        let fully_replicated = stats.iter().filter(|(_, c)| *c >= settings.replication_factor as i64).count();
-        let under_replicated = stats.iter().filter(|(_, c)| *c > 0 && *c < settings.replication_factor as i64).count();
+        let fully_replicated = stats
+            .iter()
+            .filter(|(_, c)| *c >= settings.replication_factor as i64)
+            .count();
+        let under_replicated = stats
+            .iter()
+            .filter(|(_, c)| *c > 0 && *c < settings.replication_factor as i64)
+            .count();
         let not_replicated = stats.iter().filter(|(_, c)| *c == 0).count();
 
         Ok(FileReplicationStatus {
@@ -362,12 +378,12 @@ impl ReplicationService {
         storage_node_id: &str,
     ) -> Result<(), sqlx::Error> {
         sqlx::query(
-            "DELETE FROM fragment_replicas WHERE fragment_id = $1 AND storage_node_id = $2"
+            "DELETE FROM fragment_replicas WHERE fragment_id = $1 AND storage_node_id = $2",
         )
-            .bind(fragment_id)
-            .bind(storage_node_id)
-            .execute(&self.db)
-            .await?;
+        .bind(fragment_id)
+        .bind(storage_node_id)
+        .execute(&self.db)
+        .await?;
 
         Ok(())
     }

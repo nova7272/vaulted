@@ -14,6 +14,7 @@ tauri-build.workspace = true
 [dependencies]
 # Crypto core (local)
 xrpl-vault-crypto-core = { path = "../crypto-core" }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
 
 # Tauri
 tauri.workspace = true

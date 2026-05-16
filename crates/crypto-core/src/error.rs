@@ -98,6 +98,10 @@ pub enum CryptoError {
     #[error("Key derivation failed")]
     KeyDerivationFailed,
 
+    /// Key derivation failed with context
+    #[error("Key derivation failed: {0}")]
+    KeyDerivation(String),
+
     /// Invalid signature format
     #[error("Invalid signature format")]
     InvalidSignature,

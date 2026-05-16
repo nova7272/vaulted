@@ -37,13 +37,6 @@ interface TransferHistory {
     received: TransferHistoryItem[]
 }
 
-interface XamanPayload {
-    uuid: string
-    qrPng: string
-    qrUri: string
-    websocketUrl: string
-}
-
 /* ── Filter types ── */
 type FilterType = 'all' | 'transfers' | 'creates' | 'removes'
 
@@ -73,12 +66,6 @@ const IcoCheck = () => (
         <polyline points="20 6 9 17 4 12"/>
     </svg>
 )
-const IcoClose = () => (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-        <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-    </svg>
-)
-
 /* ── Meta maps ── */
 const TYPE_META: Record<string, { label: string; icon: string; color: string }> = {
     encrypt:           { label: 'Encrypted',         icon: '🔐', color: '#818cf8' },
@@ -120,6 +107,7 @@ interface ActivityScreenProps {
 }
 
 export default function ActivityScreen({ oracleConnected }: ActivityScreenProps) {
+    void oracleConnected
     const { entries: localEntries, addEntry } = useActivityLog()
     const [incomingOffers, setIncomingOffers] = useState<IncomingOffer[]>([])
     const [outgoingOffers, setOutgoingOffers] = useState<OutgoingOffer[]>([])
@@ -127,7 +115,6 @@ export default function ActivityScreen({ oracleConnected }: ActivityScreenProps)
     const [loading, setLoading] = useState(true)
     const [filter, setFilter] = useState<FilterType>('all')
     const [claimingOffer, setClaimingOffer] = useState<string | null>(null)
-    const [claimPayload, setClaimPayload] = useState<XamanPayload | null>(null)
     const [cancelling, setCancelling] = useState<string | null>(null)
 
     const loadAll = useCallback(async () => {
@@ -157,40 +144,11 @@ export default function ActivityScreen({ oracleConnected }: ActivityScreenProps)
     }, [loadAll])
 
     /* ── Claim ── */
-    const cancelClaim = () => {
-        setClaimingOffer(null)
-        setClaimPayload(null)
-    }
-
     const acceptOffer = async (offer: IncomingOffer) => {
-        try {
-            setClaimingOffer(offer.offerIndex)
-            const payload = await invoke<XamanPayload>('claim_nft', { offerIndex: offer.offerIndex })
-            setClaimPayload(payload)
-
-            const result = await invoke<{ success: boolean; txHash: string }>('wait_for_claim', {
-                payloadUuid: payload.uuid,
-                websocketUrl: payload.websocketUrl,
-                offerIndex: offer.offerIndex,
-            })
-
-            if (result.success) {
-                toast({ type: 'success', title: 'NFT Received!', sub: `TX: ${result.txHash.slice(0, 16)}...` })
-                addEntry('nft_claimed', 'NFT claimed successfully', {
-                    detail: `From ${short(offer.fromAddress)}`,
-                    nftTokenId: offer.nftTokenId,
-                })
-                // Remove from local state immediately + full refresh
-                setIncomingOffers(prev => prev.filter(o => o.offerIndex !== offer.offerIndex))
-                loadAll()
-            }
-        } catch (e) {
-            toast({ type: 'error', title: 'Claim failed', sub: String(e) })
-            addEntry('transfer_failed', 'Failed to claim NFT', { status: 'error', detail: String(e) })
-        } finally {
-            setClaimingOffer(null)
-            setClaimPayload(null)
-        }
+        setClaimingOffer(offer.offerIndex)
+        toast({ type: 'warning', title: 'Vaulted signing pending', sub: 'Local XRPL NFT claim signing is not implemented yet' })
+        addEntry('info', 'Vaulted NFT claim signing is pending', { detail: `From ${short(offer.fromAddress)}`, nftTokenId: offer.nftTokenId })
+        setClaimingOffer(null)
     }
 
     /* ── Cancel transfer ── */
@@ -301,22 +259,12 @@ export default function ActivityScreen({ oracleConnected }: ActivityScreenProps)
                                     <div className="sub">from {short(offer.fromAddress)}</div>
                                 </div>
 
-                                {claimingOffer === offer.offerIndex && claimPayload ? (
-                                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
-                                        <div className="v-qr-wrap" style={{padding:8}}>
-                                            <img src={claimPayload.qrPng} alt="QR" style={{ width: 80, height: 80, display:'block' }} />
-                                        </div>
-                                        <span style={{ fontSize: 12, color: 'var(--fg-2)' }}>Scan with Xaman</span>
-                                        <button className="v-btn" style={{height:28,fontSize:12,padding:'0 12px'}} onClick={cancelClaim}>Cancel</button>
-                                    </div>
-                                ) : (
-                                    <button
-                                        onClick={() => acceptOffer(offer)}
-                                        disabled={claimingOffer !== null}
-                                        className="v-btn v-btn-primary"
-                                        style={{opacity: claimingOffer ? 0.4 : 1}}
-                                    ><IcoCheck /> Accept</button>
-                                )}
+                                <button
+                                    onClick={() => acceptOffer(offer)}
+                                    disabled={claimingOffer !== null}
+                                    className="v-btn v-btn-primary"
+                                    style={{opacity: claimingOffer ? 0.4 : 1}}
+                                ><IcoCheck /> Accept</button>
                             </div>
                         ))}
                     </div>

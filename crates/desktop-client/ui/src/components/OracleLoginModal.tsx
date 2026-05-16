@@ -1,12 +1,12 @@
 import { useState, useEffect } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 
-interface XamanPayload {
-    uuid: string
-    qrPng: string
-    qrUri: string
-    websocketUrl: string
-    expiresAt?: string
+interface QrLoginStartResponse {
+    loginRequestId: string
+    challenge: string
+    oracleUrl: string
+    expiresAt: string
+    qrPayload: unknown
 }
 
 interface OracleLoginModalProps {
@@ -20,17 +20,19 @@ type LoginState = 'idle' | 'loading' | 'waiting' | 'success' | 'error'
 export function OracleLoginModal({ isOpen, onClose, onSuccess }: OracleLoginModalProps) {
     const [state, setState] = useState<LoginState>('idle')
     const [error, setError] = useState<string | null>(null)
-    const [payload, setPayload] = useState<XamanPayload | null>(null)
+    const [payload, setPayload] = useState<QrLoginStartResponse | null>(null)
     const [challenge, setChallenge] = useState<string>('')
 
-    // Reset when modal opens
+    // Reset when modal opens. Defer state writes to avoid synchronous effect updates.
     useEffect(() => {
-        if (isOpen) {
+        if (!isOpen) return
+        const frame = requestAnimationFrame(() => {
             setState('idle')
             setError(null)
             setPayload(null)
             setChallenge('')
-        }
+        })
+        return () => cancelAnimationFrame(frame)
     }, [isOpen])
 
     const startLogin = async () => {
@@ -38,17 +40,13 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess }: OracleLoginModa
         setError(null)
 
         try {
-            const result = await invoke<{
-                challenge: string
-                xamanPayload: XamanPayload
-            }>('oracle_login_start')
+            const result = await invoke<QrLoginStartResponse>('start_vaulted_qr_login')
 
             setChallenge(result.challenge)
-            setPayload(result.xamanPayload)
+            setPayload(result)
             setState('waiting')
 
-            // Start waiting for signature in background
-            waitForSignature(result.challenge, result.xamanPayload)
+            pollQrLogin(result.loginRequestId)
         } catch (e) {
             console.error('Failed to start Oracle login:', e)
             setError(String(e))
@@ -56,37 +54,34 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess }: OracleLoginModa
         }
     }
 
-    const waitForSignature = async (challenge: string, payload: XamanPayload) => {
+    const pollQrLogin = async (loginRequestId: string) => {
         try {
-            const success = await invoke<boolean>('oracle_login_wait', {
-                payloadUuid: payload.uuid,
-                websocketUrl: payload.websocketUrl,
-                qrPng: payload.qrPng,
-                challenge: challenge,
-            })
-
-            if (success) {
-                setState('success')
-                setTimeout(() => {
-                    onSuccess()
-                    onClose()
-                }, 1000)
-            } else {
-                setError('Login was rejected')
-                setState('error')
+            for (let i = 0; i < 120; i++) {
+                const result = await invoke<{ status: string; approved: boolean }>('poll_vaulted_qr_login', { loginRequestId })
+                if (result.approved || result.status === 'approved' || result.status === 'consumed') {
+                    setState('success')
+                    setTimeout(() => {
+                        onSuccess()
+                        onClose()
+                    }, 1000)
+                    return
+                }
+                if (result.status === 'rejected' || result.status === 'expired') {
+                    setError(`Login ${result.status}`)
+                    setState('error')
+                    return
+                }
+                await new Promise(resolve => setTimeout(resolve, 1500))
             }
+            setError('QR login timed out')
+            setState('error')
         } catch (e) {
-            console.error('Oracle login wait failed:', e)
+            console.error('Vaulted QR login polling failed:', e)
             setError(String(e))
             setState('error')
         }
     }
 
-    const openInXaman = () => {
-        if (payload?.qrUri) {
-            window.open(payload.qrUri, '_blank')
-        }
-    }
 
     if (!isOpen) return null
 
@@ -107,7 +102,7 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess }: OracleLoginModa
                         </svg>
                     </div>
                     <h2>Oracle Authentication</h2>
-                    <p className="modal-subtitle">Sign with your wallet to authenticate</p>
+                    <p className="modal-subtitle">Approve with a trusted Vaulted device</p>
                 </div>
 
                 <div className="modal-body">
@@ -126,25 +121,24 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess }: OracleLoginModa
                     {state === 'loading' && (
                         <div className="login-loading">
                             <div className="spinner" />
-                            <p>Preparing authentication...</p>
+                            <p>Preparing Vaulted QR login...</p>
                         </div>
                     )}
 
                     {state === 'waiting' && payload && (
                         <div className="login-waiting">
-                            <div className="qr-container">
-                                <img src={`data:image/png;base64,${payload.qrPng}`} alt="Scan with Xaman" />
-                            </div>
-                            <p>Scan the QR code with Xaman wallet</p>
+                            <p>Scan or copy this Vaulted QR login payload with a trusted device.</p>
+                            <textarea
+                                readOnly
+                                value={JSON.stringify(payload.qrPayload, null, 2)}
+                                style={{ width: '100%', minHeight: 140, borderRadius: 10, padding: 12, fontFamily: 'ui-monospace, monospace', fontSize: 12, background: '#0f1219', color: '#f2f3f7', border: '1px solid #262c3a' }}
+                            />
                             <p className="challenge-text">
                                 Challenge: <code>{challenge.slice(0, 30)}...</code>
                             </p>
-                            <button className="btn-secondary" onClick={openInXaman}>
-                                Open in Xaman
-                            </button>
                             <div className="waiting-indicator">
                                 <div className="pulse-dot" />
-                                <span>Waiting for signature...</span>
+                                <span>Waiting for Vaulted device approval...</span>
                             </div>
                         </div>
                     )}

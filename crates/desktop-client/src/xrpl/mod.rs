@@ -8,7 +8,7 @@ mod nft;
 
 pub use client::XrplClient;
 pub use escrow::{
-    CreateEscrowRequest, EscrowInfo, EscrowOperations, 
-    xrp_to_drops, drops_to_xrp, unix_to_ripple_time, ripple_to_unix_time,
+    drops_to_xrp, ripple_to_unix_time, unix_to_ripple_time, xrp_to_drops, CreateEscrowRequest,
+    EscrowInfo, EscrowOperations,
 };
 pub use nft::{NftInfo, NftMintRequest, NftOperations};

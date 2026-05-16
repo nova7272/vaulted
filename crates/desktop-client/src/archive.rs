@@ -1,6 +1,6 @@
 //! Archive utilities for multi-file uploads
 
-use std::io::{Read, Write, Seek};
+use std::io::{Read, Seek, Write};
 use std::path::Path;
 use zip::write::FileOptions;
 use zip::CompressionMethod;
@@ -18,13 +18,19 @@ pub fn create_zip_archive(paths: &[String], _archive_name: &str) -> Result<Vec<u
         for path_str in paths {
             let path = Path::new(path_str);
             if path.is_file() {
-                add_file_to_zip(&mut zip, path, path.file_name().unwrap().to_str().unwrap(), &options)?;
+                add_file_to_zip(
+                    &mut zip,
+                    path,
+                    path.file_name().unwrap().to_str().unwrap(),
+                    &options,
+                )?;
             } else if path.is_dir() {
                 add_directory_to_zip(&mut zip, path, "", &options)?;
             }
         }
 
-        zip.finish().map_err(|e| format!("Failed to finish ZIP: {}", e))?;
+        zip.finish()
+            .map_err(|e| format!("Failed to finish ZIP: {}", e))?;
     }
 
     Ok(buffer.into_inner())
@@ -102,7 +108,10 @@ pub fn generate_archive_name(paths: &[String]) -> String {
     if paths.len() == 1 {
         let path = Path::new(&paths[0]);
         if path.is_dir() {
-            return format!("{}.zip", path.file_name().unwrap().to_str().unwrap_or("archive"));
+            return format!(
+                "{}.zip",
+                path.file_name().unwrap().to_str().unwrap_or("archive")
+            );
         }
     }
 
@@ -110,7 +119,11 @@ pub fn generate_archive_name(paths: &[String]) -> String {
     if let Some(first) = paths.first() {
         let path = Path::new(first);
         if let Some(stem) = path.file_stem() {
-            return format!("{}_and_{}_more.zip", stem.to_str().unwrap_or("files"), paths.len() - 1);
+            return format!(
+                "{}_and_{}_more.zip",
+                stem.to_str().unwrap_or("files"),
+                paths.len() - 1
+            );
         }
     }
 

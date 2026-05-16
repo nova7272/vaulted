@@ -5,21 +5,21 @@
 //! and token-based authentication for fragment access.
 
 use axum::{
+    body::Bytes,
     extract::{Path, Query, State},
     http::StatusCode,
     response::Json,
     routing::{delete, get, put},
     Router,
-    body::Bytes,
 };
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use tokio::fs;
+use tokio::sync::RwLock;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -44,10 +44,12 @@ struct FragmentInfo {
     key: String,
     size: u64,
     created_at: String,
+    encrypted_hash: Option<String>,
 }
 
 /// Storage access token payload (must match Oracle's StorageToken)
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct StorageToken {
     nft_token_id: String,
     storage_key: String,
@@ -59,6 +61,8 @@ struct StorageToken {
 #[derive(Debug, Deserialize)]
 struct TokenQuery {
     token: Option<String>,
+    /// Optional declared encrypted fragment hash (sha256:... or blake3:...).
+    fragment_hash: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -75,6 +79,7 @@ struct UploadResponse {
     key: String,
     size: u64,
     node_id: String,
+    encrypted_hash: String,
 }
 
 #[derive(Serialize)]
@@ -120,8 +125,8 @@ async fn main() -> anyhow::Result<()> {
     );
     let oracle_url = std::env::var("ORACLE_URL").ok();
     let region = std::env::var("REGION").unwrap_or_else(|_| "local".to_string());
-    let public_url = std::env::var("PUBLIC_URL")
-        .unwrap_or_else(|_| format!("http://localhost:{}", port));
+    let public_url =
+        std::env::var("PUBLIC_URL").unwrap_or_else(|_| format!("http://localhost:{}", port));
 
     // Load Oracle public key for token verification
     let mut oracle_public_key = load_oracle_public_key();
@@ -133,15 +138,18 @@ async fn main() -> anyhow::Result<()> {
     // If ORACLE_PUBLIC_KEY not set but ORACLE_URL is available, fetch it automatically
     if oracle_public_key.is_none() {
         if let Some(ref oracle) = oracle_url {
-            tracing::info!("ORACLE_PUBLIC_KEY not set, fetching from Oracle at {}", oracle);
+            tracing::info!(
+                "ORACLE_PUBLIC_KEY not set, fetching from Oracle at {}",
+                oracle
+            );
             match fetch_oracle_public_key(oracle).await {
                 Ok(key) => {
                     tracing::info!("Successfully fetched Oracle public key");
                     oracle_public_key = Some(key);
-                }
+                },
                 Err(e) => {
                     tracing::warn!("Failed to fetch Oracle public key: {}", e);
-                }
+                },
             }
         }
     }
@@ -201,7 +209,9 @@ async fn main() -> anyhow::Result<()> {
                 &public_url_clone,
                 &register_state.region,
                 &node_secret_clone,
-            ).await {
+            )
+            .await
+            {
                 tracing::error!("Failed to register with Oracle: {}", e);
             }
         });
@@ -229,7 +239,9 @@ async fn main() -> anyhow::Result<()> {
                     fragments_count,
                     used_space as i64,
                     &node_secret_clone,
-                ).await {
+                )
+                .await
+                {
                     tracing::warn!("Heartbeat failed: {}", e);
                 }
             }
@@ -325,7 +337,11 @@ async fn send_heartbeat(
         anyhow::bail!("Heartbeat returned {}", response.status());
     }
 
-    tracing::debug!("Heartbeat sent: {} fragments, {} bytes", fragments_count, used_space_bytes);
+    tracing::debug!(
+        "Heartbeat sent: {} fragments, {} bytes",
+        fragments_count,
+        used_space_bytes
+    );
     Ok(())
 }
 
@@ -347,6 +363,7 @@ async fn load_existing_fragments(
                         key: key.to_string(),
                         size: metadata.len(),
                         created_at: chrono::Utc::now().to_rfc3339(),
+                        encrypted_hash: None,
                     },
                 );
             }
@@ -424,7 +441,10 @@ async fn get_fragment(
     let path = state.storage_dir.join(&key);
 
     // Second defense: verify canonical path stays within storage_dir (HIGH-02)
-    let canonical_storage = state.storage_dir.canonicalize().unwrap_or_else(|_| state.storage_dir.clone());
+    let canonical_storage = state
+        .storage_dir
+        .canonicalize()
+        .unwrap_or_else(|_| state.storage_dir.clone());
     if let Ok(canonical_path) = path.canonicalize() {
         if !canonical_path.starts_with(&canonical_storage) {
             return Err((
@@ -440,7 +460,7 @@ async fn get_fragment(
         Ok(data) => {
             tracing::debug!("Serving fragment: {} ({} bytes)", key, data.len());
             Ok(data)
-        }
+        },
         Err(_) => Err((
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
@@ -466,11 +486,28 @@ async fn put_fragment(
 
     let path = state.storage_dir.join(&key);
     let size = body.len() as u64;
+    let computed_hash = format!("sha256:{}", sha256_hex(&body));
+
+    if let Some(ref declared_hash) = params.fragment_hash {
+        if !fragment_hash_matches(declared_hash, &body) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("Fragment hash mismatch: declared {declared_hash}, computed {computed_hash}"),
+                }),
+            ));
+        }
+    }
 
     // Second defense: verify path stays within storage_dir (HIGH-02)
-    let canonical_storage = state.storage_dir.canonicalize().unwrap_or_else(|_| state.storage_dir.clone());
+    let canonical_storage = state
+        .storage_dir
+        .canonicalize()
+        .unwrap_or_else(|_| state.storage_dir.clone());
     if let Some(parent) = path.parent() {
-        let canonical_parent = parent.canonicalize().unwrap_or_else(|_| parent.to_path_buf());
+        let canonical_parent = parent
+            .canonicalize()
+            .unwrap_or_else(|_| parent.to_path_buf());
         if !canonical_parent.starts_with(&canonical_storage) {
             return Err((
                 StatusCode::FORBIDDEN,
@@ -491,6 +528,10 @@ async fn put_fragment(
                     key: key.clone(),
                     size,
                     created_at: chrono::Utc::now().to_rfc3339(),
+                    encrypted_hash: params
+                        .fragment_hash
+                        .clone()
+                        .or_else(|| Some(computed_hash.clone())),
                 },
             );
 
@@ -500,8 +541,9 @@ async fn put_fragment(
                 key,
                 size,
                 node_id: state.node_id.clone(),
+                encrypted_hash: params.fragment_hash.unwrap_or(computed_hash),
             }))
-        }
+        },
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -534,7 +576,7 @@ async fn delete_fragment(
 
             tracing::info!("Deleted fragment: {}", key);
             Ok(StatusCode::NO_CONTENT)
-        }
+        },
         Err(_) => Err((
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
@@ -555,7 +597,7 @@ fn load_oracle_public_key() -> Option<VerifyingKey> {
         Err(_) => {
             tracing::error!("Failed to decode ORACLE_PUBLIC_KEY as hex");
             return None;
-        }
+        },
     };
 
     if key_bytes.len() != 32 {
@@ -571,7 +613,7 @@ fn load_oracle_public_key() -> Option<VerifyingKey> {
         Err(e) => {
             tracing::error!("Failed to parse ORACLE_PUBLIC_KEY: {}", e);
             None
-        }
+        },
     }
 }
 
@@ -593,8 +635,8 @@ async fn fetch_oracle_public_key(oracle_url: &str) -> anyhow::Result<VerifyingKe
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing public_key field in response"))?;
 
-    let key_bytes = hex_decode(key_hex)
-        .map_err(|_| anyhow::anyhow!("Failed to decode public key hex"))?;
+    let key_bytes =
+        hex_decode(key_hex).map_err(|_| anyhow::anyhow!("Failed to decode public key hex"))?;
 
     if key_bytes.len() != 32 {
         anyhow::bail!("Public key must be 32 bytes, got {}", key_bytes.len());
@@ -603,8 +645,7 @@ async fn fetch_oracle_public_key(oracle_url: &str) -> anyhow::Result<VerifyingKe
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&key_bytes);
 
-    VerifyingKey::from_bytes(&arr)
-        .map_err(|e| anyhow::anyhow!("Invalid public key: {}", e))
+    VerifyingKey::from_bytes(&arr).map_err(|e| anyhow::anyhow!("Invalid public key: {}", e))
 }
 
 /// Verify a storage token for the given operation
@@ -748,6 +789,23 @@ fn verify_token_for_operation(
         storage_key
     );
     Ok(())
+}
+
+/// Computes SHA-256 hex for an encrypted fragment.
+fn sha256_hex(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(data))
+}
+
+/// Verifies declared hash before accepting upload. Supports sha256: and blake3:.
+fn fragment_hash_matches(declared_hash: &str, data: &[u8]) -> bool {
+    if let Some(expected) = declared_hash.strip_prefix("sha256:") {
+        return expected.eq_ignore_ascii_case(&sha256_hex(data));
+    }
+    if let Some(expected) = declared_hash.strip_prefix("blake3:") {
+        return expected.eq_ignore_ascii_case(&blake3::hash(data).to_hex().to_string());
+    }
+    false
 }
 
 /// Hex decode helper

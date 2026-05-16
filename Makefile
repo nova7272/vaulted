@@ -2,7 +2,7 @@
 # XRPL Vault - Makefile
 # ============================================
 
-.PHONY: help setup dev dev-tools down clean build test lint fmt check db-reset logs oracle storage migrate
+.PHONY: help setup dev dev-tools down clean build test lint fmt check db-reset logs oracle storage migrate security-audit security-audit-strict sensitive-log-audit
 
 # Цвета для вывода
 CYAN := \033[36m
@@ -171,6 +171,20 @@ test-flow: ## Тест полного flow (требует запущенных 
 	@curl -s http://localhost:9001/health > /dev/null || (echo "$(YELLOW)Storage не запущен. Запустите: make storage$(RESET)" && exit 1)
 	@echo "$(GREEN)✓ Все сервисы работают$(RESET)"
 	cargo test --package xrpl-vault-oracle --test integration -- --nocapture
+
+
+# ============================================
+# Security / Hardening
+# ============================================
+
+sensitive-log-audit: ## Проверить, что sensitive values не логируются напрямую
+	./scripts/check-sensitive-logs.sh
+
+security-audit: ## Запустить hardening audit без fail-fast на advisory warnings
+	./scripts/security-audit.sh
+
+security-audit-strict: ## Запустить hardening audit в CI-строгом режиме
+	./scripts/security-audit.sh --strict
 
 # ============================================
 # Документация

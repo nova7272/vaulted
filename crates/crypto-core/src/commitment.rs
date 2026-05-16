@@ -3,12 +3,12 @@
 //! Используется для проверки что полученный ключ соответствует
 //! тому, что был использован при создании vault.
 
-use sha2::{Sha256, Digest};
+use crate::aes::AesKey;
+use crate::error::{CryptoError, Result};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
-use crate::error::{CryptoError, Result};
-use crate::aes::AesKey;
 
 /// Размер nonce в байтах
 pub const NONCE_SIZE: usize = 16;
@@ -142,7 +142,7 @@ impl KeyCommitment {
         let prefix = "xvault:";
         if !uri.starts_with(prefix) {
             return Err(CryptoError::InvalidData(
-                "NFT URI must start with 'xvault:'".into()
+                "NFT URI must start with 'xvault:'".into(),
             ));
         }
 
@@ -163,7 +163,6 @@ impl KeyCommitment {
         Ok(commitment)
     }
 }
-
 
 #[cfg(test)]
 mod tests {

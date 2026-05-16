@@ -22,3 +22,6 @@ reqwest = { workspace = true, features = ["json"] }
 # Token verification
 ed25519-dalek.workspace = true
 base64.workspace = true
+sha2.workspace = true
+blake3.workspace = true
+hex.workspace = true
