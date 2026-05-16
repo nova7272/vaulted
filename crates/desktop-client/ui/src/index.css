@@ -165,8 +165,8 @@ body { font-family: var(--font-ui); font-size: 14px; line-height: 1.5; color: va
 .v-login-features > div { display: flex; align-items: center; gap: 8px; }
 .v-login-card { margin-top: 48px; background: #f4f5f7; border-radius: 20px; padding: 36px; width: 420px; text-align: center; box-shadow: 0 20px 60px rgba(0,0,0,0.4); }
 .v-login-card h3 { color: #1a1d26; font-size: 22px; margin: 0 0 18px; font-weight: 600; }
-.v-btn-xaman { width: 100%; height: 60px; background: #0c0e14; color: #fff; border: 0; border-radius: 12px; font-family: inherit; font-size: 18px; font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 12px; transition: transform .1s; }
-.v-btn-xaman:hover { transform: translateY(-1px); }
+.v-btn-vaulted { width: 100%; height: 60px; background: #0c0e14; color: #fff; border: 0; border-radius: 12px; font-family: inherit; font-size: 18px; font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 12px; transition: transform .1s; }
+.v-btn-vaulted:hover { transform: translateY(-1px); }
 
 /* ── Modal ── */
 .v-modal-backdrop { position: fixed; inset: 0; background: rgba(5,7,11,0.6); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); display: flex; align-items: center; justify-content: center; z-index: 1000; }

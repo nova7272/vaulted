@@ -57,7 +57,9 @@ impl FileDecryptor {
 
     /// Расшифровывает данные
     pub fn decrypt_data(&self, aes_key: &AesKey, encrypted: &EncryptedData) -> Result<Vec<u8>> {
-        aes_key.decrypt(encrypted).map_err(|e| ClientError::Crypto(e))
+        aes_key
+            .decrypt(encrypted)
+            .map_err(|e| ClientError::Crypto(e))
     }
 
     /// Расшифровывает файл и сохраняет на диск

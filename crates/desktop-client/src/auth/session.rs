@@ -14,8 +14,9 @@ pub struct Session {
     pub created_at: DateTime<Utc>,
     /// Время истечения сессии
     pub expires_at: DateTime<Utc>,
-    /// UUID payload от Xaman
-    pub xaman_payload_uuid: String,
+    /// UUID of the signing/login request that created this session.
+    #[serde(alias = "xaman_payload_uuid")]
+    pub signing_request_uuid: String,
     /// Oracle JWT access token
     #[serde(default)]
     pub oracle_token: Option<String>,
@@ -38,7 +39,7 @@ impl Session {
     pub fn new(
         wallet_address: String,
         public_key: String,
-        xaman_payload_uuid: String,
+        signing_request_uuid: String,
         duration_hours: i64,
     ) -> Self {
         let now = Utc::now();
@@ -47,7 +48,7 @@ impl Session {
             public_key,
             created_at: now,
             expires_at: now + Duration::hours(duration_hours),
-            xaman_payload_uuid,
+            signing_request_uuid,
             oracle_token: None,
             oracle_token_expires_at: None,
             refresh_token: None,
@@ -60,11 +61,16 @@ impl Session {
     pub fn with_oracle_token(
         wallet_address: String,
         public_key: String,
-        xaman_payload_uuid: String,
+        signing_request_uuid: String,
         duration_hours: i64,
         oracle_token: String,
     ) -> Self {
-        let mut session = Self::new(wallet_address, public_key, xaman_payload_uuid, duration_hours);
+        let mut session = Self::new(
+            wallet_address,
+            public_key,
+            signing_request_uuid,
+            duration_hours,
+        );
         session.oracle_token = Some(oracle_token);
         session.oracle_token_expires_at = Some(Utc::now() + Duration::hours(1));
         session
@@ -118,7 +124,13 @@ impl Session {
     }
 
     /// Updates tokens from refresh response (access + refresh + role)
-    pub fn update_tokens(&mut self, access_token: String, refresh_token: Option<String>, expires_in_secs: i64, role: Option<String>) {
+    pub fn update_tokens(
+        &mut self,
+        access_token: String,
+        refresh_token: Option<String>,
+        expires_in_secs: i64,
+        role: Option<String>,
+    ) {
         self.set_oracle_token_with_expiry(access_token, expires_in_secs);
         if let Some(rt) = refresh_token {
             self.refresh_token = Some(rt);
@@ -149,7 +161,7 @@ impl Session {
             Some(expires_at) => {
                 let remaining = expires_at - Utc::now();
                 remaining < Duration::minutes(5)
-            }
+            },
             None => self.oracle_token.is_some(),
         }
     }

@@ -8,7 +8,6 @@
 pub mod api;
 
 pub use api::{
-    OracleClient, OracleConfig,
-    CreateVaultRequest, CreateVaultResponse, VaultManifest, VaultFragment,
-    InitiateTransferResponse,
+    CreateVaultRequest, CreateVaultResponse, InitiateTransferResponse, OracleClient, OracleConfig,
+    VaultFragment, VaultManifest,
 };

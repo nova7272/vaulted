@@ -129,7 +129,7 @@ impl FileEncryptor {
 
         // Шифруем имя файла тем же AES ключом
         let encrypted_filename = aes_key.encrypt_to_base64(filename.as_bytes())?;
-        
+
         // Создаём манифест (без storage info - это добавит Oracle)
         let manifest = FileManifest {
             encrypted_filename,
@@ -168,7 +168,18 @@ mod tests {
             .encrypt_bytes(data, "test.txt", "text/plain", &keypair.public_key())
             .unwrap();
 
-        assert_eq!(encrypted.manifest.encrypted_filename, "test.txt");
+        // Privacy model: filename must not be stored as plaintext in the manifest.
+        assert_ne!(encrypted.manifest.encrypted_filename, "test.txt");
+        assert!(!encrypted.manifest.encrypted_filename.is_empty());
+
+        // Recover AES file key and verify encrypted filename roundtrip.
+        let aes_key_bytes = pre.decrypt(&keypair, &encrypted.encrypted_aes_key).unwrap();
+        let aes_key = AesKey::from_bytes(&aes_key_bytes).unwrap();
+        let decrypted_filename = aes_key
+            .decrypt_from_base64(&encrypted.manifest.encrypted_filename)
+            .unwrap();
+
+        assert_eq!(String::from_utf8(decrypted_filename).unwrap(), "test.txt");
         assert_eq!(encrypted.manifest.original_size, data.len() as u64);
         assert!(encrypted.manifest.original_hash.starts_with("sha256:"));
         assert!(encrypted.encrypted_hash.starts_with("blake3:"));
@@ -183,7 +194,12 @@ mod tests {
         let data: Vec<u8> = (0..500).map(|i| (i % 256) as u8).collect();
 
         let encrypted = encryptor
-            .encrypt_bytes(&data, "large.bin", "application/octet-stream", &keypair.public_key())
+            .encrypt_bytes(
+                &data,
+                "large.bin",
+                "application/octet-stream",
+                &keypair.public_key(),
+            )
             .unwrap();
 
         // Теперь 1 blob вместо фрагментов

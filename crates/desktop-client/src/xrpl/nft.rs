@@ -4,8 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{ClientError, Result};
 use super::client::XrplClient;
+use crate::error::{ClientError, Result};
 
 /// Операции с NFT
 pub struct NftOperations<'a> {
@@ -69,7 +69,7 @@ impl<'a> NftOperations<'a> {
 
     /// Создаёт данные для транзакции NFTokenMint
     ///
-    /// Транзакция должна быть подписана через Xaman
+    /// Транзакция должна быть подписана локально через Vaulted XRPL wallet
     pub fn create_mint_transaction(&self, request: &NftMintRequest) -> NftMintTransaction {
         let uri_hex = string_to_hex(&request.uri);
 
@@ -117,6 +117,7 @@ impl<'a> NftOperations<'a> {
 
 // NFT Flags (XLS-20)
 const NFT_FLAG_BURNABLE: u32 = 0x0001;
+#[allow(dead_code)]
 const NFT_FLAG_ONLY_XRP: u32 = 0x0002;
 const NFT_FLAG_TRANSFERABLE: u32 = 0x0008;
 

@@ -2,9 +2,25 @@ import { useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import FingerprintBg from '../components/FingerprintBg'
 
-interface UserInfo { walletAddress: string; publicKey: string; hasPreKeys: boolean; expiresAt: string }
+interface UserInfo {
+    walletAddress: string
+    publicKey: string
+    hasPreKeys: boolean
+    hasVaultedWallet?: boolean
+    vaultedIdentityId?: string | null
+    encryptionPublicKey?: string | null
+    signingPublicKey?: string | null
+    expiresAt: string
+}
 interface AuthScreenProps { onLogin: (u: UserInfo) => void }
-interface XamanPayload { uuid: string; qrPng: string; qrUri: string; websocketUrl: string; expiresAt: string | null }
+interface VaultedIdentityResponse {
+    vaultedIdentityId: string
+    mnemonic?: string | null
+    signingPublicKey: string
+    encryptionPublicKey: string
+    devicePublicKey: string
+    protocolVersion: string
+}
 
 const IcoShield = () => (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
@@ -25,29 +41,33 @@ const IcoTransfer = () => (
 )
 
 export default function AuthScreen({ onLogin }: AuthScreenProps) {
-    const [step, setStep] = useState<'initial'|'scanning'|'deriving'>('initial')
-    const [qrCode, setQrCode] = useState<string|null>(null)
+    const [step, setStep] = useState<'initial'|'backup'|'restore'>('initial')
     const [error, setError] = useState<string|null>(null)
     const [status, setStatus] = useState('')
+    const [createdIdentity, setCreatedIdentity] = useState<VaultedIdentityResponse|null>(null)
+    const [restorePhrase, setRestorePhrase] = useState('')
+    const [advancedSeed, setAdvancedSeed] = useState(false)
 
-    const startAuth = async () => {
+    const createVaultedWallet = async () => {
         try {
-            setError(null); setStatus('Creating sign request...')
-            const p = await invoke<XamanPayload>('start_xaman_auth')
-            setQrCode(p.qrPng); setStep('scanning'); setStatus('Scan QR code with Xaman')
-            await invoke('wait_for_auth', { payloadUuid: p.uuid, websocketUrl: p.websocketUrl })
-            setStatus('Checking encryption keys...')
-            const hasKeys = await invoke<boolean>('has_pre_keys')
-            if (!hasKeys) await deriveKeys()
-            onLogin(await invoke<UserInfo>('get_current_user'))
+            setError(null)
+            setStatus('Generating Vaulted seed phrase…')
+            const wordCount = advancedSeed ? 24 : 12
+            const identity = await invoke<VaultedIdentityResponse>('create_vaulted_wallet', { wordCount, passphrase: null })
+            setCreatedIdentity(identity)
+            setStep('backup')
+            setStatus(`Write down your ${wordCount}-word Vaulted seed phrase. It is the only recovery key.`)
         } catch(e) { setError(String(e)); setStep('initial') }
     }
 
-    const deriveKeys = async () => {
-        setStep('deriving'); setStatus('Creating key derivation request...')
-        const p = await invoke<XamanPayload>('start_key_derivation')
-        setQrCode(p.qrPng); setStatus('Sign again to derive encryption keys')
-        await invoke('wait_for_key_derivation', { payloadUuid: p.uuid, websocketUrl: p.websocketUrl })
+    const restoreVaultedWallet = async () => {
+        try {
+            setError(null)
+            setStatus('Restoring Vaulted identity from seed…')
+            await invoke<VaultedIdentityResponse>('restore_vaulted_wallet', { mnemonic: restorePhrase.trim(), passphrase: null })
+            setStatus('Vaulted wallet restored.')
+            onLogin(await invoke<UserInfo>('get_current_user'))
+        } catch(e) { setError(String(e)) }
     }
 
     return (
@@ -57,51 +77,59 @@ export default function AuthScreen({ onLogin }: AuthScreenProps) {
             <div className="v-login-logo">[<span className="br">v</span>]aulted</div>
 
             <div className="v-login-features">
-                <div><IcoShield /> Encrypt</div>
-                <div><IcoCube /> NFT</div>
-                <div><IcoTransfer /> Transfer</div>
+                <div><IcoShield /> Seed identity</div>
+                <div><IcoCube /> NFT anchor</div>
+                <div><IcoTransfer /> Grants</div>
             </div>
 
-            {step === 'initial' ? (
+            {step === 'initial' && (
                 <div className="v-login-card">
-                    <h3>Sign in to your vault</h3>
-                    <button className="v-btn-xaman" onClick={startAuth}>
-                        <span style={{ fontFamily: 'ui-monospace, monospace', fontWeight: 700, fontSize: 18, letterSpacing: '-0.02em' }}>X</span>
-                        Connect with Xaman
+                    <h3>Create or restore your Vaulted wallet</h3>
+                    <button className="v-btn-vaulted" onClick={createVaultedWallet}>Create new Vaulted wallet</button>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#6a6f7d', marginTop: 12, cursor: 'pointer' }}>
+                        <input type="checkbox" checked={advancedSeed} onChange={e => setAdvancedSeed(e.target.checked)} />
+                        Advanced security: generate a 24-word seed instead of the standard 12-word seed
+                    </label>
+                    <button className="v-btn-vaulted" onClick={() => setStep('restore')} style={{ marginTop: 10, background: '#fff', color: '#1a1d26', border: '1px solid #d7dbe7' }}>
+                        Restore from seed phrase
                     </button>
-                    <div style={{ fontSize: 14, color: '#6a6f7d', marginTop: 14 }}>No account, no password. Your wallet is your key.</div>
+                    <div style={{ fontSize: 13, color: '#6a6f7d', marginTop: 14 }}>
+                        Standard Vaulted setup uses a 12-word seed phrase. Vaulted cannot recover encrypted files without this seed.
+                    </div>
                     {error && <div style={{ fontSize: 12, color: '#e07a6a', marginTop: 12, padding: '8px 12px', background: 'rgba(224,122,106,0.1)', borderRadius: 8 }}>{error}</div>}
                 </div>
-            ) : (
-                <div className="v-login-card" style={{ width: 440 }}>
-                    {qrCode && (
-                        <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 18 }}>
-                            <div className="v-qr-wrap">
-                                <img src={qrCode} alt="QR" style={{ width: 240, height: 240, display: 'block', imageRendering: 'pixelated' as const }} />
-                            </div>
-                        </div>
-                    )}
-                    <div style={{ color: '#1a1d26', fontSize: 17, fontWeight: 600, marginBottom: 6 }}>
-                        {step === 'scanning' ? 'Scan with Xaman wallet' : 'Derive encryption keys'}
+            )}
+
+            {step === 'backup' && createdIdentity && (
+                <div className="v-login-card" style={{ width: 560 }}>
+                    <h3>Back up your Vaulted seed phrase</h3>
+                    <div style={{ fontSize: 13, color: '#6a6f7d', marginBottom: 12 }}>
+                        Vaulted cannot recover encrypted files without this seed. Do not paste it into chat, logs, analytics, or screenshots.
                     </div>
-                    <div style={{ color: '#6a6f7d', fontSize: 14, marginBottom: 14 }}>
-                        {step === 'scanning'
-                            ? 'Confirm the sign-in request on your device.'
-                            : 'Sign again to create your encryption keys.'}
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, textAlign: 'left', fontFamily: 'ui-monospace, monospace', fontSize: 12, padding: 14, background: '#f6f7fb', borderRadius: 12 }}>
+                        {(createdIdentity.mnemonic || '').split(' ').map((w, i) => <div key={i}>{i + 1}. {w}</div>)}
                     </div>
-                    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, color: '#3b6fe0', fontSize: 14, fontWeight: 500 }}>
-                        <div className="v-spin" style={{ borderColor: 'rgba(59,111,224,0.2)', borderTopColor: '#3b6fe0' }} />
-                        {status || 'Waiting for signature…'}
-                    </div>
-                    {error && <div style={{ fontSize: 13, color: '#e07a6a', marginTop: 14, padding: '10px 14px', background: 'rgba(224,122,106,0.1)', borderRadius: 10 }}>{error}</div>}
-                    <div style={{ marginTop: 16 }}>
-                        <button onClick={() => { setStep('initial'); setQrCode(null); setError(null); setStatus('') }}
-                                style={{ padding: '10px 22px', borderRadius: 10, border: '1px solid #ddd', background: '#fff', color: '#6a6f7d', fontSize: 14, fontWeight: 500, cursor: 'pointer' }}>
-                            Cancel
-                        </button>
-                    </div>
+                    <div style={{ fontSize: 12, color: '#6a6f7d', marginTop: 12 }}>Identity: {createdIdentity.vaultedIdentityId.slice(0, 16)}…</div>
+                    <button className="v-btn-vaulted" onClick={async () => onLogin(await invoke<UserInfo>('get_current_user'))} style={{ marginTop: 16 }}>I saved my seed phrase</button>
                 </div>
             )}
+
+            {step === 'restore' && (
+                <div className="v-login-card" style={{ width: 520 }}>
+                    <h3>Restore Vaulted wallet</h3>
+                    <textarea
+                        value={restorePhrase}
+                        onChange={e => setRestorePhrase(e.target.value)}
+                        placeholder="Enter your 12 or 24 word Vaulted seed phrase"
+                        style={{ width: '100%', minHeight: 110, borderRadius: 12, border: '1px solid #d7dbe7', padding: 12, resize: 'vertical' }}
+                    />
+                    <button className="v-btn-vaulted" onClick={restoreVaultedWallet} style={{ marginTop: 12 }}>Restore</button>
+                    <button onClick={() => setStep('initial')} style={{ marginTop: 10, padding: '10px 22px', borderRadius: 10, border: '1px solid #ddd', background: '#fff', color: '#6a6f7d', fontSize: 14, fontWeight: 500, cursor: 'pointer' }}>Cancel</button>
+                    {status && <div style={{ color: '#3b6fe0', fontSize: 13, marginTop: 10 }}>{status}</div>}
+                    {error && <div style={{ fontSize: 13, color: '#e07a6a', marginTop: 14, padding: '10px 14px', background: 'rgba(224,122,106,0.1)', borderRadius: 10 }}>{error}</div>}
+                </div>
+            )}
+
         </div>
     )
 }

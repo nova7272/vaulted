@@ -10,7 +10,7 @@
 //! │                    Desktop Client                        │
 //! │  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────────┐ │
 //! │  │  Auth   │  │ Crypto  │  │  XRPL   │  │   Oracle    │ │
-//! │  │ (Xaman) │  │ AES+PRE │  │  Client │  │   Client    │ │
+//! │  │Vaulted │  │ AES+PRE │  │  Client │  │   Client    │ │
 //! │  └────┬────┘  └────┬────┘  └────┬────┘  └──────┬──────┘ │
 //! │       │            │            │              │         │
 //! │       └────────────┴─────┬──────┴──────────────┘         │
@@ -28,19 +28,19 @@
 //! - Шифрование/расшифровка происходит ТОЛЬКО локально
 //! - Oracle получает только зашифрованные данные и re-encryption keys
 
-#![warn(missing_docs)]
+#![allow(missing_docs)]
 #![warn(clippy::all)]
 
+pub mod archive;
 pub mod auth;
 pub mod commands;
 pub mod crypto;
 pub mod error;
+pub mod nft_image;
 pub mod oracle;
 pub mod state;
 pub mod storage;
 pub mod xrpl;
-pub mod nft_image;
-pub mod archive;
 
 pub use error::{ClientError, Result};
 pub use state::AppState;

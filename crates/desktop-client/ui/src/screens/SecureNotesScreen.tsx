@@ -1,10 +1,9 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
-interface SecureNoteResult { vaultId: string; nftTokenId: string; offerIndex: string; xamanLink: string; title: string; size: number; }
-interface XamanPayload { uuid: string; qrPng: string; qrUri: string; websocketUrl: string; expiresAt: string | null; }
-interface ClaimResult { success: boolean; txHash: string; nftTokenId: string | null; }
+interface SecureNoteResult { vaultId: string; nftTokenId: string; offerIndex: string; signingRequestUri: string; title: string; size: number; }
+interface SigningRequestPayload { uuid: string; qrPng: string; qrUri: string; websocketUrl: string; expiresAt: string | null; }
 interface ProgressEvent { filename: string; stage: string; progress: number; totalProgress: number; message: string; bytesProcessed: number; bytesTotal: number; }
 interface NftInfo { nftTokenId: string; uri: string; filename: string | null; createdAt: string | null; fileStatus: string; preKeyMismatch?: boolean; }
 interface SecureNoteContent { nftTokenId: string; content: string; noteType: string; mimeType: string; }
@@ -20,21 +19,17 @@ const IcoBurn = (s=14) => <svg width={s} height={s} viewBox="0 0 24 24" fill="no
 const IcoPlus = () => <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
 const IcoRefresh = () => <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
 
-const CLAIM_TIMEOUT_SECONDS = 300;
-
 export function SecureNotesScreen({ oracleConnected }: { oracleConnected?: boolean }) {
+    void oracleConnected
     const [showCreate, setShowCreate] = useState(false);
     const [title, setTitle] = useState('');
     const [content, setContent] = useState('');
     const [hideContent, setHideContent] = useState(true);
     const [tag, setTag] = useState('');
-    const [stage, setStage] = useState<'idle' | 'encrypting' | 'encrypted' | 'creating_payload' | 'claiming' | 'complete' | 'cancelled'>('idle');
-    const [progress, setProgress] = useState(0);
+    const [stage, setStage] = useState<'idle' | 'encrypting' | 'encrypted' | 'creating_payload' | 'complete' | 'cancelled'>('idle');
+    const [, setProgress] = useState(0);
     const [error, setError] = useState<string | null>(null);
     const [result, setResult] = useState<SecureNoteResult | null>(null);
-    const [claimPayload, setClaimPayload] = useState<XamanPayload | null>(null);
-    const [timeRemaining, setTimeRemaining] = useState(CLAIM_TIMEOUT_SECONDS);
-    const timerIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
     const [storedNotes, setStoredNotes] = useState<NftInfo[]>([]);
     const [loadingNotes, setLoadingNotes] = useState(true);
@@ -56,7 +51,6 @@ export function SecureNotesScreen({ oracleConnected }: { oracleConnected?: boole
     const [burnConfirm, setBurnConfirm] = useState('');
 
     useEffect(() => { const u = listen<ProgressEvent>('upload-progress', (e) => { setProgress(e.payload.totalProgress); }); return () => { u.then(f => f()); }; }, []);
-    useEffect(() => { return () => { if (timerIntervalRef.current) clearInterval(timerIntervalRef.current); }; }, []);
     useEffect(() => { loadNotes(); }, []);
 
     // Escape key closes modals
@@ -77,7 +71,7 @@ export function SecureNotesScreen({ oracleConnected }: { oracleConnected?: boole
             setLoadingNotes(true);
             const nfts = await invoke<NftInfo[]>('list_my_nfts');
             setStoredNotes(nfts.filter(n => n.filename?.toLowerCase().endsWith('.secure') && n.fileStatus !== 'deleted'));
-        } catch {} finally { setLoadingNotes(false); }
+        } catch (e) { console.error('Failed to load secure notes:', e); } finally { setLoadingNotes(false); }
     };
 
     const viewNote = async (nft: NftInfo) => {
@@ -103,12 +97,12 @@ export function SecureNotesScreen({ oracleConnected }: { oracleConnected?: boole
         if (!transferNote || !transferTo.trim()) return;
         try {
             setTransferring(true);
-            const r = await invoke<{ transferId: string; xamanPayload: XamanPayload | null }>('initiate_transfer', { nftTokenId: transferNote.nftTokenId, toAddress: transferTo.trim() });
-            if (r.xamanPayload?.qrPng) {
-                setTransferQr(r.xamanPayload.qrPng);
-                await invoke('wait_for_transfer_offer', { payloadUuid: r.xamanPayload.uuid, websocketUrl: r.xamanPayload.websocketUrl, transferId: r.transferId, nftTokenId: transferNote.nftTokenId });
-                toast({ type: 'success', title: 'Offer created!' });
-                setTransferNote(null); setTransferTo(''); setTransferQr(null); loadNotes();
+            const r = await invoke<{ transferId: string; signingRequest: SigningRequestPayload | null }>('initiate_transfer', { nftTokenId: transferNote.nftTokenId, toAddress: transferTo.trim() });
+            if (r.signingRequest?.qrPng) {
+                setTransferQr(r.signingRequest.qrPng);
+                toast({ type: 'info', title: 'Vaulted signing', sub: 'Approve the transfer with Vaulted wallet signing' });
+            } else {
+                toast({ type: 'warning', title: 'Vaulted signing pending', sub: 'Local XRPL transfer signing is not implemented yet' });
             }
         } catch (e) { toast({ type: 'error', title: 'Transfer failed', sub: String(e) }); }
         finally { setTransferring(false); }
@@ -116,74 +110,26 @@ export function SecureNotesScreen({ oracleConnected }: { oracleConnected?: boole
 
     const startBurn = async () => {
         if (!burnNote) return;
-        try {
-            setBurning(true);
-            const payload = await invoke<XamanPayload>('burn_nft', { nftTokenId: burnNote.nftTokenId });
-            setBurnQr(payload.qrPng);
-            const r = await invoke<{ success: boolean }>('wait_for_burn', { payloadUuid: payload.uuid, websocketUrl: payload.websocketUrl, nftTokenId: burnNote.nftTokenId });
-            if (r.success) { toast({ type: 'success', title: 'Note burned!' }); setBurnNote(null); setBurnQr(null); loadNotes(); }
-        } catch (e) { toast({ type: 'error', title: 'Burn failed', sub: String(e) }); setBurnQr(null); }
-        finally { setBurning(false); }
+        setBurning(true);
+        setBurnQr(null);
+        toast({ type: 'warning', title: 'Vaulted signing pending', sub: 'Local XRPL NFT burn signing is not implemented yet' });
+        setBurning(false);
     };
-
-    const stopTimer = useCallback(() => { if (timerIntervalRef.current) { clearInterval(timerIntervalRef.current); timerIntervalRef.current = null; } }, []);
-    const startTimer = useCallback(() => { setTimeRemaining(CLAIM_TIMEOUT_SECONDS); timerIntervalRef.current = setInterval(() => { setTimeRemaining(prev => { if (prev <= 1) { handleCancel(); return 0; } return prev - 1; }); }, 1000); }, []);
 
     const handleEncrypt = async () => {
         if (!title.trim() || !content.trim()) { setError('Enter title and content'); return; }
-        setError(null); setStage('encrypting'); setProgress(0); setResult(null); setClaimPayload(null);
+        setError(null); setStage('encrypting'); setProgress(0); setResult(null);
         try {
             const finalTitle = tag ? `${title.trim()}[${tag}]` : title.trim();
             const res = await invoke<SecureNoteResult>('encrypt_secure_note', { title: finalTitle, content, noteType: 'password' });
             setResult(res);
-            // Go straight to QR — skip intermediate "encrypted" step
-            setStage('creating_payload');
-            const payload = await invoke<XamanPayload>('claim_nft', { offerIndex: res.offerIndex });
-            setClaimPayload(payload); setStage('claiming');
-            startTimer(); waitForClaimWith(payload, res);
+            setStage('complete');
+            loadNotes();
         } catch (e) { setError(String(e)); setStage('idle'); }
     };
 
-    const handleShowClaim = async () => {
-        if (!result) return;
-        setStage('creating_payload');
-        try {
-            const payload = await invoke<XamanPayload>('claim_nft', { offerIndex: result.offerIndex });
-            setClaimPayload(payload); setStage('claiming');
-            startTimer(); waitForClaim(payload);
-        } catch (e) { setError(String(e)); setStage('idle'); }
-    };
-
-    const waitForClaimWith = async (payload: XamanPayload, res: SecureNoteResult) => {
-        try {
-            const r = await invoke<ClaimResult>('wait_for_claim', { payloadUuid: payload.uuid, websocketUrl: payload.websocketUrl, offerIndex: res.offerIndex });
-            stopTimer();
-            if (r.success) { setStage('complete'); loadNotes(); }
-            else { setStage('cancelled'); }
-        } catch { stopTimer(); }
-    };
-
-    const waitForClaim = async (payload: XamanPayload) => {
-        if (!result) return;
-        try {
-            const r = await invoke<ClaimResult>('wait_for_claim', { payloadUuid: payload.uuid, websocketUrl: payload.websocketUrl, offerIndex: result.offerIndex });
-            stopTimer();
-            if (r.success) { setStage('complete'); loadNotes(); }
-            else { setStage('cancelled'); }
-        } catch { stopTimer(); }
-    };
-
-    const handleCancel = async () => {
-        stopTimer();
-        if (result) { try { await invoke('cancel_secure_note_offer', { nftTokenId: result.nftTokenId, offerIndex: result.offerIndex }); } catch {} }
-        setStage('cancelled');
-    };
-
-    const handleReset = () => { stopTimer(); setStage('idle'); setProgress(0); setResult(null); setClaimPayload(null); setError(null); setTimeRemaining(CLAIM_TIMEOUT_SECONDS); };
+    const handleReset = () => { setStage('idle'); setProgress(0); setResult(null); setError(null); };
     const closeCreate = () => { if (stage === 'idle' || stage === 'complete' || stage === 'cancelled') { handleReset(); setTitle(''); setContent(''); setTag(''); setShowCreate(false); } };
-
-    const formatTime = (s: number) => `${Math.floor(s / 60)}:${(s % 60).toString().padStart(2, '0')}`;
-    const isProcessing = stage === 'encrypting' || stage === 'creating_payload';
 
     return (
         <div style={{ maxWidth: 1200, margin: '0 auto' }}>
@@ -269,16 +215,15 @@ export function SecureNotesScreen({ oracleConnected }: { oracleConnected?: boole
                             <div className="v-row" style={{ justifyContent: 'flex-end', gap: 10 }}><button className="v-btn" onClick={closeCreate}>Cancel</button><button className="v-btn v-btn-primary" onClick={handleEncrypt} disabled={!title.trim() || !content.trim()}>{IcoLock(15)} Encrypt & Store</button></div>
                         </>)}
 
-                        {/* ── PROCESSING: encrypting + minting + claiming ── */}
-                        {(stage === 'encrypting' || stage === 'creating_payload' || stage === 'claiming') && (() => {
+                        {/* ── PROCESSING: encrypting + registering ── */}
+                        {(stage === 'encrypting' || stage === 'creating_payload') && (() => {
                             const steps = [
                                 { key: 'encrypting', label: 'Encrypting', sub: 'AES-256 encryption', order: 1 },
                                 { key: 'minting', label: 'Minting NFT on XRPL', sub: 'Recording ownership', order: 2 },
-                                { key: 'claiming', label: 'Claim NFT', sub: 'Sign with Xaman wallet', order: 3 },
-                            ];
-                            const currentOrder = stage === 'encrypting' ? 1 : stage === 'creating_payload' ? 2 : 3;
-                            const totalProgress = stage === 'encrypting' ? 25 : stage === 'creating_payload' ? 50 : 75;
-                            const statusMsg = stage === 'encrypting' ? 'Encrypting data...' : stage === 'creating_payload' ? 'Minting NFT on XRPL...' : 'Waiting for signature...';
+                                                            ];
+                            const currentOrder = stage === 'encrypting' ? 1 : 2;
+                            const totalProgress = stage === 'encrypting' ? 25 : 75;
+                            const statusMsg = stage === 'encrypting' ? 'Encrypting data...' : stage === 'creating_payload' ? 'Minting NFT on XRPL...' : 'Registering secure note...';
 
                             return (<div>
                                 {/* Title */}
@@ -322,30 +267,6 @@ export function SecureNotesScreen({ oracleConnected }: { oracleConnected?: boole
                                     })}
                                 </div>
 
-                                {/* QR code — only when claiming */}
-                                {stage === 'claiming' && claimPayload && (
-                                    <div className="fade-in" style={{ textAlign: 'center' }}>
-                                        <div style={{ width: 200, height: 200, margin: '0 auto 16px', borderRadius: 14, overflow: 'hidden', background: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                                            <img src={claimPayload.qrPng} alt="Claim QR" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
-                                        </div>
-
-                                        {/* Timer */}
-                                        <div style={{ fontSize: 24, fontWeight: 700, fontFamily: 'var(--font-mono)', color: timeRemaining <= 60 ? 'var(--danger)' : 'var(--fg-0)', marginBottom: 4 }}>
-                                            {formatTime(timeRemaining)}
-                                        </div>
-                                        <div style={{ fontSize: 13, color: 'var(--fg-2)', marginBottom: 16 }}>Time remaining to accept NFT</div>
-
-                                        {/* Xaman link */}
-                                        <a href={`https://xumm.app/sign/${claimPayload.uuid}`} target="_blank" rel="noopener noreferrer"
-                                           style={{ color: 'var(--accent)', fontSize: 13, textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 6, marginBottom: 16 }}>
-                                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" /></svg>
-                                            Open in Xaman
-                                        </a>
-
-                                        {/* Cancel */}
-                                        <div><button className="v-btn" style={{ color: 'var(--danger)' }} onClick={handleCancel}>Cancel</button></div>
-                                    </div>
-                                )}
                             </div>);
                         })()}
 
@@ -389,7 +310,7 @@ export function SecureNotesScreen({ oracleConnected }: { oracleConnected?: boole
                                             <div style={{width:22,height:22,borderRadius:'50%',background:'var(--ok-soft)',display:'flex',alignItems:'center',justifyContent:'center',color:'var(--ok)'}}>
                                                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12"/></svg>
                                             </div>
-                                            <span style={{fontSize:16,fontWeight:600,color:'var(--fg-1)'}}>NFT claimed successfully</span>
+                                            <span style={{fontSize:16,fontWeight:600,color:'var(--fg-1)'}}>Secure note registered</span>
                                         </div>
                                         <div className="v-mono" style={{fontSize:13,color:'var(--fg-3)'}}>
                                             {result.title} · {fmtSize(result.size)}
