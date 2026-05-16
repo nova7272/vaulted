@@ -10,8 +10,8 @@ use crate::{
     error::{ApiError, Result},
     models::{
         ConfirmUploadRequest, FileAccessResponse, FileFragmentDto, FileManifestDto,
-        FragmentDownloadInfo, FragmentUploadRequest, FragmentUploadResponse,
-        RegisterFileRequest, RegisterFileResponse,
+        FragmentDownloadInfo, FragmentUploadRequest, FragmentUploadResponse, RegisterFileRequest,
+        RegisterFileResponse,
     },
     services::AppState,
 };
@@ -35,12 +35,11 @@ pub async fn register_file(
     // Пока используем placeholder
 
     // Проверяем, не зарегистрирован ли уже этот NFT
-    let existing = sqlx::query_scalar::<_, uuid::Uuid>(
-        "SELECT id FROM nft_metadata WHERE nft_token_id = $1",
-    )
-        .bind(&request.nft_token_id)
-        .fetch_optional(&state.db)
-        .await?;
+    let existing =
+        sqlx::query_scalar::<_, uuid::Uuid>("SELECT id FROM nft_metadata WHERE nft_token_id = $1")
+            .bind(&request.nft_token_id)
+            .fetch_optional(&state.db)
+            .await?;
 
     if existing.is_some() {
         return Err(ApiError::Conflict(format!(
@@ -50,13 +49,14 @@ pub async fn register_file(
     }
 
     // Get owner_id from authenticated user (CRIT-04: was using SELECT LIMIT 1)
-    let owner_id = sqlx::query_scalar::<_, uuid::Uuid>(
-        "SELECT id FROM users WHERE wallet_address = $1"
-    )
-        .bind(&auth.wallet_address)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or_else(|| ApiError::NotFound("Authenticated user not found in database".to_string()))?;
+    let owner_id =
+        sqlx::query_scalar::<_, uuid::Uuid>("SELECT id FROM users WHERE wallet_address = $1")
+            .bind(&auth.wallet_address)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(|| {
+                ApiError::NotFound("Authenticated user not found in database".to_string())
+            })?;
 
     // Начинаем транзакцию
     let mut tx = state.db.begin().await?;
@@ -69,12 +69,12 @@ pub async fn register_file(
         RETURNING id
         "#,
     )
-        .bind(&request.nft_token_id)
-        .bind(owner_id)
-        .bind(&request.encrypted_aes_key)
-        .bind(&request.metadata_hash)
-        .fetch_one(&mut *tx)
-        .await?;
+    .bind(&request.nft_token_id)
+    .bind(owner_id)
+    .bind(&request.encrypted_aes_key)
+    .bind(&request.metadata_hash)
+    .fetch_one(&mut *tx)
+    .await?;
 
     // Создаём манифест
     let manifest_id = sqlx::query_scalar::<_, uuid::Uuid>(
@@ -138,45 +138,64 @@ pub async fn request_access(
         FROM nft_metadata nm
         JOIN users u ON nm.owner_id = u.id
         WHERE nm.nft_token_id = $1 AND nm.status IN ('active', 'pending_claim')
-        "#
+        "#,
     )
-        .bind(&nft_token_id)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or_else(|| ApiError::NftNotFound(nft_token_id.clone()))?;
+    .bind(&nft_token_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| ApiError::NftNotFound(nft_token_id.clone()))?;
 
     if !nft_owner_wallet.eq_ignore_ascii_case(&auth.wallet_address) {
         return Err(ApiError::Forbidden(
-            "Only the NFT owner can access this file".into()
+            "Only the NFT owner can access this file".into(),
         ));
     }
 
     // MED-06: On-chain verification for encrypted key access
-    match state.xrpl.verify_nft_owner(&nft_token_id, &auth.wallet_address).await {
+    match state
+        .xrpl
+        .verify_nft_owner(&nft_token_id, &auth.wallet_address)
+        .await
+    {
         Ok(true) => {
-            tracing::debug!("On-chain NFT ownership verified for access to {}", nft_token_id);
-        }
+            tracing::debug!(
+                "On-chain NFT ownership verified for access to {}",
+                nft_token_id
+            );
+        },
         Ok(false) => {
             tracing::warn!(
                 "On-chain ownership mismatch for NFT {} — wallet {}",
-                nft_token_id, auth.wallet_address
+                nft_token_id,
+                auth.wallet_address
             );
             return Err(ApiError::Forbidden(
-                "NFT ownership could not be verified on XRPL ledger".into()
+                "NFT ownership could not be verified on XRPL ledger".into(),
             ));
-        }
+        },
         Err(e) => {
             tracing::warn!(
                 "On-chain verification failed for NFT {}: {} — falling back to DB",
-                nft_token_id, e
+                nft_token_id,
+                e
             );
-        }
+        },
     }
 
     // Получаем метаданные NFT включая manifest (encrypted or plain)
-    let manifest_json: serde_json::Value = if let Some(ref enc_key) = state.config.db_encryption_key {
+    let manifest_json: serde_json::Value = if let Some(ref enc_key) = state.config.db_encryption_key
+    {
         // Try encrypted manifest first
-        let row = sqlx::query_as::<_, (String, Option<String>, Option<serde_json::Value>, bool, chrono::DateTime<chrono::Utc>)>(
+        let row = sqlx::query_as::<
+            _,
+            (
+                String,
+                Option<String>,
+                Option<serde_json::Value>,
+                bool,
+                chrono::DateTime<chrono::Utc>,
+            ),
+        >(
             r#"
             SELECT encrypted_aes_key,
                    vault_decrypt(encrypted_manifest, $2),
@@ -187,16 +206,17 @@ pub async fn request_access(
             WHERE nft_token_id = $1 AND status IN ('active', 'pending_claim')
             "#,
         )
-            .bind(&nft_token_id)
-            .bind(enc_key)
-            .fetch_optional(&state.db)
-            .await?
-            .ok_or_else(|| ApiError::NftNotFound(nft_token_id.clone()))?;
+        .bind(&nft_token_id)
+        .bind(enc_key)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| ApiError::NftNotFound(nft_token_id.clone()))?;
 
         let (enc_key_val, decrypted_manifest_str, plain_manifest, is_re_enc, created) = row;
         // Use decrypted manifest if available, otherwise fall back to plain
         let manifest = if let Some(ref decrypted) = decrypted_manifest_str {
-            serde_json::from_str(decrypted).unwrap_or_else(|_| plain_manifest.unwrap_or(serde_json::json!({})))
+            serde_json::from_str(decrypted)
+                .unwrap_or_else(|_| plain_manifest.unwrap_or(serde_json::json!({})))
         } else {
             plain_manifest.unwrap_or(serde_json::json!({}))
         };
@@ -210,7 +230,15 @@ pub async fn request_access(
     };
 
     // Unified query that works for both paths
-    let nft_meta = sqlx::query_as::<_, (String, serde_json::Value, bool, chrono::DateTime<chrono::Utc>)>(
+    let nft_meta = sqlx::query_as::<
+        _,
+        (
+            String,
+            serde_json::Value,
+            bool,
+            chrono::DateTime<chrono::Utc>,
+        ),
+    >(
         r#"
         SELECT encrypted_aes_key,
                COALESCE(manifest, '{}'::jsonb),
@@ -220,25 +248,35 @@ pub async fn request_access(
         WHERE nft_token_id = $1 AND status IN ('active', 'pending_claim')
         "#,
     )
-        .bind(&nft_token_id)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or_else(|| ApiError::NftNotFound(nft_token_id.clone()))?;
+    .bind(&nft_token_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| ApiError::NftNotFound(nft_token_id.clone()))?;
 
     let (encrypted_aes_key, plain_manifest_json, is_re_encrypted, created_at) = nft_meta;
 
     // Use decrypted manifest if encryption was active, otherwise plain
-    let final_manifest = if state.config.db_encryption_key.is_some() && manifest_json != serde_json::json!({}) {
-        manifest_json
-    } else {
-        plain_manifest_json
-    };
+    let final_manifest =
+        if state.config.db_encryption_key.is_some() && manifest_json != serde_json::json!({}) {
+            manifest_json
+        } else {
+            plain_manifest_json
+        };
 
     // Парсим манифест из JSON
-    let encrypted_filename = final_manifest["encrypted_filename"].as_str().unwrap_or("unknown").to_string();
+    let encrypted_filename = final_manifest["encrypted_filename"]
+        .as_str()
+        .unwrap_or("unknown")
+        .to_string();
     let original_size = final_manifest["original_size"].as_u64().unwrap_or(0);
-    let mime_type = final_manifest["mime_type"].as_str().unwrap_or("application/octet-stream").to_string();
-    let original_hash = final_manifest["original_hash"].as_str().unwrap_or("").to_string();
+    let mime_type = final_manifest["mime_type"]
+        .as_str()
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    let original_hash = final_manifest["original_hash"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
 
     // Получаем фрагменты из JSON
     let fragments_json = final_manifest["fragments"].as_array();
@@ -249,13 +287,12 @@ pub async fn request_access(
     if let Some(fragments) = fragments_json {
         // PERF FIX: Preload all storage node endpoints in a single query
         // instead of querying per-fragment in a loop (was O(N) queries, now O(1))
-        let node_endpoints: std::collections::HashMap<String, String> = sqlx::query_as::<_, (String, String)>(
-            "SELECT id, endpoint_url FROM storage_nodes"
-        )
-            .fetch_all(&state.db)
-            .await?
-            .into_iter()
-            .collect();
+        let node_endpoints: std::collections::HashMap<String, String> =
+            sqlx::query_as::<_, (String, String)>("SELECT id, endpoint_url FROM storage_nodes")
+                .fetch_all(&state.db)
+                .await?
+                .into_iter()
+                .collect();
 
         for frag in fragments {
             let index = frag["index"].as_u64().unwrap_or(0) as u32;
@@ -268,7 +305,8 @@ pub async fn request_access(
             let endpoint = if storage_node_id.is_empty() {
                 "http://localhost:9001".to_string()
             } else {
-                node_endpoints.get(&storage_node_id)
+                node_endpoints
+                    .get(&storage_node_id)
                     .cloned()
                     .unwrap_or_else(|| "http://localhost:9001".to_string())
             };
@@ -314,24 +352,24 @@ pub async fn request_access(
         // If yes → re-encryption happened, keys match
         // If no, and there was a previous owner → external transfer, keys DON'T match
         let nft_meta_id = sqlx::query_scalar::<_, uuid::Uuid>(
-            "SELECT id FROM nft_metadata WHERE nft_token_id = $1"
+            "SELECT id FROM nft_metadata WHERE nft_token_id = $1",
         )
-            .bind(&nft_token_id)
-            .fetch_optional(&state.db)
-            .await
-            .ok()
-            .flatten();
+        .bind(&nft_token_id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten();
 
         let has_proper_transfer = if let Some(meta_id) = nft_meta_id {
             // Check if current owner received via in-app transfer
             let current_owner_id = sqlx::query_scalar::<_, uuid::Uuid>(
-                "SELECT owner_id FROM nft_metadata WHERE id = $1"
+                "SELECT owner_id FROM nft_metadata WHERE id = $1",
             )
-                .bind(meta_id)
-                .fetch_optional(&state.db)
-                .await
-                .ok()
-                .flatten();
+            .bind(meta_id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
 
             if let Some(owner_id) = current_owner_id {
                 sqlx::query_scalar::<_, bool>(
@@ -342,13 +380,13 @@ pub async fn request_access(
                           AND to_user_id = $2
                           AND status IN ('finalized', 'completed')
                     )
-                    "#
+                    "#,
                 )
-                    .bind(meta_id)
-                    .bind(owner_id)
-                    .fetch_one(&state.db)
-                    .await
-                    .unwrap_or(true) // Assume ok if query fails
+                .bind(meta_id)
+                .bind(owner_id)
+                .fetch_one(&state.db)
+                .await
+                .unwrap_or(true) // Assume ok if query fails
             } else {
                 true // No owner = original creator, keys match
             }
@@ -363,12 +401,12 @@ pub async fn request_access(
                 SELECT NOT EXISTS(
                     SELECT 1 FROM transfer_requests WHERE nft_metadata_id = $1
                 )
-                "#
+                "#,
             )
-                .bind(meta_id)
-                .fetch_one(&state.db)
-                .await
-                .unwrap_or(true)
+            .bind(meta_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap_or(true)
         } else {
             true
         };
@@ -377,7 +415,8 @@ pub async fn request_access(
         if mismatch {
             tracing::warn!(
                 "PRE key mismatch for NFT {}: owner {} received NFT outside the app",
-                nft_token_id, db_owner
+                nft_token_id,
+                db_owner
             );
         }
 
@@ -418,9 +457,9 @@ pub async fn get_upload_url(
         LIMIT 1
         "#,
     )
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or_else(|| ApiError::Storage("No active storage nodes".to_string()))?;
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| ApiError::Storage("No active storage nodes".to_string()))?;
 
     let (storage_node_id, endpoint_url) = storage_node;
 
@@ -457,12 +496,12 @@ pub async fn confirm_upload(
         WHERE manifest_id = $3 AND fragment_index = $4
         "#,
     )
-        .bind(&request.storage_node_id)
-        .bind(&request.storage_key)
-        .bind(request.file_id)
-        .bind(request.fragment_index as i32)
-        .execute(&state.db)
-        .await?;
+    .bind(&request.storage_node_id)
+    .bind(&request.storage_key)
+    .bind(request.file_id)
+    .bind(request.fragment_index as i32)
+    .execute(&state.db)
+    .await?;
 
     if updated.rows_affected() == 0 {
         return Err(ApiError::NotFound("Fragment not found".to_string()));
@@ -477,9 +516,9 @@ pub async fn confirm_upload(
         WHERE id = $1
         "#,
     )
-        .bind(&request.storage_node_id)
-        .execute(&state.db)
-        .await?;
+    .bind(&request.storage_node_id)
+    .execute(&state.db)
+    .await?;
 
     tracing::debug!(
         "Confirmed upload: file={}, fragment={}",

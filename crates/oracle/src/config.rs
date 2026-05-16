@@ -41,12 +41,6 @@ pub struct Config {
     pub public_url: Option<String>,
     /// Shared secret for storage node authentication (register/heartbeat)
     pub node_secret: Option<String>,
-    /// Xaman API key. Backend-only.
-    pub xaman_api_key: Option<String>,
-    /// Xaman API secret. Backend-only; must never be bundled into desktop-client.
-    pub xaman_api_secret: Option<String>,
-    /// Forced Xaman network, for example TESTNET or MAINNET.
-    pub xaman_force_network: Option<String>,
     /// Path to file containing XRPL wallet seed (CRIT-03: preferred over env var)
     /// File must have permissions 0600 (owner read/write only)
     pub xrpl_wallet_seed_file: Option<String>,
@@ -60,8 +54,7 @@ pub struct Config {
 impl Config {
     /// Загружает конфигурацию из переменных окружения
     pub fn from_env() -> Result<Self, ConfigError> {
-        let environment = env::var("ENVIRONMENT")
-            .unwrap_or_else(|_| "development".to_string());
+        let environment = env::var("ENVIRONMENT").unwrap_or_else(|_| "development".to_string());
 
         let cors_origins: Vec<String> = env::var("CORS_ORIGINS")
             .map(|s| s.split(',').map(|s| s.trim().to_string()).collect())
@@ -81,13 +74,12 @@ impl Config {
             // 1. File (XRPL_WALLET_SEED_FILE) — preferred, checked for permissions
             // 2. Env var (XRPL_WALLET_SEED) — only in development
             xrpl_wallet_seed: Self::load_wallet_seed(&environment)?,
-            jwt_secret: env::var("JWT_SECRET")
-                .unwrap_or_else(|_| {
-                    if environment == "production" {
-                        panic!("JWT_SECRET must be set in production!");
-                    }
-                    uuid::Uuid::new_v4().to_string() // Random per-instance in dev
-                }),
+            jwt_secret: env::var("JWT_SECRET").unwrap_or_else(|_| {
+                if environment == "production" {
+                    panic!("JWT_SECRET must be set in production!");
+                }
+                uuid::Uuid::new_v4().to_string() // Random per-instance in dev
+            }),
             jwt_expiration_hours: env::var("JWT_EXPIRATION_HOURS")
                 .unwrap_or_else(|_| "24".to_string())
                 .parse()
@@ -111,14 +103,16 @@ impl Config {
             db_encryption_key: env::var("DB_ENCRYPTION_KEY").ok(),
             public_url: env::var("ORACLE_PUBLIC_URL").ok(),
             node_secret: env::var("NODE_SECRET").ok(),
-            xaman_api_key: env::var("XAMAN_API_KEY").ok(),
-            xaman_api_secret: env::var("XAMAN_API_SECRET").ok(),
-            xaman_force_network: env::var("XAMAN_FORCE_NETWORK").ok(),
             xrpl_wallet_seed_file: env::var("XRPL_WALLET_SEED_FILE").ok(),
             // HIGH-01: Trusted proxy IPs (comma-separated)
             // Example: TRUSTED_PROXIES=10.0.0.1,10.0.0.2,172.17.0.1
             trusted_proxies: env::var("TRUSTED_PROXIES")
-                .map(|s| s.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+                .map(|s| {
+                    s.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
                 .unwrap_or_else(|_| Vec::new()),
             // Auth rate limit: default 10 req/min (stricter than general 60 req/min)
             auth_rate_limit_rpm: env::var("AUTH_RATE_LIMIT_RPM")
@@ -157,7 +151,8 @@ impl Config {
                 use std::os::unix::fs::PermissionsExt;
                 let metadata = std::fs::metadata(path).map_err(|e| {
                     ConfigError::InvalidValue(format!(
-                        "Cannot read XRPL_WALLET_SEED_FILE metadata: {}", e
+                        "Cannot read XRPL_WALLET_SEED_FILE metadata: {}",
+                        e
                     ))
                 })?;
                 let mode = metadata.permissions().mode() & 0o777;
@@ -171,15 +166,18 @@ impl Config {
             }
 
             let seed = std::fs::read_to_string(path)
-                .map_err(|e| ConfigError::InvalidValue(format!(
-                    "Failed to read XRPL_WALLET_SEED_FILE: {}", e
-                )))?
+                .map_err(|e| {
+                    ConfigError::InvalidValue(format!(
+                        "Failed to read XRPL_WALLET_SEED_FILE: {}",
+                        e
+                    ))
+                })?
                 .trim()
                 .to_string();
 
             if seed.is_empty() {
                 return Err(ConfigError::InvalidValue(
-                    "XRPL_WALLET_SEED_FILE is empty".to_string()
+                    "XRPL_WALLET_SEED_FILE is empty".to_string(),
                 ));
             }
 

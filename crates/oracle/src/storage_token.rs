@@ -3,7 +3,7 @@
 //! Signed tokens for accessing file fragments on storage nodes.
 //! Oracle signs tokens, storage nodes verify them.
 
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{Duration, Utc};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -75,10 +75,10 @@ impl StorageToken {
 pub fn sign_storage_token(token: &StorageToken, signing_key: &SigningKey) -> String {
     let payload = serde_json::to_string(token).expect("Failed to serialize token");
     let payload_b64 = URL_SAFE_NO_PAD.encode(&payload);
-    
+
     let signature = signing_key.sign(payload_b64.as_bytes());
     let signature_b64 = URL_SAFE_NO_PAD.encode(signature.to_bytes());
-    
+
     format!("{}.{}", payload_b64, signature_b64)
 }
 
@@ -96,9 +96,10 @@ pub fn verify_storage_token(
     let signature_b64 = parts[1];
 
     // Verify signature
-    let signature_bytes = URL_SAFE_NO_PAD.decode(signature_b64)
+    let signature_bytes = URL_SAFE_NO_PAD
+        .decode(signature_b64)
         .map_err(|_| StorageTokenError::InvalidFormat)?;
-    
+
     if signature_bytes.len() != 64 {
         return Err(StorageTokenError::InvalidSignature);
     }
@@ -107,15 +108,17 @@ pub fn verify_storage_token(
     sig_arr.copy_from_slice(&signature_bytes);
     let signature = Signature::from_bytes(&sig_arr);
 
-    verifying_key.verify(payload_b64.as_bytes(), &signature)
+    verifying_key
+        .verify(payload_b64.as_bytes(), &signature)
         .map_err(|_| StorageTokenError::InvalidSignature)?;
 
     // Decode payload
-    let payload_json = URL_SAFE_NO_PAD.decode(payload_b64)
+    let payload_json = URL_SAFE_NO_PAD
+        .decode(payload_b64)
         .map_err(|_| StorageTokenError::InvalidFormat)?;
-    
-    let token: StorageToken = serde_json::from_slice(&payload_json)
-        .map_err(|_| StorageTokenError::InvalidFormat)?;
+
+    let token: StorageToken =
+        serde_json::from_slice(&payload_json).map_err(|_| StorageTokenError::InvalidFormat)?;
 
     // Check expiration
     if token.is_expired() {
@@ -129,16 +132,16 @@ pub fn verify_storage_token(
 pub enum StorageTokenError {
     #[error("Invalid token format")]
     InvalidFormat,
-    
+
     #[error("Invalid signature")]
     InvalidSignature,
-    
+
     #[error("Token expired")]
     Expired,
-    
+
     #[error("Operation not allowed")]
     OperationNotAllowed,
-    
+
     #[error("Storage key mismatch")]
     KeyMismatch,
 }
@@ -164,48 +167,36 @@ impl StorageUrlGenerator {
         nft_token_id: &str,
         storage_key: &str,
     ) -> String {
-        let token = StorageToken::new_read(
-            nft_token_id,
-            storage_key,
-            self.token_validity_minutes,
-        );
+        let token = StorageToken::new_read(nft_token_id, storage_key, self.token_validity_minutes);
         let signed = sign_storage_token(&token, &self.signing_key);
-        
-        format!("{}/fragments/{}?token={}", node_endpoint, storage_key, signed)
+
+        format!(
+            "{}/fragments/{}?token={}",
+            node_endpoint, storage_key, signed
+        )
     }
 
     /// Generate a signed upload URL
-    pub fn upload_url(
-        &self,
-        node_endpoint: &str,
-        nft_token_id: &str,
-        storage_key: &str,
-    ) -> String {
-        let token = StorageToken::new_write(
-            nft_token_id,
-            storage_key,
-            self.token_validity_minutes,
-        );
+    pub fn upload_url(&self, node_endpoint: &str, nft_token_id: &str, storage_key: &str) -> String {
+        let token = StorageToken::new_write(nft_token_id, storage_key, self.token_validity_minutes);
         let signed = sign_storage_token(&token, &self.signing_key);
-        
-        format!("{}/fragments/{}?token={}", node_endpoint, storage_key, signed)
+
+        format!(
+            "{}/fragments/{}?token={}",
+            node_endpoint, storage_key, signed
+        )
     }
 
     /// Generate a signed delete URL
-    pub fn delete_url(
-        &self,
-        node_endpoint: &str,
-        nft_token_id: &str,
-        storage_key: &str,
-    ) -> String {
-        let token = StorageToken::new_delete(
-            nft_token_id,
-            storage_key,
-            self.token_validity_minutes,
-        );
+    pub fn delete_url(&self, node_endpoint: &str, nft_token_id: &str, storage_key: &str) -> String {
+        let token =
+            StorageToken::new_delete(nft_token_id, storage_key, self.token_validity_minutes);
         let signed = sign_storage_token(&token, &self.signing_key);
-        
-        format!("{}/fragments/{}?token={}", node_endpoint, storage_key, signed)
+
+        format!(
+            "{}/fragments/{}?token={}",
+            node_endpoint, storage_key, signed
+        )
     }
 }
 
@@ -218,12 +209,12 @@ mod tests {
     fn test_storage_token_sign_verify() {
         let signing_key = SigningKey::generate(&mut OsRng);
         let token = StorageToken::new_read("nft123", "fragment456", 5);
-        
+
         let signed = sign_storage_token(&token, &signing_key);
-        
+
         // Should have 2 parts
         assert_eq!(signed.split('.').count(), 2);
-        
+
         // Verify should succeed
         let verified = verify_storage_token(&signed, &signing_key.verifying_key()).unwrap();
         assert_eq!(verified.nft_token_id, "nft123");
@@ -236,9 +227,9 @@ mod tests {
         let signing_key = SigningKey::generate(&mut OsRng);
         let mut token = StorageToken::new_read("nft123", "fragment456", 5);
         token.exp = Utc::now().timestamp() - 60; // Expired 1 minute ago
-        
+
         let signed = sign_storage_token(&token, &signing_key);
-        
+
         let result = verify_storage_token(&signed, &signing_key.verifying_key());
         assert!(matches!(result, Err(StorageTokenError::Expired)));
     }
@@ -247,10 +238,10 @@ mod tests {
     fn test_invalid_signature() {
         let signing_key1 = SigningKey::generate(&mut OsRng);
         let signing_key2 = SigningKey::generate(&mut OsRng);
-        
+
         let token = StorageToken::new_read("nft123", "fragment456", 5);
         let signed = sign_storage_token(&token, &signing_key1);
-        
+
         // Verify with different key should fail
         let result = verify_storage_token(&signed, &signing_key2.verifying_key());
         assert!(matches!(result, Err(StorageTokenError::InvalidSignature)));
@@ -260,15 +251,11 @@ mod tests {
     fn test_url_generator() {
         let signing_key = SigningKey::generate(&mut OsRng);
         let generator = StorageUrlGenerator::new(signing_key.clone(), 5);
-        
-        let url = generator.download_url(
-            "http://storage.example.com",
-            "nft123",
-            "fragment456"
-        );
-        
+
+        let url = generator.download_url("http://storage.example.com", "nft123", "fragment456");
+
         assert!(url.starts_with("http://storage.example.com/fragments/fragment456?token="));
-        
+
         // Extract and verify token
         let token_str = url.split("token=").nth(1).unwrap();
         let verified = verify_storage_token(token_str, &signing_key.verifying_key()).unwrap();

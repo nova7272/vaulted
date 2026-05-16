@@ -9,23 +9,20 @@ use rand::rngs::OsRng;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tower::ServiceBuilder;
-use tower_http::{
-    cors::CorsLayer,
-    trace::TraceLayer,
-    limit::RequestBodyLimitLayer,
-};
+use tower_http::{cors::CorsLayer, limit::RequestBodyLimitLayer, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use xrpl_vault_oracle::{api, config::Config, db, services::AppState, run_embedded_migrations, middleware};
+use xrpl_vault_oracle::{
+    api, config::Config, db, middleware, run_embedded_migrations, services::AppState,
+};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Инициализируем логирование
     tracing_subscriber::registry()
         .with(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                "xrpl_vault_oracle=debug,tower_http=debug,sqlx=warn".into()
-            }),
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "xrpl_vault_oracle=debug,tower_http=debug,sqlx=warn".into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
@@ -71,7 +68,9 @@ async fn main() -> anyhow::Result<()> {
     if !config.trusted_proxies.is_empty() {
         tracing::info!("Trusted proxies: {:?}", config.trusted_proxies);
     } else {
-        tracing::info!("No trusted proxies configured — proxy headers will be ignored for rate limiting");
+        tracing::info!(
+            "No trusted proxies configured — proxy headers will be ignored for rate limiting"
+        );
     }
 
     // Auth-specific rate limiter (stricter)
@@ -79,7 +78,11 @@ async fn main() -> anyhow::Result<()> {
         config.auth_rate_limit_rpm,
         config.trusted_proxies.clone(),
     );
-    tracing::info!("Rate limits: general={}/min, auth={}/min", config.rate_limit_rpm, config.auth_rate_limit_rpm);
+    tracing::info!(
+        "Rate limits: general={}/min, auth={}/min",
+        config.rate_limit_rpm,
+        config.auth_rate_limit_rpm
+    );
 
     // Создаём состояние приложения
     let mut state = AppState::new(config.clone(), db_pool, signing_key);
@@ -87,10 +90,10 @@ async fn main() -> anyhow::Result<()> {
     // CRIT-03: Log wallet seed source for security awareness
     if config.xrpl_wallet_seed.is_some() {
         if config.xrpl_wallet_seed_file.is_some() {
-            tracing::info!("🔑 XRPL wallet seed loaded from file (secure)");
+            tracing::info!("🔑 XRPL wallet material loaded from file");
         } else if config.is_production() {
             // This should not happen — load_wallet_seed blocks it in production
-            tracing::error!("🚨 XRPL wallet seed loaded from env var in PRODUCTION!");
+            tracing::error!("🚨 XRPL wallet material loaded from env var in PRODUCTION!");
         } else {
             tracing::warn!(
                 "⚠️  XRPL wallet seed loaded from XRPL_WALLET_SEED env var. \
@@ -126,20 +129,24 @@ async fn main() -> anyhow::Result<()> {
         .layer(
             ServiceBuilder::new()
                 // Security headers
-                .layer(axum::middleware::from_fn(middleware::security_headers_middleware))
+                .layer(axum::middleware::from_fn(
+                    middleware::security_headers_middleware,
+                ))
                 // Logging with IP
                 .layer(axum::middleware::from_fn(middleware::logging_middleware))
                 // Rate limiting
                 .layer(axum::middleware::from_fn_with_state(
                     rate_limiter.clone(),
-                    middleware::rate_limit_middleware
+                    middleware::rate_limit_middleware,
                 ))
                 // Request body size limit (config.max_file_size + 1MB for headers/metadata)
-                .layer(RequestBodyLimitLayer::new((config.max_file_size + 1_048_576) as usize))
+                .layer(RequestBodyLimitLayer::new(
+                    (config.max_file_size + 1_048_576) as usize,
+                ))
                 // Tracing
                 .layer(TraceLayer::new_for_http())
                 // CORS
-                .layer(cors)
+                .layer(cors),
         )
         .with_state(state);
 
@@ -160,7 +167,8 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
-    ).await?;
+    )
+    .await?;
 
     Ok(())
 }
@@ -169,7 +177,8 @@ async fn main() -> anyhow::Result<()> {
 fn build_cors_layer(config: &Config) -> CorsLayer {
     if config.is_production() && !config.cors_origins.is_empty() {
         // Production: strict CORS
-        let origins: Vec<_> = config.cors_origins
+        let origins: Vec<_> = config
+            .cors_origins
             .iter()
             .filter_map(|s| s.parse().ok())
             .collect();
@@ -185,27 +194,23 @@ fn build_cors_layer(config: &Config) -> CorsLayer {
                 Method::DELETE,
                 Method::OPTIONS,
             ])
-            .allow_headers([
-                header::CONTENT_TYPE,
-                header::AUTHORIZATION,
-                header::ACCEPT,
-            ])
+            .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION, header::ACCEPT])
             .allow_credentials(true)
             .max_age(Duration::from_secs(3600))
     } else {
         // Development: restricted CORS — allow localhost only (MED-01)
         let dev_origins: Vec<_> = vec![
-            "http://localhost:1420",     // Tauri dev
-            "http://localhost:3000",     // Oracle
-            "http://localhost:5173",     // Vite dev
+            "http://localhost:1420", // Tauri dev
+            "http://localhost:3000", // Oracle
+            "http://localhost:5173", // Vite dev
             "http://127.0.0.1:1420",
             "http://127.0.0.1:3000",
             "http://127.0.0.1:5173",
-            "tauri://localhost",         // Tauri app
+            "tauri://localhost", // Tauri app
         ]
-            .into_iter()
-            .filter_map(|s| s.parse().ok())
-            .collect();
+        .into_iter()
+        .filter_map(|s| s.parse().ok())
+        .collect();
 
         tracing::info!("CORS: Development mode — allowing localhost origins only");
 
@@ -218,11 +223,7 @@ fn build_cors_layer(config: &Config) -> CorsLayer {
                 Method::DELETE,
                 Method::OPTIONS,
             ])
-            .allow_headers([
-                header::CONTENT_TYPE,
-                header::AUTHORIZATION,
-                header::ACCEPT,
-            ])
+            .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION, header::ACCEPT])
             .max_age(Duration::from_secs(3600))
     }
 }

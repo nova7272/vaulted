@@ -37,7 +37,10 @@ impl StorageService {
     }
 
     /// Выбирает оптимальную ноду для загрузки
-    pub async fn select_node_for_upload(&self, region_hint: Option<&str>) -> Result<Option<StorageNode>> {
+    pub async fn select_node_for_upload(
+        &self,
+        region_hint: Option<&str>,
+    ) -> Result<Option<StorageNode>> {
         let query = if let Some(region) = region_hint {
             sqlx::query_as::<_, StorageNode>(
                 r#"

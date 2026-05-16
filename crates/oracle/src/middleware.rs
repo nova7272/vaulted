@@ -55,9 +55,7 @@ impl RateLimiter {
         let now = Instant::now();
         let mut requests = self.requests.write().await;
 
-        let (count, window_start) = requests
-            .entry(key.to_string())
-            .or_insert((0, now));
+        let (count, window_start) = requests.entry(key.to_string()).or_insert((0, now));
 
         // Reset window if expired
         if now.duration_since(*window_start) >= self.window {
@@ -66,7 +64,8 @@ impl RateLimiter {
         }
 
         let remaining = self.limit.saturating_sub(*count);
-        let reset_after = self.window
+        let reset_after = self
+            .window
             .saturating_sub(now.duration_since(*window_start))
             .as_secs();
 
@@ -124,7 +123,7 @@ pub async fn rate_limit_middleware(
             Json(serde_json::json!({
                 "error": "Too many requests",
                 "retry_after_seconds": reset_after
-            }))
+            })),
         );
 
         return Err(response.into_response());
@@ -134,9 +133,18 @@ pub async fn rate_limit_middleware(
 
     // Add rate limit headers to response
     let headers = response.headers_mut();
-    headers.insert("X-RateLimit-Limit", limiter.limit.to_string().parse().unwrap());
-    headers.insert("X-RateLimit-Remaining", remaining.to_string().parse().unwrap());
-    headers.insert("X-RateLimit-Reset", reset_after.to_string().parse().unwrap());
+    headers.insert(
+        "X-RateLimit-Limit",
+        limiter.limit.to_string().parse().unwrap(),
+    );
+    headers.insert(
+        "X-RateLimit-Remaining",
+        remaining.to_string().parse().unwrap(),
+    );
+    headers.insert(
+        "X-RateLimit-Reset",
+        reset_after.to_string().parse().unwrap(),
+    );
 
     Ok(response)
 }
@@ -155,8 +163,8 @@ fn extract_client_ip_safe(
     let peer = peer_ip.unwrap_or("unknown");
 
     // Only trust proxy headers if the direct TCP connection is from a known proxy
-    let peer_is_trusted = !trusted_proxies.is_empty()
-        && trusted_proxies.iter().any(|tp| tp == peer);
+    let peer_is_trusted =
+        !trusted_proxies.is_empty() && trusted_proxies.iter().any(|tp| tp == peer);
 
     if peer_is_trusted {
         // Trusted proxy — read forwarded IP from headers
@@ -237,7 +245,7 @@ pub async fn auth_rate_limit_middleware(
             Json(serde_json::json!({
                 "error": "Too many authentication attempts. Please try again later.",
                 "retry_after_seconds": reset_after
-            }))
+            })),
         );
 
         return Err(response.into_response());
@@ -245,9 +253,18 @@ pub async fn auth_rate_limit_middleware(
 
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
-    headers.insert("X-RateLimit-Limit", limiter.limit.to_string().parse().unwrap());
-    headers.insert("X-RateLimit-Remaining", remaining.to_string().parse().unwrap());
-    headers.insert("X-RateLimit-Reset", reset_after.to_string().parse().unwrap());
+    headers.insert(
+        "X-RateLimit-Limit",
+        limiter.limit.to_string().parse().unwrap(),
+    );
+    headers.insert(
+        "X-RateLimit-Remaining",
+        remaining.to_string().parse().unwrap(),
+    );
+    headers.insert(
+        "X-RateLimit-Reset",
+        reset_after.to_string().parse().unwrap(),
+    );
 
     Ok(response)
 }
@@ -281,10 +298,7 @@ pub async fn logging_middleware(
 }
 
 /// Security headers middleware
-pub async fn security_headers_middleware(
-    request: Request,
-    next: Next,
-) -> Response {
+pub async fn security_headers_middleware(request: Request, next: Next) -> Response {
     let mut response = next.run(request).await;
 
     let headers = response.headers_mut();
@@ -299,24 +313,29 @@ pub async fn security_headers_middleware(
     headers.insert("X-XSS-Protection", "1; mode=block".parse().unwrap());
 
     // Referrer policy
-    headers.insert("Referrer-Policy", "strict-origin-when-cross-origin".parse().unwrap());
+    headers.insert(
+        "Referrer-Policy",
+        "strict-origin-when-cross-origin".parse().unwrap(),
+    );
 
     // HSTS - enforce HTTPS (LOW-02)
     headers.insert(
         "Strict-Transport-Security",
-        "max-age=31536000; includeSubDomains".parse().unwrap()
+        "max-age=31536000; includeSubDomains".parse().unwrap(),
     );
 
     // Content Security Policy
     headers.insert(
         "Content-Security-Policy",
-        "default-src 'self'; frame-ancestors 'none'".parse().unwrap()
+        "default-src 'self'; frame-ancestors 'none'"
+            .parse()
+            .unwrap(),
     );
 
     // Permissions Policy
     headers.insert(
         "Permissions-Policy",
-        "camera=(), microphone=(), geolocation=()".parse().unwrap()
+        "camera=(), microphone=(), geolocation=()".parse().unwrap(),
     );
 
     response
@@ -355,7 +374,10 @@ mod tests {
         headers.insert("X-Forwarded-For", "5.6.7.8".parse().unwrap());
 
         let ip = extract_client_ip_safe(&headers, Some("10.0.0.1"), &[]);
-        assert_eq!(ip, "10.0.0.1", "Should use peer IP when no trusted proxies configured");
+        assert_eq!(
+            ip, "10.0.0.1",
+            "Should use peer IP when no trusted proxies configured"
+        );
     }
 
     #[test]
@@ -377,7 +399,10 @@ mod tests {
 
         let trusted = vec!["10.0.0.1".to_string()]; // trusted is 10.0.0.1
         let ip = extract_client_ip_safe(&headers, Some("99.99.99.99"), &trusted); // peer is NOT trusted
-        assert_eq!(ip, "99.99.99.99", "Should use peer IP — attacker cannot spoof");
+        assert_eq!(
+            ip, "99.99.99.99",
+            "Should use peer IP — attacker cannot spoof"
+        );
     }
 
     #[test]

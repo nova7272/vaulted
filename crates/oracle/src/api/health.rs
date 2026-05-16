@@ -2,12 +2,7 @@
 
 use axum::{extract::State, Json};
 
-use crate::{
-    db,
-    error::Result,
-    models::HealthResponse,
-    services::AppState,
-};
+use crate::{db, error::Result, models::HealthResponse, services::AppState};
 
 /// GET /health - базовый health check
 pub async fn health_check() -> Json<HealthResponse> {

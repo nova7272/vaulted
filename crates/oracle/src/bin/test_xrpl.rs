@@ -1,6 +1,6 @@
 //! Тест XRPL сервиса
 
-use xrpl_mithril::wallet::{Wallet, Seed, Algorithm};
+use xrpl_mithril::wallet::{Algorithm, Seed, Wallet};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -27,7 +27,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Запросим faucet
     println!("\nRequesting testnet funds...");
     let client = reqwest::Client::new();
-    let resp = client.post("https://faucet.altnet.rippletest.net/accounts")
+    let resp = client
+        .post("https://faucet.altnet.rippletest.net/accounts")
         .json(&serde_json::json!({
             "destination": wallet.classic_address()
         }))
@@ -54,16 +55,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Создаём offer
         println!("\nCreating sell offer...");
-        let offer = xrpl.create_sell_offer(
-            &result.nft_token_id,
-            "rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe",
-        ).await?;
+        let offer = xrpl
+            .create_sell_offer(&result.nft_token_id, "rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe")
+            .await?;
         println!("✅ Created offer: {}", offer.offer_index);
         println!("   TX: {}", offer.tx_hash);
 
         // Баланс после
         let balance_after = xrpl.get_balance(wallet.classic_address()).await?;
-        println!("\nBalance after: {} XRP (spent: {:.6} XRP)", balance_after, balance - balance_after);
+        println!(
+            "\nBalance after: {} XRP (spent: {:.6} XRP)",
+            balance_after,
+            balance - balance_after
+        );
     } else {
         println!("Not enough balance");
     }

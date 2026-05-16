@@ -9,7 +9,7 @@ use crate::{
     auth::AdminUser,
     error::Result,
     services::AppState,
-    sync::{XrplSyncService, SyncConfig, SyncAction},
+    sync::{SyncAction, SyncConfig, XrplSyncService},
 };
 
 /// POST /api/v1/sync/trigger - запустить синхронизацию вручную
@@ -18,12 +18,9 @@ pub async fn trigger_sync(
     _admin: AdminUser,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>> {
-    let sync_service = XrplSyncService::new(
-        state.db.clone(),
-        state.xrpl.clone(),
-        SyncConfig::default(),
-    );
-    
+    let sync_service =
+        XrplSyncService::new(state.db.clone(), state.xrpl.clone(), SyncConfig::default());
+
     let stats = sync_service.trigger_sync().await?;
     Ok(Json(stats.to_json()))
 }
@@ -35,14 +32,11 @@ pub async fn sync_nft(
     State(state): State<AppState>,
     Path(nft_token_id): Path<String>,
 ) -> Result<Json<serde_json::Value>> {
-    let sync_service = XrplSyncService::new(
-        state.db.clone(),
-        state.xrpl.clone(),
-        SyncConfig::default(),
-    );
-    
+    let sync_service =
+        XrplSyncService::new(state.db.clone(), state.xrpl.clone(), SyncConfig::default());
+
     let action = sync_service.sync_nft(&nft_token_id).await?;
-    
+
     let result = match action {
         SyncAction::NoChange => serde_json::json!({
             "status": "no_change",
@@ -63,7 +57,7 @@ pub async fn sync_nft(
             "message": "New owner is not registered in Oracle"
         }),
     };
-    
+
     Ok(Json(result))
 }
 

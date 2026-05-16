@@ -6,11 +6,13 @@ use axum::{
     response::Json,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
+use sqlx::Row;
 use std::net::IpAddr;
 
-use crate::auth::{AuthenticatedUser, AdminUser, NodeAuth};
-use crate::services::{AppState, ReplicationService, ReplicationSettings, FileReplicationStatus, UploadTarget};
+use crate::auth::{AdminUser, AuthenticatedUser, NodeAuth};
+use crate::services::{
+    AppState, FileReplicationStatus, ReplicationService, ReplicationSettings, UploadTarget,
+};
 
 /// Check if a URL points to a private/internal network (HIGH-07: SSRF protection)
 fn is_private_url(url: &str) -> bool {
@@ -58,7 +60,7 @@ pub struct RegisterNodeResponse {
     pub message: String,
 }
 
-#[derive(Debug, Serialize, FromRow)]
+#[derive(Debug, Serialize)]
 pub struct StorageNodeInfo {
     pub id: String,
     pub endpoint_url: String,
@@ -127,12 +129,19 @@ pub async fn register_node(
     State(state): State<AppState>,
     Json(request): Json<RegisterNodeRequest>,
 ) -> Result<Json<RegisterNodeResponse>, (StatusCode, String)> {
-    tracing::info!("Registering storage node: {} at {}", request.node_id, request.endpoint_url);
+    tracing::info!(
+        "Registering storage node: {} at {}",
+        request.node_id,
+        request.endpoint_url
+    );
 
     // SSRF protection: block private/internal URLs (HIGH-07)
     if is_private_url(&request.endpoint_url) && state.config.is_production() {
         tracing::warn!("Blocked SSRF attempt: {}", request.endpoint_url);
-        return Err((StatusCode::BAD_REQUEST, "Invalid endpoint URL: private/internal addresses not allowed".to_string()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Invalid endpoint URL: private/internal addresses not allowed".to_string(),
+        ));
     }
 
     // Проверяем доступность node
@@ -147,13 +156,17 @@ pub async fn register_node(
     let is_healthy = match health_check {
         Ok(resp) if resp.status().is_success() => true,
         Ok(resp) => {
-            tracing::warn!("Node {} health check returned {}", request.node_id, resp.status());
+            tracing::warn!(
+                "Node {} health check returned {}",
+                request.node_id,
+                resp.status()
+            );
             false
-        }
+        },
         Err(e) => {
             tracing::warn!("Node {} health check failed: {}", request.node_id, e);
             false
-        }
+        },
     };
 
     // Upsert в БД
@@ -213,9 +226,9 @@ pub async fn list_nodes(
         ORDER BY region, id
         "#,
     )
-        .fetch_all(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let total = nodes.len();
     let active = nodes.iter().filter(|n| n.status == "active").count();
@@ -241,11 +254,11 @@ pub async fn get_node(
         WHERE id = $1
         "#,
     )
-        .bind(&node_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or_else(|| (StatusCode::NOT_FOUND, "Node not found".to_string()))?;
+    .bind(&node_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .ok_or_else(|| (StatusCode::NOT_FOUND, "Node not found".to_string()))?;
 
     Ok(Json(node))
 }
@@ -258,18 +271,20 @@ pub async fn remove_node(
     Path(node_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     // Проверяем что нет фрагментов на этом node
-    let fragments_count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM file_fragments WHERE storage_node_id = $1",
-    )
-        .bind(&node_id)
-        .fetch_one(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let fragments_count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM file_fragments WHERE storage_node_id = $1")
+            .bind(&node_id)
+            .fetch_one(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     if fragments_count.0 > 0 {
         return Err((
             StatusCode::CONFLICT,
-            format!("Cannot remove node with {} fragments. Migrate data first.", fragments_count.0),
+            format!(
+                "Cannot remove node with {} fragments. Migrate data first.",
+                fragments_count.0
+            ),
         ));
     }
 
@@ -306,12 +321,12 @@ pub async fn heartbeat(
         WHERE id = $1
         "#,
     )
-        .bind(&request.node_id)
-        .bind(request.used_space_bytes)
-        .bind(request.total_space_bytes)
-        .execute(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .bind(&request.node_id)
+    .bind(request.used_space_bytes)
+    .bind(request.total_space_bytes)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     if result.rows_affected() == 0 {
         return Err((StatusCode::NOT_FOUND, "Node not registered".to_string()));
@@ -334,9 +349,7 @@ pub async fn health_check_all(
     _admin: AdminUser,
     State(state): State<AppState>,
 ) -> Result<Json<HealthCheckAllResponse>, (StatusCode, String)> {
-    let nodes: Vec<(String, String)> = sqlx::query_as(
-        "SELECT id, endpoint_url FROM storage_nodes",
-    )
+    let nodes: Vec<(String, String)> = sqlx::query_as("SELECT id, endpoint_url FROM storage_nodes")
         .fetch_all(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -357,13 +370,9 @@ pub async fn health_check_all(
         let (healthy, latency_ms, error) = match check_result {
             Ok(resp) if resp.status().is_success() => {
                 (true, Some(start.elapsed().as_millis() as u64), None)
-            }
-            Ok(resp) => {
-                (false, None, Some(format!("HTTP {}", resp.status())))
-            }
-            Err(e) => {
-                (false, None, Some(e.to_string()))
-            }
+            },
+            Ok(resp) => (false, None, Some(format!("HTTP {}", resp.status()))),
+            Err(e) => (false, None, Some(e.to_string())),
         };
 
         // Обновляем статус в БД
@@ -375,10 +384,10 @@ pub async fn health_check_all(
                 WHERE id = $1
                 "#,
             )
-                .bind(&node_id)
-                .execute(&state.db)
-                .await
-                .ok();
+            .bind(&node_id)
+            .execute(&state.db)
+            .await
+            .ok();
         } else {
             sqlx::query(
                 r#"
@@ -389,10 +398,10 @@ pub async fn health_check_all(
                 WHERE id = $1
                 "#,
             )
-                .bind(&node_id)
-                .execute(&state.db)
-                .await
-                .ok();
+            .bind(&node_id)
+            .execute(&state.db)
+            .await
+            .ok();
         }
 
         results.push(HealthCheckResult {
@@ -426,7 +435,9 @@ pub async fn get_replication_settings(
     State(state): State<AppState>,
 ) -> Result<Json<ReplicationSettings>, (StatusCode, String)> {
     let service = ReplicationService::new(state.db.clone());
-    let settings = service.get_settings().await
+    let settings = service
+        .get_settings()
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(settings))
 }
@@ -456,8 +467,9 @@ pub async fn update_replication_settings(
 
     if updates.is_empty() {
         let service = ReplicationService::new(state.db.clone());
-        return Ok(Json(service.get_settings().await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?));
+        return Ok(Json(service.get_settings().await.map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        })?));
     }
 
     let query = format!(
@@ -482,8 +494,9 @@ pub async fn update_replication_settings(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let service = ReplicationService::new(state.db.clone());
-    Ok(Json(service.get_settings().await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?))
+    Ok(Json(service.get_settings().await.map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    })?))
 }
 
 /// GET /api/v1/storage/replication/status/:nft_token_id - Get file replication status
@@ -492,7 +505,9 @@ pub async fn get_file_replication_status(
     Path(nft_token_id): Path<String>,
 ) -> Result<Json<FileReplicationStatus>, (StatusCode, String)> {
     let service = ReplicationService::new(state.db.clone());
-    let status = service.check_file_replication(&nft_token_id).await
+    let status = service
+        .check_file_replication(&nft_token_id)
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(status))
 }
@@ -512,14 +527,18 @@ pub async fn get_upload_targets(
 ) -> Result<Json<UploadTargetsResponse>, (StatusCode, String)> {
     let service = ReplicationService::new(state.db.clone());
 
-    let settings = service.get_settings().await
+    let settings = service
+        .get_settings()
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let targets = service.create_upload_targets(
-        &request.file_id,
-        request.fragment_index,
-        request.fragment_size,
-    ).await
+    let targets = service
+        .create_upload_targets(
+            &request.file_id,
+            request.fragment_index,
+            request.fragment_size,
+        )
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(UploadTargetsResponse {
@@ -527,3 +546,21 @@ pub async fn get_upload_targets(
         replication_factor: settings.replication_factor,
     }))
 }
+
+// BEGIN GENERATED MANUAL SQLX FROMROW IMPLS
+
+impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for StorageNodeInfo {
+    fn from_row(row: &'r sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            endpoint_url: row.try_get("endpoint_url")?,
+            region: row.try_get("region")?,
+            status: row.try_get("status")?,
+            total_space_bytes: row.try_get("total_space_bytes")?,
+            used_space_bytes: row.try_get("used_space_bytes")?,
+            health_check_failures: row.try_get("health_check_failures")?,
+            last_health_check: row.try_get("last_health_check")?,
+        })
+    }
+}
+// END GENERATED MANUAL SQLX FROMROW IMPLS

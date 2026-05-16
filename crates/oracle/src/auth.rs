@@ -6,14 +6,14 @@
 use axum::{
     async_trait,
     extract::FromRequestParts,
-    http::{request::Parts, StatusCode, header::AUTHORIZATION},
+    http::{header::AUTHORIZATION, request::Parts, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{Duration, Utc};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
 use crate::services::AppState;
 
@@ -165,7 +165,8 @@ pub fn verify_token(token: &str, verifying_key: &VerifyingKey) -> Result<Claims,
 
     // Verify signature
     let message = format!("{}.{}", header_b64, payload_b64);
-    let signature_bytes = URL_SAFE_NO_PAD.decode(signature_b64)
+    let signature_bytes = URL_SAFE_NO_PAD
+        .decode(signature_b64)
         .map_err(|_| AuthError::InvalidToken)?;
 
     if signature_bytes.len() != 64 {
@@ -176,14 +177,16 @@ pub fn verify_token(token: &str, verifying_key: &VerifyingKey) -> Result<Claims,
     sig_arr.copy_from_slice(&signature_bytes);
     let signature = Signature::from_bytes(&sig_arr);
 
-    verifying_key.verify(message.as_bytes(), &signature)
+    verifying_key
+        .verify(message.as_bytes(), &signature)
         .map_err(|_| AuthError::InvalidSignature)?;
 
     // Decode payload
-    let payload_json = URL_SAFE_NO_PAD.decode(payload_b64)
+    let payload_json = URL_SAFE_NO_PAD
+        .decode(payload_b64)
         .map_err(|_| AuthError::InvalidToken)?;
-    let claims: Claims = serde_json::from_slice(&payload_json)
-        .map_err(|_| AuthError::InvalidToken)?;
+    let claims: Claims =
+        serde_json::from_slice(&payload_json).map_err(|_| AuthError::InvalidToken)?;
 
     // Check expiration
     if claims.is_expired() {
@@ -225,12 +228,17 @@ impl IntoResponse for AuthError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
             AuthError::MissingAuth => (StatusCode::UNAUTHORIZED, "Missing authorization"),
-            AuthError::InvalidAuthHeader => (StatusCode::UNAUTHORIZED, "Invalid authorization header"),
+            AuthError::InvalidAuthHeader => {
+                (StatusCode::UNAUTHORIZED, "Invalid authorization header")
+            },
             AuthError::InvalidToken => (StatusCode::UNAUTHORIZED, "Invalid token"),
             AuthError::InvalidSignature => (StatusCode::UNAUTHORIZED, "Invalid signature"),
             AuthError::TokenExpired => (StatusCode::UNAUTHORIZED, "Token expired"),
             AuthError::TokenRevoked => (StatusCode::UNAUTHORIZED, "Token has been revoked"),
-            AuthError::DeviceMismatch => (StatusCode::UNAUTHORIZED, "Device fingerprint mismatch — token was issued for a different device"),
+            AuthError::DeviceMismatch => (
+                StatusCode::UNAUTHORIZED,
+                "Device fingerprint mismatch — token was issued for a different device",
+            ),
             AuthError::Forbidden => (StatusCode::FORBIDDEN, "Forbidden"),
         };
 
@@ -267,9 +275,13 @@ impl AuthenticatedUser {
 impl FromRequestParts<AppState> for AuthenticatedUser {
     type Rejection = AuthError;
 
-    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
         // Get Authorization header
-        let auth_header = parts.headers
+        let auth_header = parts
+            .headers
             .get(AUTHORIZATION)
             .ok_or(AuthError::MissingAuth)?
             .to_str()
@@ -296,7 +308,8 @@ impl FromRequestParts<AppState> for AuthenticatedUser {
 
         // Verify device fingerprint if token has one bound
         if let Some(ref token_dfp) = claims.dfp {
-            let request_dfp = parts.headers
+            let request_dfp = parts
+                .headers
                 .get(DEVICE_FINGERPRINT_HEADER)
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("");
@@ -343,10 +356,16 @@ pub struct AdminUser(pub AuthenticatedUser);
 impl FromRequestParts<AppState> for AdminUser {
     type Rejection = AuthError;
 
-    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
         let user = AuthenticatedUser::from_request_parts(parts, state).await?;
         if user.role != "admin" {
-            tracing::warn!("Non-admin user {} attempted admin action", user.wallet_address);
+            tracing::warn!(
+                "Non-admin user {} attempted admin action",
+                user.wallet_address
+            );
             return Err(AuthError::Forbidden);
         }
         Ok(AdminUser(user))
@@ -363,7 +382,10 @@ pub struct OptionalAuth(pub Option<AuthenticatedUser>);
 impl FromRequestParts<AppState> for OptionalAuth {
     type Rejection = AuthError;
 
-    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
         // Try to get auth, return None if missing
         match AuthenticatedUser::from_request_parts(parts, state).await {
             Ok(user) => Ok(OptionalAuth(Some(user))),
@@ -378,7 +400,7 @@ impl FromRequestParts<AppState> for OptionalAuth {
 pub struct TokenRequest {
     /// XRPL wallet address
     pub wallet_address: String,
-    /// Signature of challenge from Xaman
+    /// Signature of challenge from an XRPL wallet
     pub signature: String,
     /// The challenge that was signed
     pub challenge: String,
@@ -400,7 +422,10 @@ const NODE_SECRET_HEADER: &str = "X-Node-Secret";
 impl FromRequestParts<AppState> for NodeAuth {
     type Rejection = AuthError;
 
-    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
         // First, try X-Node-Secret header
         if let Some(secret_header) = parts.headers.get(NODE_SECRET_HEADER) {
             if let Ok(secret) = secret_header.to_str() {
@@ -411,7 +436,7 @@ impl FromRequestParts<AppState> for NodeAuth {
                         });
                     }
                 }
-                tracing::warn!("Invalid node secret presented");
+                tracing::warn!("Invalid storage-node auth credential presented");
                 return Err(AuthError::InvalidToken);
             }
         }
