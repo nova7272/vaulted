@@ -462,21 +462,41 @@ impl AppState {
         Ok(format!("Bearer {}", token))
     }
 
-    /// Creates an HTTP client with Authorization header pre-configured
-    /// Falls back to a plain client if no Oracle token is available
+    /// Creates an HTTP client with Authorization header pre-configured.
+    /// If the access token is missing/expired, attempts refresh before falling back.
     pub async fn create_authed_client(&self) -> reqwest::Client {
         let mut headers = reqwest::header::HeaderMap::new();
-        if let Ok(auth) = self.get_auth_header().await {
-            if let Ok(val) = reqwest::header::HeaderValue::from_str(&auth) {
-                headers.insert(reqwest::header::AUTHORIZATION, val);
+
+        if !self.has_oracle_token().await {
+            if let Err(e) = self.try_refresh_oracle_token().await {
+                tracing::warn!("Oracle token refresh before request failed: {}", e);
             }
         }
+
+        match self.get_auth_header().await {
+            Ok(auth) => {
+                if let Ok(val) = reqwest::header::HeaderValue::from_str(&auth) {
+                    headers.insert(reqwest::header::AUTHORIZATION, val);
+                } else {
+                    tracing::warn!("Invalid Oracle authorization header");
+                }
+            },
+            Err(e) => {
+                tracing::warn!(
+                    "Creating HTTP client without Oracle Authorization header: {}",
+                    e
+                );
+            },
+        }
+
         if let Ok(dfp) = self.device_fingerprint_header() {
             if let Ok(val) = reqwest::header::HeaderValue::from_str(&dfp) {
                 headers.insert("X-Device-Fingerprint", val);
             }
         }
+
         reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
             .default_headers(headers)
             .build()
             .unwrap_or_else(|_| reqwest::Client::new())

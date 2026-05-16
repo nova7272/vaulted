@@ -319,6 +319,21 @@ impl OracleClient {
         self.get(&format!("/api/v1/identity/{}", identity_id)).await
     }
 
+    pub async fn get_identity_challenge(
+        &self,
+        identity_id: &str,
+    ) -> Result<IdentityChallengeResponse> {
+        self.get(&format!("/api/v1/identity/challenge/{}", identity_id))
+            .await
+    }
+
+    pub async fn get_identity_token(
+        &self,
+        request: &IdentityTokenRequest,
+    ) -> Result<IdentityTokenResponse> {
+        self.post("/api/v1/identity/token", request).await
+    }
+
     /// Stores a TOFU/manual trust decision for a recipient encryption key.
     pub async fn trust_recipient_key(
         &self,
@@ -874,6 +889,35 @@ pub struct PublicVaultedIdentityResponse {
     pub signing_public_key: String,
     pub protocol_version: String,
     pub status: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct IdentityChallengeResponse {
+    pub challenge_id: String,
+    pub challenge: String,
+    pub expires_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct IdentityTokenRequest {
+    pub identity_id: String,
+    pub wallet_address: String,
+    pub challenge: String,
+    pub signature: String,
+    pub device_public_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct IdentityTokenResponse {
+    pub identity_id: String,
+    pub verified: bool,
+    pub access_token: String,
+    pub token_type: String,
+    pub expires_in: i64,
+    #[serde(default)]
+    pub refresh_token: Option<String>,
+    #[serde(default)]
+    pub role: Option<String>,
 }
 
 /// Request to trust a recipient key fingerprint.

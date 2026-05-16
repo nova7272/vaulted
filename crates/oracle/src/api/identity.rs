@@ -16,6 +16,7 @@ use uuid::Uuid;
 use xrpl_vault_crypto_core::encryption_public_key_fingerprint_hex;
 
 use crate::{
+    auth::{self, Claims},
     error::{ApiError, Result},
     services::AppState,
 };
@@ -148,17 +149,22 @@ pub struct IdentityChallengeResponse {
 #[derive(Debug, Deserialize)]
 pub struct IdentityTokenRequest {
     pub identity_id: String,
+    pub wallet_address: String,
     pub challenge: String,
     pub signature: String,
     pub device_public_key: Option<String>,
 }
 
-/// Minimal token response. Current JWT issuance can be plugged into auth.rs later.
+/// Token response for Vaulted identity login.
 #[derive(Debug, Serialize)]
 pub struct IdentityTokenResponse {
     pub identity_id: String,
     pub verified: bool,
+    pub access_token: String,
     pub token_type: String,
+    pub expires_in: i64,
+    pub refresh_token: Option<String>,
+    pub role: Option<String>,
 }
 
 /// Register a Vaulted identity. Private keys/seed/mnemonic/file keys are never accepted.
@@ -681,6 +687,10 @@ pub async fn identity_token(
     let signing_public_key: String = row
         .try_get("signing_public_key")
         .map_err(|e| ApiError::Database(format!("Malformed identity row: {e}")))?;
+    let wallet_address = req.wallet_address.trim().to_string();
+    if wallet_address.is_empty() {
+        return Err(ApiError::BadRequest("wallet_address is required".into()));
+    }
 
     verify_ed25519_hex(
         &signing_public_key,
@@ -703,10 +713,36 @@ pub async fn identity_token(
         .await;
     }
 
+    let role = "user".to_string();
+    let claims = Claims::new_access_with_role(&wallet_address, 1, &role);
+    let access_token = auth::create_token(&claims, &state.signing_key);
+
+    let refresh_claims = Claims::new_refresh(&wallet_address, 7);
+    let refresh_token = auth::create_token(&refresh_claims, &state.signing_key);
+
+    state
+        .audit_log(
+            None,
+            "identity_token_issued",
+            None,
+            Some(serde_json::json!({
+                "identity_id": req.identity_id,
+                "wallet_address": wallet_address,
+                "token_id": claims.jti,
+                "expires_at": claims.exp,
+                "auth_mode": "vaulted_identity_signature"
+            })),
+        )
+        .await;
+
     Ok(Json(IdentityTokenResponse {
         identity_id: req.identity_id,
         verified: true,
-        token_type: "vaulted-identity-signature".into(),
+        access_token,
+        token_type: "Bearer".into(),
+        expires_in: 3600,
+        refresh_token: Some(refresh_token),
+        role: Some(role),
     }))
 }
 
