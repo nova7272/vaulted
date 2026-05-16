@@ -13,7 +13,7 @@ use crate::{
 };
 
 /// POST /api/v1/users/register - регистрация нового пользователя
-/// 
+///
 /// PUBLIC endpoint - new users can register without auth.
 /// CANNOT update existing user's pre_public_key (HIGH-06 protection).
 /// Use PUT /api/v1/users/update-key (authenticated) to update keys.
@@ -28,7 +28,10 @@ pub async fn register_user(
 
     // Валидация публичного ключа (должен быть hex, 66 or 128 символов)
     if (request.pre_public_key.len() != 66 && request.pre_public_key.len() != 128)
-        || !request.pre_public_key.chars().all(|c| c.is_ascii_hexdigit())
+        || !request
+            .pre_public_key
+            .chars()
+            .all(|c| c.is_ascii_hexdigit())
     {
         return Err(ApiError::Validation(
             "Invalid PRE public key format".to_string(),
@@ -36,12 +39,11 @@ pub async fn register_user(
     }
 
     // Check if user already exists (HIGH-06: block public key overwrite)
-    let existing = sqlx::query_as::<_, (uuid::Uuid,)>(
-        "SELECT id FROM users WHERE wallet_address = $1",
-    )
-    .bind(&request.wallet_address)
-    .fetch_optional(&state.db)
-    .await?;
+    let existing =
+        sqlx::query_as::<_, (uuid::Uuid,)>("SELECT id FROM users WHERE wallet_address = $1")
+            .bind(&request.wallet_address)
+            .fetch_optional(&state.db)
+            .await?;
 
     if let Some((user_id,)) = existing {
         // User exists — do NOT overwrite pre_public_key without auth (HIGH-06)
@@ -100,7 +102,10 @@ pub async fn update_public_key(
 ) -> Result<Json<serde_json::Value>> {
     // Validate key format
     if (request.pre_public_key.len() != 66 && request.pre_public_key.len() != 128)
-        || !request.pre_public_key.chars().all(|c| c.is_ascii_hexdigit())
+        || !request
+            .pre_public_key
+            .chars()
+            .all(|c| c.is_ascii_hexdigit())
     {
         return Err(ApiError::Validation(
             "Invalid PRE public key format".to_string(),
@@ -120,7 +125,10 @@ pub async fn update_public_key(
         return Err(ApiError::NotFound("User not found".to_string()));
     }
 
-    tracing::info!("Updated PRE key for authenticated user {}", auth.wallet_address);
+    tracing::info!(
+        "Updated PRE key for authenticated user {}",
+        auth.wallet_address
+    );
 
     state
         .audit_log(

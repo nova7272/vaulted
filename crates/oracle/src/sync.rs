@@ -7,7 +7,7 @@ use sqlx::PgPool;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::interval;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 use crate::error::Result;
 use crate::xrpl::XrplService;
@@ -83,32 +83,44 @@ impl XrplSyncService {
             LIMIT $1
             "#,
         )
-            .bind(self.config.batch_size)
-            .fetch_all(&self.db)
-            .await?;
+        .bind(self.config.batch_size)
+        .fetch_all(&self.db)
+        .await?;
 
         stats.total = nfts.len();
         info!("Syncing {} NFTs with XRPL", stats.total);
 
         for (nft_id, nft_token_id, current_owner_id) in nfts {
-            match self.sync_single_nft(&nft_id, &nft_token_id, &current_owner_id).await {
+            match self
+                .sync_single_nft(&nft_id, &nft_token_id, &current_owner_id)
+                .await
+            {
                 Ok(SyncAction::NoChange) => stats.unchanged += 1,
                 Ok(SyncAction::OwnerUpdated { old, new }) => {
                     stats.updated += 1;
-                    info!("NFT {} owner changed: {} -> {}", &nft_token_id[..16], old, new);
-                }
+                    info!(
+                        "NFT {} owner changed: {} -> {}",
+                        &nft_token_id[..16],
+                        old,
+                        new
+                    );
+                },
                 Ok(SyncAction::NotFoundOnXrpl) => {
                     stats.not_found += 1;
                     warn!("NFT {} not found on XRPL", &nft_token_id[..16]);
-                }
+                },
                 Ok(SyncAction::NewOwnerNotRegistered(addr)) => {
                     stats.unregistered_owners += 1;
-                    warn!("NFT {} new owner {} not registered", &nft_token_id[..16], addr);
-                }
+                    warn!(
+                        "NFT {} new owner {} not registered",
+                        &nft_token_id[..16],
+                        addr
+                    );
+                },
                 Err(e) => {
                     stats.errors += 1;
                     warn!("Failed to sync NFT {}: {}", &nft_token_id[..16], e);
-                }
+                },
             }
         }
 
@@ -130,15 +142,17 @@ impl XrplSyncService {
         current_owner_id: &uuid::Uuid,
     ) -> Result<SyncAction> {
         // Получаем текущий wallet address владельца из Oracle БД
-        let current_owner_wallet: String = sqlx::query_scalar(
-            "SELECT wallet_address FROM users WHERE id = $1"
-        )
-            .bind(current_owner_id)
-            .fetch_one(&self.db)
-            .await?;
+        let current_owner_wallet: String =
+            sqlx::query_scalar("SELECT wallet_address FROM users WHERE id = $1")
+                .bind(current_owner_id)
+                .fetch_one(&self.db)
+                .await?;
 
         // Проверяем владеет ли текущий owner этим NFT на XRPL
-        let still_owns = self.xrpl.verify_nft_owner(nft_token_id, &current_owner_wallet).await?;
+        let still_owns = self
+            .xrpl
+            .verify_nft_owner(nft_token_id, &current_owner_wallet)
+            .await?;
 
         if still_owns {
             // Обновляем timestamp для round-robin
@@ -156,12 +170,11 @@ impl XrplSyncService {
         match new_owner_wallet {
             Some(new_wallet) => {
                 // Проверяем зарегистрирован ли новый владелец в Oracle
-                let new_owner_id: Option<uuid::Uuid> = sqlx::query_scalar(
-                    "SELECT id FROM users WHERE wallet_address = $1"
-                )
-                    .bind(&new_wallet)
-                    .fetch_optional(&self.db)
-                    .await?;
+                let new_owner_id: Option<uuid::Uuid> =
+                    sqlx::query_scalar("SELECT id FROM users WHERE wallet_address = $1")
+                        .bind(&new_wallet)
+                        .fetch_optional(&self.db)
+                        .await?;
 
                 match new_owner_id {
                     Some(new_id) => {
@@ -175,46 +188,46 @@ impl XrplSyncService {
                                 status = 'active',
                                 updated_at = NOW()
                             WHERE id = $2
-                            "#
+                            "#,
                         )
-                            .bind(&new_id)
-                            .bind(nft_id)
-                            .execute(&self.db)
-                            .await?;
+                        .bind(&new_id)
+                        .bind(nft_id)
+                        .execute(&self.db)
+                        .await?;
 
                         // Логируем в audit
                         sqlx::query(
                             r#"
                             INSERT INTO audit_log (user_id, action, nft_token_id, details)
                             VALUES ($1, 'xrpl_sync_owner_change', $2, $3)
-                            "#
+                            "#,
                         )
-                            .bind(&new_id)
-                            .bind(nft_token_id)
-                            .bind(serde_json::json!({
+                        .bind(&new_id)
+                        .bind(nft_token_id)
+                        .bind(serde_json::json!({
                             "old_owner_id": current_owner_id.to_string(),
                             "new_owner_wallet": new_wallet,
                             "sync_type": "automatic"
                         }))
-                            .execute(&self.db)
-                            .await?;
+                        .execute(&self.db)
+                        .await?;
 
                         Ok(SyncAction::OwnerUpdated {
                             old: current_owner_wallet,
                             new: new_wallet,
                         })
-                    }
+                    },
                     None => {
                         // Новый владелец не зарегистрирован - ничего не делаем
                         // Он должен сначала зарегистрироваться в приложении
                         Ok(SyncAction::NewOwnerNotRegistered(new_wallet))
-                    }
+                    },
                 }
-            }
+            },
             None => {
                 // NFT не найден ни у кого - возможно сожжён или ошибка
                 Ok(SyncAction::NotFoundOnXrpl)
-            }
+            },
         }
     }
 
@@ -225,9 +238,7 @@ impl XrplSyncService {
     /// 2. Если не нашли - возвращаем None
     async fn find_nft_owner_on_xrpl(&self, nft_token_id: &str) -> Result<Option<String>> {
         // Получаем все wallet addresses из Oracle
-        let wallets: Vec<String> = sqlx::query_scalar(
-            "SELECT wallet_address FROM users"
-        )
+        let wallets: Vec<String> = sqlx::query_scalar("SELECT wallet_address FROM users")
             .fetch_all(&self.db)
             .await?;
 
@@ -249,16 +260,16 @@ impl XrplSyncService {
     /// Синхронизирует конкретный NFT (для API endpoint)
     pub async fn sync_nft(&self, nft_token_id: &str) -> Result<SyncAction> {
         let nft = sqlx::query_as::<_, (uuid::Uuid, uuid::Uuid)>(
-            "SELECT id, owner_id FROM nft_metadata WHERE nft_token_id = $1"
+            "SELECT id, owner_id FROM nft_metadata WHERE nft_token_id = $1",
         )
-            .bind(nft_token_id)
-            .fetch_optional(&self.db)
-            .await?;
+        .bind(nft_token_id)
+        .fetch_optional(&self.db)
+        .await?;
 
         match nft {
             Some((nft_id, owner_id)) => {
                 self.sync_single_nft(&nft_id, nft_token_id, &owner_id).await
-            }
+            },
             None => Ok(SyncAction::NotFoundOnXrpl),
         }
     }

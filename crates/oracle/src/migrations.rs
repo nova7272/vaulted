@@ -15,16 +15,18 @@ pub struct MigrationResult {
 }
 
 /// Запускает миграции из директории
-pub async fn run_migrations(pool: &PgPool, migrations_dir: &Path) -> anyhow::Result<MigrationResult> {
+pub async fn run_migrations(
+    pool: &PgPool,
+    migrations_dir: &Path,
+) -> anyhow::Result<MigrationResult> {
     // Создаём таблицу миграций если не существует
     ensure_migrations_table(pool).await?;
 
     // Получаем список применённых миграций
-    let applied: Vec<String> = sqlx::query_scalar(
-        "SELECT name FROM _migrations ORDER BY applied_at"
-    )
-        .fetch_all(pool)
-        .await?;
+    let applied: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM _migrations ORDER BY applied_at")
+            .fetch_all(pool)
+            .await?;
 
     info!("Found {} previously applied migrations", applied.len());
 
@@ -32,7 +34,11 @@ pub async fn run_migrations(pool: &PgPool, migrations_dir: &Path) -> anyhow::Res
     let mut migration_files: Vec<_> = std::fs::read_dir(migrations_dir)?
         .filter_map(|entry| entry.ok())
         .filter(|entry| {
-            entry.path().extension().map(|ext| ext == "sql").unwrap_or(false)
+            entry
+                .path()
+                .extension()
+                .map(|ext| ext == "sql")
+                .unwrap_or(false)
         })
         .collect();
 
@@ -85,9 +91,7 @@ pub async fn run_migrations(pool: &PgPool, migrations_dir: &Path) -> anyhow::Res
         }
 
         // Записываем что миграция применена
-        sqlx::query(
-            "INSERT INTO _migrations (name, applied_at) VALUES ($1, NOW())"
-        )
+        sqlx::query("INSERT INTO _migrations (name, applied_at) VALUES ($1, NOW())")
             .bind(&filename)
             .execute(&mut *tx)
             .await?;
@@ -103,15 +107,17 @@ pub async fn run_migrations(pool: &PgPool, migrations_dir: &Path) -> anyhow::Res
 
 /// Создаёт таблицу миграций
 async fn ensure_migrations_table(pool: &PgPool) -> anyhow::Result<()> {
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS _migrations (
             id SERIAL PRIMARY KEY,
             name VARCHAR(255) NOT NULL UNIQUE,
             applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
-    "#)
-        .execute(pool)
-        .await?;
+    "#,
+    )
+    .execute(pool)
+    .await?;
 
     Ok(())
 }
@@ -121,10 +127,10 @@ fn is_ignorable_error(error: &sqlx::Error) -> bool {
     let error_str = error.to_string().to_lowercase();
 
     // Ошибки которые можно игнорировать
-    error_str.contains("already exists") ||
-        error_str.contains("does not exist") ||
-        error_str.contains("duplicate key") ||
-        error_str.contains("constraint") && error_str.contains("already exists")
+    error_str.contains("already exists")
+        || error_str.contains("does not exist")
+        || error_str.contains("duplicate key")
+        || error_str.contains("constraint") && error_str.contains("already exists")
 }
 
 /// Встроенные миграции (если файлы недоступны)
@@ -133,22 +139,76 @@ pub async fn run_embedded_migrations(pool: &PgPool) -> anyhow::Result<MigrationR
 
     let migrations = vec![
         ("001_init.sql", include_str!("../../../migrations/init.sql")),
-        ("002_escrow_transfers.sql", include_str!("../../../migrations/002_escrow_transfers.sql")),
-        ("002_encrypted_filename.sql", include_str!("../../../migrations/002_encrypted_filename.sql")),
-        ("003_vault_fields.sql", include_str!("../../../migrations/003_vault_fields.sql")),
-        ("004_is_re_encrypted.sql", include_str!("../../../migrations/004_is_re_encrypted.sql")),
-        ("005_replication.sql", include_str!("../../../migrations/005_replication.sql")),
-        ("006_admin_roles.sql", include_str!("../../../migrations/006_admin_roles.sql")),
-        ("007_audit_encryption.sql", include_str!("../../../migrations/007_audit_encryption.sql")),
-        ("008_column_encryption.sql", include_str!("../../../migrations/008_column_encryption.sql")),
-        ("009_token_blacklist.sql", include_str!("../../../migrations/009_token_blacklist.sql")),
+        (
+            "002_escrow_transfers.sql",
+            include_str!("../../../migrations/002_escrow_transfers.sql"),
+        ),
+        (
+            "002_encrypted_filename.sql",
+            include_str!("../../../migrations/002_encrypted_filename.sql"),
+        ),
+        (
+            "003_vault_fields.sql",
+            include_str!("../../../migrations/003_vault_fields.sql"),
+        ),
+        (
+            "004_is_re_encrypted.sql",
+            include_str!("../../../migrations/004_is_re_encrypted.sql"),
+        ),
+        (
+            "005_replication.sql",
+            include_str!("../../../migrations/005_replication.sql"),
+        ),
+        (
+            "006_admin_roles.sql",
+            include_str!("../../../migrations/006_admin_roles.sql"),
+        ),
+        (
+            "007_audit_encryption.sql",
+            include_str!("../../../migrations/007_audit_encryption.sql"),
+        ),
+        (
+            "008_column_encryption.sql",
+            include_str!("../../../migrations/008_column_encryption.sql"),
+        ),
+        (
+            "009_token_blacklist.sql",
+            include_str!("../../../migrations/009_token_blacklist.sql"),
+        ),
+        (
+            "010_vaulted_identity_manifest_layer.sql",
+            include_str!("../../../migrations/010_vaulted_identity_manifest_layer.sql"),
+        ),
+        (
+            "011_qr_login_and_vaulted_wallet.sql",
+            include_str!("../../../migrations/011_qr_login_and_vaulted_wallet.sql"),
+        ),
+        (
+            "012_qr_device_pairing.sql",
+            include_str!("../../../migrations/012_qr_device_pairing.sql"),
+        ),
+        (
+            "013_qr_xrpl_signing.sql",
+            include_str!("../../../migrations/013_qr_xrpl_signing.sql"),
+        ),
+        (
+            "014_qr_file_grant_approval.sql",
+            include_str!("../../../migrations/014_qr_file_grant_approval.sql"),
+        ),
+        (
+            "015_key_envelope_grants.sql",
+            include_str!("../../../migrations/015_key_envelope_grants.sql"),
+        ),
+        (
+            "016_recipient_key_trust.sql",
+            include_str!("../../../migrations/016_recipient_key_trust.sql"),
+        ),
     ];
 
-    let applied: Vec<String> = sqlx::query_scalar(
-        "SELECT name FROM _migrations ORDER BY applied_at"
-    )
-        .fetch_all(pool)
-        .await?;
+    let applied: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM _migrations ORDER BY applied_at")
+            .fetch_all(pool)
+            .await?;
 
     let mut result = MigrationResult {
         total: migrations.len(),
@@ -194,9 +254,9 @@ mod tests {
     #[test]
     fn test_ignorable_errors() {
         // Тестируем определение игнорируемых ошибок
-        assert!(is_ignorable_error(&sqlx::Error::Database(
-            Box::new(TestDbError("relation already exists".to_string()))
-        )));
+        assert!(is_ignorable_error(&sqlx::Error::Database(Box::new(
+            TestDbError("relation already exists".to_string())
+        ))));
     }
 
     struct TestDbError(String);
@@ -216,10 +276,20 @@ mod tests {
     impl std::error::Error for TestDbError {}
 
     impl sqlx::error::DatabaseError for TestDbError {
-        fn message(&self) -> &str { &self.0 }
-        fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) { self }
-        fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) { self }
-        fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> { self }
-        fn kind(&self) -> sqlx::error::ErrorKind { sqlx::error::ErrorKind::Other }
+        fn message(&self) -> &str {
+            &self.0
+        }
+        fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+        fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+        fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+            self
+        }
+        fn kind(&self) -> sqlx::error::ErrorKind {
+            sqlx::error::ErrorKind::Other
+        }
     }
 }

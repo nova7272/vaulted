@@ -6,8 +6,8 @@ use axum::{
     extract::{Path, State},
     Json,
 };
-use uuid::Uuid;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 use xrpl_vault_crypto_core::pre::{EncryptedPreData, ProxyReEncryption, ReEncryptedData};
 
 use crate::{
@@ -32,9 +32,12 @@ pub async fn initiate_transfer(
     Json(request): Json<InitiateTransferRequest>,
 ) -> Result<Json<InitiateTransferResponse>> {
     // Verify authenticated user matches request
-    if !auth.wallet_address.eq_ignore_ascii_case(&request.from_address) {
+    if !auth
+        .wallet_address
+        .eq_ignore_ascii_case(&request.from_address)
+    {
         return Err(ApiError::Forbidden(
-            "Cannot initiate transfer from different wallet".into()
+            "Cannot initiate transfer from different wallet".into(),
         ));
     }
 
@@ -44,7 +47,9 @@ pub async fn initiate_transfer(
     }
 
     if request.re_encryption_key.is_empty() {
-        return Err(ApiError::Validation("re_encryption_key is required".to_string()));
+        return Err(ApiError::Validation(
+            "re_encryption_key is required".to_string(),
+        ));
     }
 
     // Получаем NFT metadata с encrypted_aes_key
@@ -56,20 +61,19 @@ pub async fn initiate_transfer(
         WHERE nm.nft_token_id = $1 AND nm.status = 'active'
         "#,
     )
-        .bind(&request.nft_token_id)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or_else(|| ApiError::NftNotFound(request.nft_token_id.clone()))?;
+    .bind(&request.nft_token_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| ApiError::NftNotFound(request.nft_token_id.clone()))?;
 
     let (nft_metadata_id, from_user_id, encrypted_aes_key_base64) = nft_row;
 
     // Проверяем что from_address совпадает с owner
-    let from_wallet = sqlx::query_scalar::<_, String>(
-        "SELECT wallet_address FROM users WHERE id = $1",
-    )
-        .bind(from_user_id)
-        .fetch_one(&state.db)
-        .await?;
+    let from_wallet =
+        sqlx::query_scalar::<_, String>("SELECT wallet_address FROM users WHERE id = $1")
+            .bind(from_user_id)
+            .fetch_one(&state.db)
+            .await?;
 
     if !from_wallet.eq_ignore_ascii_case(&request.from_address) {
         return Err(ApiError::Forbidden(
@@ -81,12 +85,12 @@ pub async fn initiate_transfer(
     let to_user = sqlx::query_as::<_, (Uuid, String)>(
         "SELECT id, pre_public_key FROM users WHERE wallet_address = $1",
     )
-        .bind(&request.to_address)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or_else(|| {
-            ApiError::NotFound(format!("Recipient {} not registered", request.to_address))
-        })?;
+    .bind(&request.to_address)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| {
+        ApiError::NotFound(format!("Recipient {} not registered", request.to_address))
+    })?;
 
     let (to_user_id, recipient_pre_public_key_hex) = to_user;
 
@@ -104,11 +108,17 @@ pub async fn initiate_transfer(
 
     // Выполняем re-encryption с публичным ключом получателя для верификации
     let pre = ProxyReEncryption::new();
-    let re_encrypted = perform_reencryption(&pre, &encrypted_data, &re_key_data, Some(&recipient_pk_bytes))
-        .map_err(|e| ApiError::Internal(format!("Re-encryption failed: {}", e)))?;
+    let re_encrypted = perform_reencryption(
+        &pre,
+        &encrypted_data,
+        &re_key_data,
+        Some(&recipient_pk_bytes),
+    )
+    .map_err(|e| ApiError::Internal(format!("Re-encryption failed: {}", e)))?;
 
     // Сериализуем результат
-    let re_encrypted_base64 = re_encrypted.to_base64()
+    let re_encrypted_base64 = re_encrypted
+        .to_base64()
         .map_err(|e| ApiError::Internal(format!("Failed to serialize re-encrypted data: {}", e)))?;
 
     // НЕ меняем статус NFT здесь!
@@ -166,17 +176,19 @@ fn deserialize_re_key(base64_data: &str) -> std::result::Result<ReKeyData, Strin
         .decode(base64_data)
         .map_err(|e| format!("Base64 decode error: {}", e))?;
 
-    let json: serde_json::Value = serde_json::from_slice(&bytes)
-        .map_err(|e| format!("JSON parse error: {}", e))?;
+    let json: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|e| format!("JSON parse error: {}", e))?;
 
     let kfrags: Vec<Vec<u8>> = json["kfrags"]
         .as_array()
         .ok_or("Missing kfrags")?
         .iter()
         .map(|v| {
-            v.as_array()
-                .ok_or("Invalid kfrag format")
-                .map(|arr| arr.iter().filter_map(|n| n.as_u64().map(|n| n as u8)).collect())
+            v.as_array().ok_or("Invalid kfrag format").map(|arr| {
+                arr.iter()
+                    .filter_map(|n| n.as_u64().map(|n| n as u8))
+                    .collect()
+            })
         })
         .collect::<std::result::Result<_, _>>()?;
 
@@ -188,11 +200,18 @@ fn deserialize_re_key(base64_data: &str) -> std::result::Result<ReKeyData, Strin
         .collect();
 
     // MED-04: sender_verifying_key for kfrag verification
-    let sender_verifying_key: Option<Vec<u8>> = json["sender_verifying_key"]
-        .as_array()
-        .map(|arr| arr.iter().filter_map(|n| n.as_u64().map(|n| n as u8)).collect());
+    let sender_verifying_key: Option<Vec<u8>> =
+        json["sender_verifying_key"].as_array().map(|arr| {
+            arr.iter()
+                .filter_map(|n| n.as_u64().map(|n| n as u8))
+                .collect()
+        });
 
-    Ok(ReKeyData { kfrags, sender_pk, sender_verifying_key })
+    Ok(ReKeyData {
+        kfrags,
+        sender_pk,
+        sender_verifying_key,
+    })
 }
 
 struct ReKeyData {
@@ -212,24 +231,23 @@ fn perform_reencryption(
     re_key_data: &ReKeyData,
     receiving_pk_bytes: Option<&[u8]>,
 ) -> std::result::Result<ReEncryptedData, String> {
-    use umbral_pre::{KeyFrag, DefaultDeserialize, PublicKey as UmbralPublicKey};
+    use umbral_pre::{DefaultDeserialize, KeyFrag, PublicKey as UmbralPublicKey};
     use xrpl_vault_crypto_core::pre::PrePublicKey;
 
     // CRIT-01: sender_verifying_key обязателен для верификации kfrag и cfrag
-    let vk_bytes = re_key_data.sender_verifying_key.as_ref()
-        .ok_or("Missing sender_verifying_key — required for cryptographic verification. \
-                Please update client to send verifying key with re-encryption request.")?;
+    let vk_bytes = re_key_data.sender_verifying_key.as_ref().ok_or(
+        "Missing sender_verifying_key — required for cryptographic verification. \
+                Please update client to send verifying key with re-encryption request.",
+    )?;
 
     // Восстанавливаем sender public key
     let sender_pk = PrePublicKey::from_bytes(&re_key_data.sender_pk)
         .map_err(|e| format!("Invalid sender_pk: {}", e))?;
 
     // Восстанавливаем первый kfrag
-    let kfrag_bytes = re_key_data.kfrags.first()
-        .ok_or("No kfrags provided")?;
+    let kfrag_bytes = re_key_data.kfrags.first().ok_or("No kfrags provided")?;
 
-    let kfrag = KeyFrag::from_bytes(kfrag_bytes)
-        .map_err(|e| format!("Invalid kfrag: {:?}", e))?;
+    let kfrag = KeyFrag::from_bytes(kfrag_bytes).map_err(|e| format!("Invalid kfrag: {:?}", e))?;
 
     // Parse the verifying key
     let verifying_pk = UmbralPublicKey::try_from_compressed_bytes(vk_bytes)
@@ -241,24 +259,31 @@ fn perform_reencryption(
 
     // Parse receiving key if provided (required when kfrag was signed with sign_receiving=true)
     let receiving_pk = receiving_pk_bytes
-        .map(|bytes| UmbralPublicKey::try_from_compressed_bytes(bytes)
-            .map_err(|e| format!("Invalid receiving key: {}", e)))
+        .map(|bytes| {
+            UmbralPublicKey::try_from_compressed_bytes(bytes)
+                .map_err(|e| format!("Invalid receiving key: {}", e))
+        })
         .transpose()?;
 
     // Verify kfrag with sender's verifying key, delegating key, and receiving key
-    let verified_kfrag = match kfrag.verify(&verifying_pk, Some(&delegating_pk), receiving_pk.as_ref()) {
-        Ok(vkf) => {
-            tracing::debug!("kfrag verified successfully with sender's verifying key");
-            vkf
-        }
-        Err((_, err)) => {
-            tracing::warn!("kfrag verification failed: {:?}", err);
-            return Err(format!("kfrag verification failed — re-encryption key may be tampered: {:?}", err));
-        }
-    };
+    let verified_kfrag =
+        match kfrag.verify(&verifying_pk, Some(&delegating_pk), receiving_pk.as_ref()) {
+            Ok(vkf) => {
+                tracing::debug!("kfrag verified successfully with sender's verifying key");
+                vkf
+            },
+            Err((_, err)) => {
+                tracing::warn!("kfrag verification failed: {:?}", err);
+                return Err(format!(
+                    "kfrag verification failed — re-encryption key may be tampered: {:?}",
+                    err
+                ));
+            },
+        };
 
     // Выполняем re-encryption
-    let mut re_encrypted = pre.perform_reencryption_with_kfrag(encrypted_data, verified_kfrag, &sender_pk)
+    let mut re_encrypted = pre
+        .perform_reencryption_with_kfrag(encrypted_data, verified_kfrag, &sender_pk)
         .map_err(|e| format!("Re-encryption error: {}", e))?;
 
     // CRIT-01: Прокидываем sender_verifying_key в результат,
@@ -270,7 +295,7 @@ fn perform_reencryption(
 
 /// POST /api/v1/transfers/confirm-signed - подтвердить подписание offer
 ///
-/// Вызывается после успешного подписания NFTokenCreateOffer в Xaman.
+/// Вызывается после успешного подписания NFTokenCreateOffer через Vaulted wallet signing.
 /// Меняет статус NFT на 'transferring'.
 ///
 /// **Requires authentication** - must be from_address of the transfer
@@ -288,17 +313,17 @@ pub async fn confirm_offer_signed(
         WHERE tr.id = $1
         "#,
     )
-        .bind(request.transfer_id)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or_else(|| ApiError::NotFound(format!("Transfer {} not found", request.transfer_id)))?;
+    .bind(request.transfer_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| ApiError::NotFound(format!("Transfer {} not found", request.transfer_id)))?;
 
     let (nft_metadata_id, status, from_wallet) = transfer;
 
     // Verify the authenticated user is the sender
     if !auth.wallet_address.eq_ignore_ascii_case(&from_wallet) {
         return Err(ApiError::Forbidden(
-            "Only the transfer sender can confirm".into()
+            "Only the transfer sender can confirm".into(),
         ));
     }
 
@@ -325,12 +350,11 @@ pub async fn confirm_offer_signed(
         .await?;
 
     // Получаем nft_token_id для audit log
-    let nft_token_id = sqlx::query_scalar::<_, String>(
-        "SELECT nft_token_id FROM nft_metadata WHERE id = $1"
-    )
-        .bind(nft_metadata_id)
-        .fetch_optional(&state.db)
-        .await?;
+    let nft_token_id =
+        sqlx::query_scalar::<_, String>("SELECT nft_token_id FROM nft_metadata WHERE id = $1")
+            .bind(nft_metadata_id)
+            .fetch_optional(&state.db)
+            .await?;
 
     // Аудит
     state
@@ -382,14 +406,14 @@ pub async fn get_status(
         )
         "#,
     )
-        .bind(transfer_id)
-        .bind(&auth.wallet_address)
-        .fetch_one(&state.db)
-        .await?;
+    .bind(transfer_id)
+    .bind(&auth.wallet_address)
+    .fetch_one(&state.db)
+    .await?;
 
     if !participant_check {
         return Err(ApiError::Forbidden(
-            "Only the sender or recipient can view transfer status".into()
+            "Only the sender or recipient can view transfer status".into(),
         ));
     }
 
@@ -400,10 +424,10 @@ pub async fn get_status(
         WHERE id = $1
         "#,
     )
-        .bind(transfer_id)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or_else(|| ApiError::NotFound(format!("Transfer {} not found", transfer_id)))?;
+    .bind(transfer_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| ApiError::NotFound(format!("Transfer {} not found", transfer_id)))?;
 
     Ok(Json(TransferStatusResponse {
         transfer_id,
@@ -430,11 +454,11 @@ pub async fn finalize_transfer_by_offer(
 ) -> Result<Json<serde_json::Value>> {
     // Находим transfer по offer_index
     let transfer = sqlx::query_as::<_, (Uuid, String)>(
-        "SELECT id, status FROM transfer_requests WHERE nft_offer_index = $1"
+        "SELECT id, status FROM transfer_requests WHERE nft_offer_index = $1",
     )
-        .bind(&request.offer_index)
-        .fetch_optional(&state.db)
-        .await?;
+    .bind(&request.offer_index)
+    .fetch_optional(&state.db)
+    .await?;
 
     match transfer {
         Some((transfer_id, status)) => {
@@ -454,22 +478,29 @@ pub async fn finalize_transfer_by_offer(
                 .execute(&state.db)
                 .await?;
 
-            tracing::info!("Transfer {} finalized by offer_index {}", transfer_id, request.offer_index);
+            tracing::info!(
+                "Transfer {} finalized by offer_index {}",
+                transfer_id,
+                request.offer_index
+            );
 
             Ok(Json(serde_json::json!({
                 "success": true,
                 "transfer_id": transfer_id,
                 "message": "Completed"
             })))
-        }
+        },
         None => {
             // Нет transfer для этого offer — возможно это claim собственного NFT
-            tracing::info!("No transfer found for offer_index {}, ignoring", request.offer_index);
+            tracing::info!(
+                "No transfer found for offer_index {}, ignoring",
+                request.offer_index
+            );
             Ok(Json(serde_json::json!({
                 "success": true,
                 "message": "No transfer to finalize"
             })))
-        }
+        },
     }
 }
 
@@ -490,24 +521,23 @@ pub async fn complete_transfer(
         WHERE id = $1
         "#,
     )
-        .bind(request.transfer_id)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or_else(|| ApiError::NotFound(format!("Transfer {} not found", request.transfer_id)))?;
+    .bind(request.transfer_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| ApiError::NotFound(format!("Transfer {} not found", request.transfer_id)))?;
 
     let (nft_metadata_id, to_user_id, status, re_encrypted_aes_key) = transfer;
 
     // Verify the authenticated user is the intended recipient (CRIT-04)
-    let to_wallet = sqlx::query_scalar::<_, String>(
-        "SELECT wallet_address FROM users WHERE id = $1"
-    )
-        .bind(to_user_id)
-        .fetch_one(&state.db)
-        .await?;
+    let to_wallet =
+        sqlx::query_scalar::<_, String>("SELECT wallet_address FROM users WHERE id = $1")
+            .bind(to_user_id)
+            .fetch_one(&state.db)
+            .await?;
 
     if !auth.wallet_address.eq_ignore_ascii_case(&to_wallet) {
         return Err(ApiError::Forbidden(
-            "Only the intended recipient can complete the transfer".into()
+            "Only the intended recipient can complete the transfer".into(),
         ));
     }
 
@@ -540,18 +570,17 @@ pub async fn complete_transfer(
     sqlx::query(
         "UPDATE transfer_requests SET xrpl_tx_hash = $1, status = 'completed' WHERE id = $2",
     )
-        .bind(&request.xrpl_tx_hash)
-        .bind(request.transfer_id)
-        .execute(&state.db)
-        .await?;
+    .bind(&request.xrpl_tx_hash)
+    .bind(request.transfer_id)
+    .execute(&state.db)
+    .await?;
 
     // Получаем адрес нового владельца
-    let new_owner = sqlx::query_scalar::<_, String>(
-        "SELECT wallet_address FROM users WHERE id = $1",
-    )
-        .bind(to_user_id)
-        .fetch_one(&state.db)
-        .await?;
+    let new_owner =
+        sqlx::query_scalar::<_, String>("SELECT wallet_address FROM users WHERE id = $1")
+            .bind(to_user_id)
+            .fetch_one(&state.db)
+            .await?;
 
     tracing::info!(
         "Transfer {} finalized, new owner: {}",
@@ -594,10 +623,10 @@ pub async fn get_transfer_by_nft(
         LIMIT 1
         "#,
     )
-        .bind(&nft_token_id)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or_else(|| ApiError::NotFound(format!("No transfer found for NFT {}", nft_token_id)))?;
+    .bind(&nft_token_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| ApiError::NotFound(format!("No transfer found for NFT {}", nft_token_id)))?;
 
     Ok(Json(serde_json::json!({
         "transfer_id": transfer.0,
@@ -620,10 +649,10 @@ pub async fn get_transfer_by_offer(
         LIMIT 1
         "#,
     )
-        .bind(&offer_index)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or_else(|| ApiError::NotFound(format!("No transfer found for offer {}", offer_index)))?;
+    .bind(&offer_index)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| ApiError::NotFound(format!("No transfer found for offer {}", offer_index)))?;
 
     Ok(Json(serde_json::json!({
         "transfer_id": transfer.0,
@@ -641,13 +670,11 @@ pub async fn get_incoming_transfers(
     // Verify the authenticated user is requesting their own transfers (HIGH-03)
     if !auth.wallet_address.eq_ignore_ascii_case(&wallet_address) {
         return Err(ApiError::Forbidden(
-            "Can only view your own incoming transfers".into()
+            "Can only view your own incoming transfers".into(),
         ));
     }
     // Находим user_id по wallet
-    let user = sqlx::query_as::<_, (Uuid,)>(
-        "SELECT id FROM users WHERE wallet_address = $1"
-    )
+    let user = sqlx::query_as::<_, (Uuid,)>("SELECT id FROM users WHERE wallet_address = $1")
         .bind(&wallet_address)
         .fetch_optional(&state.db)
         .await?;
@@ -673,18 +700,20 @@ pub async fn get_incoming_transfers(
         AND tr.nft_offer_index IS NOT NULL
         "#,
     )
-        .bind(user_id)
-        .fetch_all(&state.db)
-        .await?;
+    .bind(user_id)
+    .fetch_all(&state.db)
+    .await?;
 
     let result: Vec<IncomingTransferInfo> = transfers
         .into_iter()
-        .map(|(offer_index, nft_token_id, from_address, amount)| IncomingTransferInfo {
-            offer_index,
-            nft_token_id,
-            from_address,
-            amount,
-        })
+        .map(
+            |(offer_index, nft_token_id, from_address, amount)| IncomingTransferInfo {
+                offer_index,
+                nft_token_id,
+                from_address,
+                amount,
+            },
+        )
         .collect();
 
     Ok(Json(result))
@@ -710,20 +739,23 @@ pub async fn get_transfer_history(
     // Verify the authenticated user is requesting their own history (HIGH-03)
     if !auth.wallet_address.eq_ignore_ascii_case(&wallet_address) {
         return Err(ApiError::Forbidden(
-            "Can only view your own transfer history".into()
+            "Can only view your own transfer history".into(),
         ));
     }
     // Находим user_id по wallet
-    let user = sqlx::query_as::<_, (Uuid,)>(
-        "SELECT id FROM users WHERE wallet_address = $1"
-    )
+    let user = sqlx::query_as::<_, (Uuid,)>("SELECT id FROM users WHERE wallet_address = $1")
         .bind(&wallet_address)
         .fetch_optional(&state.db)
         .await?;
 
     let user_id = match user {
         Some((id,)) => id,
-        None => return Ok(Json(TransferHistory { sent: vec![], received: vec![] })),
+        None => {
+            return Ok(Json(TransferHistory {
+                sent: vec![],
+                received: vec![],
+            }))
+        },
     };
 
     // Получаем отправленные transfers
@@ -745,9 +777,9 @@ pub async fn get_transfer_history(
         LIMIT 50
         "#,
     )
-        .bind(user_id)
-        .fetch_all(&state.db)
-        .await?;
+    .bind(user_id)
+    .fetch_all(&state.db)
+    .await?;
 
     // Получаем полученные transfers
     let received = sqlx::query_as::<_, (Uuid, String, String, String, String, Option<String>)>(
@@ -768,34 +800,38 @@ pub async fn get_transfer_history(
         LIMIT 50
         "#,
     )
-        .bind(user_id)
-        .fetch_all(&state.db)
-        .await?;
+    .bind(user_id)
+    .fetch_all(&state.db)
+    .await?;
 
     let sent_items: Vec<TransferHistoryItem> = sent
         .into_iter()
-        .map(|(id, nft_token_id, to_address, status, created_at, filename)| TransferHistoryItem {
-            transfer_id: id.to_string(),
-            nft_token_id,
-            other_party: to_address,
-            direction: "sent".to_string(),
-            status,
-            created_at,
-            filename,
-        })
+        .map(
+            |(id, nft_token_id, to_address, status, created_at, filename)| TransferHistoryItem {
+                transfer_id: id.to_string(),
+                nft_token_id,
+                other_party: to_address,
+                direction: "sent".to_string(),
+                status,
+                created_at,
+                filename,
+            },
+        )
         .collect();
 
     let received_items: Vec<TransferHistoryItem> = received
         .into_iter()
-        .map(|(id, nft_token_id, from_address, status, created_at, filename)| TransferHistoryItem {
-            transfer_id: id.to_string(),
-            nft_token_id,
-            other_party: from_address,
-            direction: "received".to_string(),
-            status,
-            created_at,
-            filename,
-        })
+        .map(
+            |(id, nft_token_id, from_address, status, created_at, filename)| TransferHistoryItem {
+                transfer_id: id.to_string(),
+                nft_token_id,
+                other_party: from_address,
+                direction: "received".to_string(),
+                status,
+                created_at,
+                filename,
+            },
+        )
         .collect();
 
     Ok(Json(TransferHistory {
@@ -848,9 +884,12 @@ pub async fn cancel_transfer(
     Json(request): Json<CancelTransferRequest>,
 ) -> Result<Json<CancelTransferResponse>> {
     // Verify authenticated user matches request
-    if !auth.wallet_address.eq_ignore_ascii_case(&request.wallet_address) {
+    if !auth
+        .wallet_address
+        .eq_ignore_ascii_case(&request.wallet_address)
+    {
         return Err(ApiError::Forbidden(
-            "Cannot cancel transfer for different wallet".into()
+            "Cannot cancel transfer for different wallet".into(),
         ));
     }
 
@@ -868,20 +907,19 @@ pub async fn cancel_transfer(
         WHERE tr.id = $1
         "#,
     )
-        .bind(transfer_id)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or_else(|| ApiError::NotFound(format!("Transfer {} not found", transfer_id)))?;
+    .bind(transfer_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| ApiError::NotFound(format!("Transfer {} not found", transfer_id)))?;
 
     let (from_user_id, nft_metadata_id, status, offer_index, nft_token_id) = transfer;
 
     // Проверяем что запрос от владельца
-    let from_wallet = sqlx::query_scalar::<_, String>(
-        "SELECT wallet_address FROM users WHERE id = $1"
-    )
-        .bind(from_user_id)
-        .fetch_one(&state.db)
-        .await?;
+    let from_wallet =
+        sqlx::query_scalar::<_, String>("SELECT wallet_address FROM users WHERE id = $1")
+            .bind(from_user_id)
+            .fetch_one(&state.db)
+            .await?;
 
     if !from_wallet.eq_ignore_ascii_case(&request.wallet_address) {
         return Err(ApiError::Forbidden(
@@ -902,20 +940,20 @@ pub async fn cancel_transfer(
     // Если есть offer_index и статус completed - нужно отменить offer на XRPL
     // НО: offer принадлежит отправителю (пользователю), не Oracle!
     // Oracle не может отменить чужой offer.
-    // Пользователь должен сам отменить offer через Xaman.
+    // Пользователь должен сам отменить offer через Vaulted wallet signing.
     //
     // Что мы можем сделать:
     // 1. Обновить статус в БД на 'cancelled'
     // 2. Вернуть NFT в статус 'active'
-    // 3. Сообщить пользователю что нужно отменить offer в Xaman
+    // 3. Сообщить пользователю что нужно отменить offer через активный wallet
 
     // Обновляем статус трансфера
     sqlx::query(
-        "UPDATE transfer_requests SET status = 'cancelled', completed_at = NOW() WHERE id = $1"
+        "UPDATE transfer_requests SET status = 'cancelled', completed_at = NOW() WHERE id = $1",
     )
-        .bind(transfer_id)
-        .execute(&state.db)
-        .await?;
+    .bind(transfer_id)
+    .execute(&state.db)
+    .await?;
 
     // Возвращаем NFT в активный статус
     sqlx::query("UPDATE nft_metadata SET status = 'active' WHERE id = $1")
@@ -936,10 +974,14 @@ pub async fn cancel_transfer(
         )
         .await;
 
-    tracing::info!("Transfer {} cancelled by {}", transfer_id, request.wallet_address);
+    tracing::info!(
+        "Transfer {} cancelled by {}",
+        transfer_id,
+        request.wallet_address
+    );
 
     let message = if offer_index.is_some() {
-        "Transfer cancelled. Please also cancel the offer in Xaman wallet.".to_string()
+        "Transfer cancelled. Please also cancel the offer with the active wallet.".to_string()
     } else {
         "Transfer cancelled successfully.".to_string()
     };

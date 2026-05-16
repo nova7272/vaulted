@@ -15,8 +15,8 @@ use std::fmt::Write;
 // ── Constants (must match TypeScript exactly) ──
 
 const NEON_COLORS: &[&str] = &[
-    "#ff3b7a", "#00e5a0", "#ffc53d", "#3b82f6", "#a855f7",
-    "#06b6d4", "#f97316", "#ec4899", "#22d3ee", "#84cc16",
+    "#ff3b7a", "#00e5a0", "#ffc53d", "#3b82f6", "#a855f7", "#06b6d4", "#f97316", "#ec4899",
+    "#22d3ee", "#84cc16",
 ];
 const BG: &str = "#060608";
 const LINES: usize = 25;
@@ -107,10 +107,18 @@ fn march_squares(field: &[f64], cols: usize, rows: usize, thr: f64) -> Vec<[Pt; 
             let v3 = field[(iy + 1) * cols + ix];
 
             let mut cfg = 0u8;
-            if v0 > thr { cfg |= 1; }
-            if v1 > thr { cfg |= 2; }
-            if v2 > thr { cfg |= 4; }
-            if v3 > thr { cfg |= 8; }
+            if v0 > thr {
+                cfg |= 1;
+            }
+            if v1 > thr {
+                cfg |= 2;
+            }
+            if v2 > thr {
+                cfg |= 4;
+            }
+            if v3 > thr {
+                cfg |= 8;
+            }
 
             if cfg == 0 || cfg == 15 {
                 continue;
@@ -139,11 +147,17 @@ fn march_squares(field: &[f64], cols: usize, rows: usize, thr: f64) -> Vec<[Pt; 
                 2 | 13 => segs.push([a, b]),
                 3 | 12 => segs.push([d, b]),
                 4 | 11 => segs.push([b, c]),
-                5 => { segs.push([d, a]); segs.push([b, c]); }
+                5 => {
+                    segs.push([d, a]);
+                    segs.push([b, c]);
+                },
                 6 | 9 => segs.push([a, c]),
                 7 | 8 => segs.push([d, c]),
-                10 => { segs.push([d, c]); segs.push([a, b]); }
-                _ => {}
+                10 => {
+                    segs.push([d, c]);
+                    segs.push([a, b]);
+                },
+                _ => {},
             }
         }
     }
@@ -169,9 +183,7 @@ fn chain_segments(segs: &[[Pt; 2]]) -> Vec<Vec<Pt>> {
     let mut used = vec![false; pts.len()];
     let mut chains: Vec<Vec<Pt>> = Vec::new();
 
-    let near = |a: &Pt, b: &Pt| -> bool {
-        (a[0] - b[0]).abs() < eps && (a[1] - b[1]).abs() < eps
-    };
+    let near = |a: &Pt, b: &Pt| -> bool { (a[0] - b[0]).abs() < eps && (a[1] - b[1]).abs() < eps };
 
     for i in 0..pts.len() {
         if used[i] {
@@ -253,7 +265,7 @@ fn to_bezier_path(pts: &[Pt]) -> String {
             p2[0],
             p2[1],
         )
-            .ok();
+        .ok();
     }
     d
 }
@@ -370,14 +382,17 @@ mod tests {
 
     #[test]
     fn test_unique() {
-        let s1 = generate_nft_svg("0008000049A8ECBB223D180261DC8A3A8995E141FAB37FDCC533AA9E00F42E03");
-        let s2 = generate_nft_svg("0008000049A8ECBB223D180261DC8A3A8995E141FAB37FDCDC197B9F00F42E04");
+        let s1 =
+            generate_nft_svg("0008000049A8ECBB223D180261DC8A3A8995E141FAB37FDCC533AA9E00F42E03");
+        let s2 =
+            generate_nft_svg("0008000049A8ECBB223D180261DC8A3A8995E141FAB37FDCDC197B9F00F42E04");
         assert_ne!(s1, s2);
     }
 
     #[test]
     fn test_valid_svg() {
-        let svg = generate_nft_svg("0008000049A8ECBB223D180261DC8A3A8995E141FAB37FDCC533AA9E00F42E03");
+        let svg =
+            generate_nft_svg("0008000049A8ECBB223D180261DC8A3A8995E141FAB37FDCC533AA9E00F42E03");
         assert!(svg.starts_with("<svg"));
         assert!(svg.contains("</svg>"));
         assert!(svg.contains("path"));

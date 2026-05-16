@@ -79,7 +79,6 @@ pub enum ApiError {
     Validation(String),
 
     // === Transfer-related errors ===
-
     /// Transfer не найден
     #[error("Transfer not found: {0}")]
     TransferNotFound(uuid::Uuid),
@@ -150,11 +149,9 @@ impl IntoResponse for ApiError {
                 "crypto_error",
                 msg.clone(),
             ),
-            ApiError::PreError(msg) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "pre_error",
-                msg.clone(),
-            ),
+            ApiError::PreError(msg) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "pre_error", msg.clone())
+            },
             ApiError::Xrpl(msg) => (StatusCode::BAD_GATEWAY, "xrpl_error", msg.clone()),
             ApiError::NftNotFound(id) => (
                 StatusCode::NOT_FOUND,

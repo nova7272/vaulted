@@ -16,20 +16,17 @@ const STORAGE_URL: &str = "http://localhost:9001";
 async fn test_oracle_health() {
     let client = Client::new();
 
-    let resp = client
-        .get(format!("{}/health", ORACLE_URL))
-        .send()
-        .await;
+    let resp = client.get(format!("{}/health", ORACLE_URL)).send().await;
 
     match resp {
         Ok(r) => {
             assert!(r.status().is_success(), "Oracle health check failed");
             println!("✓ Oracle is healthy");
-        }
+        },
         Err(e) => {
             println!("⚠ Oracle not running: {}", e);
             println!("  Start with: make oracle");
-        }
+        },
     }
 }
 
@@ -38,20 +35,17 @@ async fn test_oracle_health() {
 async fn test_storage_health() {
     let client = Client::new();
 
-    let resp = client
-        .get(format!("{}/health", STORAGE_URL))
-        .send()
-        .await;
+    let resp = client.get(format!("{}/health", STORAGE_URL)).send().await;
 
     match resp {
         Ok(r) => {
             assert!(r.status().is_success(), "Storage health check failed");
             println!("✓ Storage Node is healthy");
-        }
+        },
         Err(e) => {
             println!("⚠ Storage Node not running: {}", e);
             println!("  Start with: make storage");
-        }
+        },
     }
 }
 
@@ -149,13 +143,21 @@ async fn test_user_registration() {
 /// Полный тест flow: шифрование → загрузка → vault → NFT
 #[tokio::test]
 async fn test_full_vault_flow() {
-    use xrpl_vault_crypto_core::{AesKey, ProxyReEncryption, FileManifest};
+    use xrpl_vault_crypto_core::{AesKey, FileManifest, ProxyReEncryption};
 
     let client = Client::new();
 
     // Проверяем сервисы
-    let oracle_ok = client.get(format!("{}/health", ORACLE_URL)).send().await.is_ok();
-    let storage_ok = client.get(format!("{}/health", STORAGE_URL)).send().await.is_ok();
+    let oracle_ok = client
+        .get(format!("{}/health", ORACLE_URL))
+        .send()
+        .await
+        .is_ok();
+    let storage_ok = client
+        .get(format!("{}/health", STORAGE_URL))
+        .send()
+        .await
+        .is_ok();
 
     if !oracle_ok || !storage_ok {
         println!("⚠ Skipping full flow test: services not running");
@@ -182,7 +184,8 @@ async fn test_full_vault_flow() {
     println!("2. Encrypted test data ({} bytes)", test_data.len());
 
     // 3. Шифруем AES ключ публичным ключом
-    let encrypted_aes = pre.encrypt(&keypair.public_key(), aes_key.as_bytes())
+    let encrypted_aes = pre
+        .encrypt(&keypair.public_key(), aes_key.as_bytes())
         .expect("PRE encryption failed");
     let encrypted_aes_base64 = encrypted_aes.to_base64().expect("Base64 failed");
 
@@ -201,10 +204,16 @@ async fn test_full_vault_flow() {
         .expect("Storage upload failed");
 
     assert!(upload_resp.status().is_success(), "Storage upload failed");
-    println!("4. Uploaded encrypted fragment to storage: {}", fragment_key);
+    println!(
+        "4. Uploaded encrypted fragment to storage: {}",
+        fragment_key
+    );
 
     // 5. Создаём манифест (using current FileManifest struct)
-    let encrypted_hash_str = format!("blake3:{}", hex::encode(blake3::hash(&fragment_data).as_bytes()));
+    let encrypted_hash_str = format!(
+        "blake3:{}",
+        hex::encode(blake3::hash(&fragment_data).as_bytes())
+    );
     let manifest = FileManifest {
         encrypted_filename: "test_secret.txt".to_string(),
         original_size: test_data.len() as u64,
@@ -266,7 +275,11 @@ async fn test_full_vault_flow() {
     let vault_status = vault_resp.status();
     let vault_body = vault_resp.text().await.unwrap_or_default();
 
-    println!("7. Vault creation: {} - {}", vault_status, &vault_body[..100.min(vault_body.len())]);
+    println!(
+        "7. Vault creation: {} - {}",
+        vault_status,
+        &vault_body[..100.min(vault_body.len())]
+    );
 
     if vault_status.is_success() {
         let vault: serde_json::Value = serde_json::from_str(&vault_body).unwrap();
@@ -274,7 +287,7 @@ async fn test_full_vault_flow() {
         println!("  Vault ID:     {}", vault["vault_id"]);
         println!("  NFT Token ID: {}", vault["nft_token_id"]);
         println!("  Offer Index:  {}", vault["offer_index"]);
-        println!("  Xaman Link:   {}", vault["xaman_link"]);
+        println!("  Signing URI:  {}", vault["signing_request_uri"]);
     } else {
         println!("\n⚠ Vault creation failed (expected if XRPL wallet not configured)");
         println!("  Configure XRPL_WALLET_SEED in .env for full NFT minting");
@@ -310,7 +323,8 @@ async fn test_crypto_roundtrip() {
     println!("2. Alice encrypted data with AES");
 
     // 3. Alice шифрует AES ключ своим публичным ключом
-    let encrypted_aes = pre.encrypt(&alice.public_key(), aes_key.as_bytes())
+    let encrypted_aes = pre
+        .encrypt(&alice.public_key(), aes_key.as_bytes())
         .expect("PRE encrypt failed");
 
     println!("3. Alice encrypted AES key with her PRE public key");
@@ -323,11 +337,14 @@ async fn test_crypto_roundtrip() {
     println!("4. Serialized and deserialized encrypted key");
 
     // 5. Alice расшифровывает
-    let decrypted_aes = pre.decrypt(&alice, &deserialized)
+    let decrypted_aes = pre
+        .decrypt(&alice, &deserialized)
         .expect("PRE decrypt failed");
 
     let restored_aes = AesKey::from_bytes(&decrypted_aes).expect("Invalid AES key");
-    let decrypted_data = restored_aes.decrypt(&encrypted_data).expect("AES decrypt failed");
+    let decrypted_data = restored_aes
+        .decrypt(&encrypted_data)
+        .expect("AES decrypt failed");
 
     assert_eq!(secret_data.as_slice(), decrypted_data.as_slice());
     println!("5. Alice successfully decrypted her data");
