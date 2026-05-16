@@ -21,11 +21,11 @@ use crate::crypto::FileEncryptor;
 use crate::error::{ClientError, Result};
 use crate::oracle::api::{
     CreateVaultRequest, FinalizeVaultMintRequest, GrantResponse, IdentityDeviceResponse,
-    OracleClient, OracleConfig, PublishVaultMetadataRequest, PublishVaultMetadataResponse,
-    QrFileGrantConfirmRequest, QrFileGrantStartRequest, QrXrplSigningConfirmRequest,
-    QrXrplSigningStartRequest, RecipientKeyTrustResponse, RegisterVaultObjectRequest,
-    RevokeRecipientKeyTrustRequest, TrustRecipientKeyRequest, VaultFragment, VaultManifest,
-    VaultObjectResponse,
+    IdentityTokenRequest, OracleClient, OracleConfig, PublishVaultMetadataRequest,
+    PublishVaultMetadataResponse, QrFileGrantConfirmRequest, QrFileGrantStartRequest,
+    QrXrplSigningConfirmRequest, QrXrplSigningStartRequest, RecipientKeyTrustResponse,
+    RegisterVaultObjectRequest, RevokeRecipientKeyTrustRequest, TrustRecipientKeyRequest,
+    VaultFragment, VaultManifest, VaultObjectResponse,
 };
 use crate::state::AppState;
 use crate::xrpl::XrplClient;
@@ -160,7 +160,80 @@ async fn register_vaulted_identity_public(
             r.id,
             r.created
         ),
-        Err(e) => tracing::warn!("Vaulted identity Oracle registration failed: {}", e),
+        Err(e) => {
+            tracing::warn!("Vaulted identity Oracle registration failed: {}", e);
+            return;
+        },
+    }
+
+    let challenge = match oracle
+        .get_identity_challenge(&identity.vaulted_identity_id)
+        .await
+    {
+        Ok(challenge) => challenge,
+        Err(e) => {
+            tracing::warn!("Vaulted identity challenge request failed: {}", e);
+            return;
+        },
+    };
+
+    let vaulted_identity = match state.get_vaulted_identity().await {
+        Ok(identity) => identity,
+        Err(e) => {
+            tracing::warn!("Vaulted identity is unavailable for Oracle login: {}", e);
+            return;
+        },
+    };
+
+    use ed25519_dalek::Signer as _;
+    let signature = vaulted_identity
+        .signing_key()
+        .sign(challenge.challenge.as_bytes());
+    let signature_hex = hex::encode(signature.to_bytes());
+
+    let wallet_address = match state.wallet_address().await {
+        Ok(wallet_address) => wallet_address,
+        Err(e) => {
+            tracing::warn!(
+                "Current wallet address is unavailable for Oracle identity login: {}",
+                e
+            );
+            return;
+        },
+    };
+
+    match oracle
+        .get_identity_token(&IdentityTokenRequest {
+            identity_id: identity.vaulted_identity_id.clone(),
+            wallet_address,
+            challenge: challenge.challenge,
+            signature: signature_hex,
+            device_public_key: Some(identity.device_public_key.clone()),
+        })
+        .await
+    {
+        Ok(token_response) => {
+            let expires_in = token_response.expires_in;
+            if let Err(e) = state
+                .save_oracle_tokens(
+                    token_response.access_token,
+                    expires_in,
+                    token_response.refresh_token,
+                    token_response.role,
+                )
+                .await
+            {
+                tracing::warn!("Could not save Vaulted identity Oracle token: {}", e);
+                return;
+            }
+
+            tracing::info!(
+                "Vaulted identity Oracle login successful: identity_id={}, expires_in={}s",
+                token_response.identity_id,
+                expires_in
+            );
+        },
+        Err(e) => tracing::warn!("Vaulted identity Oracle token request failed: {}", e),
     }
 }
 
@@ -3799,29 +3872,17 @@ pub async fn get_oracle_auth_status(
     let has_token = state.has_oracle_token().await;
     tracing::info!("[AUTH_CHECK] has_oracle_token={}", has_token);
 
-    // First try: do we have a valid (non-expired) token?
+    // Vaulted seed-wallet auth issues an Oracle JWT for the XRPL wallet.
+    // It does not necessarily have a legacy users row, so get_me() is not
+    // a reliable auth check for this flow.
     if has_token {
-        // Token is valid, verify with Oracle
-        match state.get_oracle_client_with_timeout(10).await {
-            Ok(oracle) => {
-                if let Ok(user) = oracle.get_me().await {
-                    tracing::info!("[AUTH_CHECK] → authenticated=true (get_me OK)");
-                    WAS_EVER_ORACLE_AUTHED.store(true, std::sync::atomic::Ordering::Relaxed);
-                    return Ok(OracleAuthStatus {
-                        authenticated: true,
-                        wallet_address: Some(user.wallet_address),
-                        expires_at: None,
-                    });
-                }
-                tracing::warn!("[AUTH_CHECK] get_me failed, falling through to refresh");
-            },
-            Err(e) => {
-                tracing::warn!(
-                    "[AUTH_CHECK] get_oracle_client failed: {}, falling through to refresh",
-                    e
-                );
-            },
-        }
+        tracing::info!("[AUTH_CHECK] → authenticated=true (valid Oracle token)");
+        WAS_EVER_ORACLE_AUTHED.store(true, std::sync::atomic::Ordering::Relaxed);
+        return Ok(OracleAuthStatus {
+            authenticated: true,
+            wallet_address: state.wallet_address().await.ok(),
+            expires_at: None,
+        });
     }
 
     // Token expired or invalid — try to refresh
