@@ -364,3 +364,9 @@ body { font-family: var(--font-ui); font-size: 14px; line-height: 1.5; color: va
   .v-dropzone { transition: none; }
   .fade-in { animation: none; }
 }
+/* Allow manual backup/copy of generated seed phrase in dev/client UI */
+.seed-grid,
+.seed-grid * {
+  user-select: text !important;
+  -webkit-user-select: text !important;
+}

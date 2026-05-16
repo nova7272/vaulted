@@ -106,8 +106,35 @@ export default function AuthScreen({ onLogin }: AuthScreenProps) {
                     <div style={{ fontSize: 13, color: '#6a6f7d', marginBottom: 12 }}>
                         Vaulted cannot recover encrypted files without this seed. Do not paste it into chat, logs, analytics, or screenshots.
                     </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, textAlign: 'left', fontFamily: 'ui-monospace, monospace', fontSize: 12, padding: 14, background: '#f6f7fb', borderRadius: 12 }}>
-                        {(createdIdentity.mnemonic || '').split(' ').map((w, i) => <div key={i}>{i + 1}. {w}</div>)}
+                    <div
+                        style={{
+                            display: 'grid',
+                            gridTemplateColumns: 'repeat(3, 1fr)',
+                            gap: 8,
+                            textAlign: 'left',
+                            fontFamily: 'ui-monospace, monospace',
+                            fontSize: 13,
+                            padding: 14,
+                            background: '#f6f7fb',
+                            color: '#111827',
+                            border: '1px solid #d7dbe7',
+                            borderRadius: 12
+                        }}
+                    >
+                        {(createdIdentity.mnemonic || '').split(' ').filter(Boolean).map((w, i) => (
+                            <div
+                                key={i}
+                                style={{
+                                    color: '#111827',
+                                    background: '#ffffff',
+                                    border: '1px solid #e5e7eb',
+                                    borderRadius: 8,
+                                    padding: '8px 10px'
+                                }}
+                            >
+                                {i + 1}. {w}
+                            </div>
+                        ))}
                     </div>
                     <div style={{ fontSize: 12, color: '#6a6f7d', marginTop: 12 }}>Identity: {createdIdentity.vaultedIdentityId.slice(0, 16)}…</div>
                     <button className="v-btn-vaulted" onClick={async () => onLogin(await invoke<UserInfo>('get_current_user'))} style={{ marginTop: 16 }}>I saved my seed phrase</button>
