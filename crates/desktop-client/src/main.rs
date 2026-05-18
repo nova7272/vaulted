@@ -14,7 +14,7 @@ use xrpl_vault_desktop::{
 
 fn main() {
     // Загружаем .env файл
-    dotenv::dotenv().ok();
+    dotenvy::dotenv().ok();
     // Инициализируем логирование
     tracing_subscriber::fmt()
         .with_env_filter(
