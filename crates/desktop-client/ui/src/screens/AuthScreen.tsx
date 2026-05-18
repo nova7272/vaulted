@@ -1,6 +1,7 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import FingerprintBg from '../components/FingerprintBg'
+import { formatError } from '../utils/formatError'
 
 interface UserInfo {
     walletAddress: string
@@ -22,6 +23,8 @@ interface VaultedIdentityResponse {
     protocolVersion: string
 }
 
+type AuthStep = 'initial'|'backup'|'restore'
+
 const IcoShield = () => (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
         <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
@@ -41,33 +44,59 @@ const IcoTransfer = () => (
 )
 
 export default function AuthScreen({ onLogin }: AuthScreenProps) {
-    const [step, setStep] = useState<'initial'|'backup'|'restore'>('initial')
+    const [step, setStep] = useState<AuthStep>('initial')
     const [error, setError] = useState<string|null>(null)
     const [status, setStatus] = useState('')
     const [createdIdentity, setCreatedIdentity] = useState<VaultedIdentityResponse|null>(null)
     const [restorePhrase, setRestorePhrase] = useState('')
     const [advancedSeed, setAdvancedSeed] = useState(false)
+    const [seedSaved, setSeedSaved] = useState(false)
+    const [copyArmed, setCopyArmed] = useState(false)
+    const [copied, setCopied] = useState(false)
+
+    const seedWords = useMemo(() => (createdIdentity?.mnemonic || '').split(' ').filter(Boolean), [createdIdentity])
+
+    const finishLogin = async () => onLogin(await invoke<UserInfo>('get_current_user'))
 
     const createVaultedWallet = async () => {
         try {
             setError(null)
-            setStatus('Generating Vaulted seed phrase…')
+            setStatus('Generating your Vaulted seed phrase…')
+            setSeedSaved(false)
+            setCopied(false)
+            setCopyArmed(false)
             const wordCount = advancedSeed ? 24 : 12
             const identity = await invoke<VaultedIdentityResponse>('create_vaulted_wallet', { wordCount, passphrase: null })
             setCreatedIdentity(identity)
             setStep('backup')
-            setStatus(`Write down your ${wordCount}-word Vaulted seed phrase. It is the only recovery key.`)
-        } catch(e) { setError(String(e)); setStep('initial') }
+            setStatus(`Write down your ${wordCount}-word recovery phrase. You will only see it once.`)
+        } catch(e) {
+            setError(formatError(e))
+            setStep('initial')
+        }
     }
 
     const restoreVaultedWallet = async () => {
         try {
             setError(null)
-            setStatus('Restoring Vaulted identity from seed…')
+            setStatus('Restoring your Vaulted wallet…')
             await invoke<VaultedIdentityResponse>('restore_vaulted_wallet', { mnemonic: restorePhrase.trim(), passphrase: null })
             setStatus('Vaulted wallet restored.')
-            onLogin(await invoke<UserInfo>('get_current_user'))
-        } catch(e) { setError(String(e)) }
+            await finishLogin()
+        } catch(e) { setError(formatError(e)) }
+    }
+
+    const copySeedPhrase = async () => {
+        if (!createdIdentity?.mnemonic) return
+        if (!copyArmed) {
+            setCopyArmed(true)
+            setStatus('Only copy this phrase in a private place. Clipboard history may be stored by your system.')
+            return
+        }
+        await navigator.clipboard.writeText(createdIdentity.mnemonic)
+        setCopied(true)
+        setStatus('Seed phrase copied. Paste it only into your offline backup, then clear the clipboard.')
+        setTimeout(() => setCopied(false), 2000)
     }
 
     return (
@@ -83,80 +112,76 @@ export default function AuthScreen({ onLogin }: AuthScreenProps) {
             </div>
 
             {step === 'initial' && (
-                <div className="v-login-card">
-                    <h3>Create or restore your Vaulted wallet</h3>
-                    <button className="v-btn-vaulted" onClick={createVaultedWallet}>Create new Vaulted wallet</button>
-                    <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#6a6f7d', marginTop: 12, cursor: 'pointer' }}>
-                        <input type="checkbox" checked={advancedSeed} onChange={e => setAdvancedSeed(e.target.checked)} />
-                        Advanced security: generate a 24-word seed instead of the standard 12-word seed
-                    </label>
-                    <button className="v-btn-vaulted" onClick={() => setStep('restore')} style={{ marginTop: 10, background: '#fff', color: '#1a1d26', border: '1px solid #d7dbe7' }}>
-                        Restore from seed phrase
-                    </button>
-                    <div style={{ fontSize: 13, color: '#6a6f7d', marginTop: 14 }}>
-                        Standard Vaulted setup uses a 12-word seed phrase. Vaulted cannot recover encrypted files without this seed.
+                <div className="v-login-card v-auth-card-wide">
+                    <h3>Start with your Vaulted wallet</h3>
+                    <p className="v-auth-sub">One wallet unlocks encryption, Oracle access, and XRPL vault ownership.</p>
+
+                    <div className="v-auth-choice-grid">
+                        <button className="v-auth-choice primary" onClick={createVaultedWallet}>
+                            <span className="v-auth-choice-title">Create wallet</span>
+                            <span className="v-auth-choice-sub">Generate a new seed phrase and back it up offline.</span>
+                        </button>
+                        <button className="v-auth-choice" onClick={() => setStep('restore')}>
+                            <span className="v-auth-choice-title">Restore wallet</span>
+                            <span className="v-auth-choice-sub">Unlock Vaulted with your existing 12 or 24 word phrase.</span>
+                        </button>
                     </div>
-                    {error && <div style={{ fontSize: 12, color: '#e07a6a', marginTop: 12, padding: '8px 12px', background: 'rgba(224,122,106,0.1)', borderRadius: 8 }}>{error}</div>}
+
+                    <details className="v-advanced-toggle">
+                        <summary>Advanced</summary>
+                        <label>
+                            <input type="checkbox" checked={advancedSeed} onChange={e => setAdvancedSeed(e.target.checked)} />
+                            Generate a 24-word seed phrase instead of the standard 12-word phrase
+                        </label>
+                    </details>
+                    {status && <div className="v-auth-status">{status}</div>}
+                    {error && <div className="v-auth-error">{error}</div>}
                 </div>
             )}
 
             {step === 'backup' && createdIdentity && (
-                <div className="v-login-card" style={{ width: 560 }}>
-                    <h3>Back up your Vaulted seed phrase</h3>
-                    <div style={{ fontSize: 13, color: '#6a6f7d', marginBottom: 12 }}>
-                        Vaulted cannot recover encrypted files without this seed. Do not paste it into chat, logs, analytics, or screenshots.
-                    </div>
-                    <div
-                        style={{
-                            display: 'grid',
-                            gridTemplateColumns: 'repeat(3, 1fr)',
-                            gap: 8,
-                            textAlign: 'left',
-                            fontFamily: 'ui-monospace, monospace',
-                            fontSize: 13,
-                            padding: 14,
-                            background: '#f6f7fb',
-                            color: '#111827',
-                            border: '1px solid #d7dbe7',
-                            borderRadius: 12
-                        }}
-                    >
-                        {(createdIdentity.mnemonic || '').split(' ').filter(Boolean).map((w, i) => (
-                            <div
-                                key={i}
-                                style={{
-                                    color: '#111827',
-                                    background: '#ffffff',
-                                    border: '1px solid #e5e7eb',
-                                    borderRadius: 8,
-                                    padding: '8px 10px'
-                                }}
-                            >
-                                {i + 1}. {w}
-                            </div>
+                <div className="v-login-card v-auth-backup-card">
+                    <h3>Back up your seed phrase</h3>
+                    <p className="v-auth-sub">Write these words on paper and store them offline. Vaulted cannot recover encrypted files without them.</p>
+
+                    <div className="v-seed-grid" aria-label="Vaulted seed phrase">
+                        {seedWords.map((w, i) => (
+                            <div className="v-seed-word" key={i}><span>{i + 1}</span>{w}</div>
                         ))}
                     </div>
-                    <div style={{ fontSize: 12, color: '#6a6f7d', marginTop: 12 }}>Identity: {createdIdentity.vaultedIdentityId.slice(0, 16)}…</div>
-                    <button className="v-btn-vaulted" onClick={async () => onLogin(await invoke<UserInfo>('get_current_user'))} style={{ marginTop: 16 }}>I saved my seed phrase</button>
+
+                    <div className="v-seed-actions">
+                        <button className="v-btn" onClick={copySeedPhrase}>{copied ? 'Copied' : copyArmed ? 'Copy anyway' : 'Copy seed phrase'}</button>
+                        <div className="v-seed-warning">Never share this phrase. It will not be shown again after onboarding.</div>
+                    </div>
+
+                    <label className="v-backup-confirm">
+                        <input type="checkbox" checked={seedSaved} onChange={e => setSeedSaved(e.target.checked)} />
+                        I saved this seed phrase offline
+                    </label>
+
+                    <button className="v-btn-vaulted" disabled={!seedSaved} onClick={finishLogin}>Continue to Vaulted</button>
+                    <div className="v-auth-identity">Identity {createdIdentity.vaultedIdentityId.slice(0, 16)}…</div>
+                    {status && <div className="v-auth-status">{status}</div>}
                 </div>
             )}
 
             {step === 'restore' && (
-                <div className="v-login-card" style={{ width: 520 }}>
+                <div className="v-login-card v-auth-card-wide">
                     <h3>Restore Vaulted wallet</h3>
+                    <p className="v-auth-sub">Enter your recovery phrase locally. It is used to unlock your Vaulted identity and XRPL wallet.</p>
                     <textarea
+                        className="v-restore-textarea"
                         value={restorePhrase}
                         onChange={e => setRestorePhrase(e.target.value)}
                         placeholder="Enter your 12 or 24 word Vaulted seed phrase"
-                        style={{ width: '100%', minHeight: 110, borderRadius: 12, border: '1px solid #d7dbe7', padding: 12, resize: 'vertical' }}
                     />
-                    <button className="v-btn-vaulted" onClick={restoreVaultedWallet} style={{ marginTop: 12 }}>Restore</button>
-                    <button onClick={() => setStep('initial')} style={{ marginTop: 10, padding: '10px 22px', borderRadius: 10, border: '1px solid #ddd', background: '#fff', color: '#6a6f7d', fontSize: 14, fontWeight: 500, cursor: 'pointer' }}>Cancel</button>
-                    {status && <div style={{ color: '#3b6fe0', fontSize: 13, marginTop: 10 }}>{status}</div>}
-                    {error && <div style={{ fontSize: 13, color: '#e07a6a', marginTop: 14, padding: '10px 14px', background: 'rgba(224,122,106,0.1)', borderRadius: 10 }}>{error}</div>}
+                    <button className="v-btn-vaulted" onClick={restoreVaultedWallet} disabled={restorePhrase.trim().split(/\s+/).filter(Boolean).length < 12}>Restore wallet</button>
+                    <button className="v-auth-link-button" onClick={() => { setStep('initial'); setError(null); setStatus('') }}>Back</button>
+                    {status && <div className="v-auth-status">{status}</div>}
+                    {error && <div className="v-auth-error">{error}</div>}
                 </div>
             )}
-
         </div>
     )
 }

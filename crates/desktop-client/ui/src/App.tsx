@@ -17,6 +17,8 @@ import { ToastContainer, registerToastFn } from './components/Toast'
 
 type Screen = 'auth'|'files'|'upload'|'settings'|'activity'|'secure-notes'
 interface UserInfo { walletAddress:string; publicKey:string; hasPreKeys:boolean; hasVaultedWallet?:boolean; vaultedIdentityId?:string|null; encryptionPublicKey?:string|null; signingPublicKey?:string|null; expiresAt:string }
+interface ServiceStatus { status:string; message?:string|null; nodes?:number|null; network?:string|null; address?:string|null }
+interface SystemStatus { oracle:ServiceStatus; storage:ServiceStatus; xrpl:ServiceStatus; wallet:ServiceStatus }
 
 const IcoLogout = () => (
     <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -64,6 +66,8 @@ function App() {
     const [toasts, setToasts] = useState<ToastData[]>([])
     const [searchQuery, setSearchQuery] = useState('')
     const [walletCopied, setWalletCopied] = useState(false)
+    const [systemStatus, setSystemStatus] = useState<SystemStatus|null>(null)
+    const [statusCenterOpen, setStatusCenterOpen] = useState(false)
 
     // Oracle auth state
     const [oracleAuthed, setOracleAuthed] = useState(false)
@@ -126,22 +130,28 @@ function App() {
         return () => { unlisten.then(fn => fn()) }
     }, [addToast, handleLogout])
 
-    // Periodic Oracle status check (every 10 seconds) — just updates UI state
+    // Periodic compact system status check for user-facing connectivity states.
     useEffect(() => {
         if (!authed) return
-        const interval = setInterval(async () => {
+        let cancelled = false
+        const refreshStatus = async () => {
             try {
-                const status = await invoke<{
-                    authenticated: boolean
-                    walletAddress: string | null
-                }>('get_oracle_auth_status')
-                setOracleAuthed(status.authenticated)
+                const [authStatus, fullStatus] = await Promise.all([
+                    invoke<{ authenticated: boolean; walletAddress: string | null }>('get_oracle_auth_status'),
+                    invoke<SystemStatus>('get_system_status').catch(() => null),
+                ])
+                if (cancelled) return
+                setOracleAuthed(authStatus.authenticated)
+                if (fullStatus) setSystemStatus(fullStatus)
             } catch (e) {
-                console.error('Failed to check Oracle auth:', e)
+                if (cancelled) return
+                console.error('Failed to check system status:', e)
                 setOracleAuthed(false)
             }
-        }, 10000)
-        return () => clearInterval(interval)
+        }
+        refreshStatus()
+        const interval = setInterval(refreshStatus, 15000)
+        return () => { cancelled = true; clearInterval(interval) }
     }, [authed])
 
     const handleLogin = useCallback(async (u: UserInfo) => {
@@ -216,12 +226,35 @@ function App() {
                             </div>
                         )}
 
-                        {!oracleAuthed && (
-                            <div className="v-oracle-warn" title="Oracle server is unavailable. Some features may not work.">
-                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-                                <span>Oracle unavailable</span>
-                            </div>
-                        )}
+                        <div className="v-status-anchor">
+                            <button
+                                className={`v-status-pill ${oracleAuthed ? 'ok' : 'syncing'}`}
+                                title={systemStatus?.oracle.message || (oracleAuthed ? 'Oracle connected' : 'Checking Oracle…')}
+                                onClick={() => setStatusCenterOpen(v => !v)}
+                            >
+                                <span className="v-status-dot" />
+                                <span>{oracleAuthed ? 'Oracle connected' : 'Checking Oracle…'}</span>
+                            </button>
+                            {statusCenterOpen && systemStatus && (
+                                <div className="v-status-center">
+                                    <div className="v-status-center-title">System status</div>
+                                    {(['wallet','oracle','storage','xrpl'] as const).map(key => {
+                                        const item = systemStatus[key]
+                                        const label = key === 'xrpl' ? 'XRPL' : key[0].toUpperCase() + key.slice(1)
+                                        const healthy = ['connected','unlocked','funded'].includes(item.status)
+                                        return (
+                                            <div className="v-status-row" key={key}>
+                                                <span className={`v-status-dot ${healthy ? 'ok' : item.status === 'wallet_not_funded' ? 'warn' : 'syncing'}`} />
+                                                <div>
+                                                    <div className="v-status-name">{label}: {item.status.replaceAll('_',' ')}</div>
+                                                    <div className="v-status-message">{item.message || item.network || 'Ready'}</div>
+                                                </div>
+                                            </div>
+                                        )
+                                    })}
+                                </div>
+                            )}
+                        </div>
 
                         <div className="v-avatar">
                             <PixelAvatar seed={user?.walletAddress || 'default'} size={50} />

@@ -691,6 +691,22 @@ pub async fn identity_token(
     if wallet_address.is_empty() {
         return Err(ApiError::BadRequest("wallet_address is required".into()));
     }
+    if !req
+        .challenge
+        .contains(&format!("vaulted-v1:{}", req.identity_id))
+    {
+        return Err(ApiError::Unauthorized(
+            "Challenge is not bound to this identity".into(),
+        ));
+    }
+    if !req
+        .challenge
+        .contains(&format!("wallet_address:{}", wallet_address))
+    {
+        return Err(ApiError::Unauthorized(
+            "Challenge is not bound to the requested wallet".into(),
+        ));
+    }
 
     verify_ed25519_hex(
         &signing_public_key,

@@ -185,12 +185,6 @@ async fn register_vaulted_identity_public(
         },
     };
 
-    use ed25519_dalek::Signer as _;
-    let signature = vaulted_identity
-        .signing_key()
-        .sign(challenge.challenge.as_bytes());
-    let signature_hex = hex::encode(signature.to_bytes());
-
     let wallet_address = match state.wallet_address().await {
         Ok(wallet_address) => wallet_address,
         Err(e) => {
@@ -202,11 +196,18 @@ async fn register_vaulted_identity_public(
         },
     };
 
+    let signed_challenge = format!("{}\nwallet_address:{}", challenge.challenge, wallet_address);
+    use ed25519_dalek::Signer as _;
+    let signature = vaulted_identity
+        .signing_key()
+        .sign(signed_challenge.as_bytes());
+    let signature_hex = hex::encode(signature.to_bytes());
+
     match oracle
         .get_identity_token(&IdentityTokenRequest {
             identity_id: identity.vaulted_identity_id.clone(),
             wallet_address,
-            challenge: challenge.challenge,
+            challenge: signed_challenge,
             signature: signature_hex,
             device_public_key: Some(identity.device_public_key.clone()),
         })
@@ -3836,6 +3837,237 @@ pub async fn cancel_secure_note_offer(
             error_text
         )))
     }
+}
+
+// ==================== Production UX Status Commands ====================
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct XrplAccountStatus {
+    pub status: String,
+    pub address: String,
+    pub exists: bool,
+    pub balance_xrp: Option<String>,
+    pub reserve_requirement_xrp: String,
+    pub network: String,
+    pub can_mint: bool,
+    pub action_hint: String,
+    pub action_label: Option<String>,
+    pub action_url: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceStatus {
+    pub status: String,
+    pub message: Option<String>,
+    pub nodes: Option<u32>,
+    pub network: Option<String>,
+    pub address: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemStatus {
+    pub oracle: ServiceStatus,
+    pub storage: ServiceStatus,
+    pub xrpl: ServiceStatus,
+    pub wallet: ServiceStatus,
+}
+
+fn xrpl_network_label(node_url: &str) -> String {
+    let lower = node_url.to_ascii_lowercase();
+    if lower.contains("altnet") || lower.contains("testnet") {
+        "testnet".to_string()
+    } else if lower.contains("devnet") {
+        "devnet".to_string()
+    } else {
+        std::env::var("XRPL_NETWORK").unwrap_or_else(|_| "mainnet".to_string())
+    }
+}
+
+fn testnet_faucet_url(address: &str) -> String {
+    format!(
+        "https://xrpl.org/xrp-testnet-faucet.html?account={}",
+        address
+    )
+}
+
+fn drops_to_xrp_string(drops: &str) -> String {
+    match drops.parse::<f64>() {
+        Ok(v) => {
+            let xrp = v / 1_000_000.0;
+            if xrp.fract() == 0.0 {
+                format!("{xrp:.0}")
+            } else {
+                format!("{xrp:.6}")
+                    .trim_end_matches('0')
+                    .trim_end_matches('.')
+                    .to_string()
+            }
+        },
+        Err(_) => "0".to_string(),
+    }
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn check_xrpl_account_status(
+    state: State<'_, Arc<AppState>>,
+    address: Option<String>,
+) -> Result<XrplAccountStatus> {
+    check_xrpl_account_status_inner(state.inner(), address).await
+}
+
+async fn check_xrpl_account_status_inner(
+    state: &Arc<AppState>,
+    address: Option<String>,
+) -> Result<XrplAccountStatus> {
+    let resolved_address = match address {
+        Some(addr) if !addr.trim().is_empty() => addr.trim().to_string(),
+        _ => state.wallet_address().await?,
+    };
+    let network = xrpl_network_label(&state.config.xrpl_node_url);
+    let reserve_requirement_xrp = "10".to_string();
+
+    let mut client = XrplClient::new(&state.config.xrpl_node_url);
+    client.connect().await?;
+    match client.account_info(&resolved_address).await {
+        Ok(info) => Ok(XrplAccountStatus {
+            status: "funded".to_string(),
+            address: resolved_address,
+            exists: true,
+            balance_xrp: Some(drops_to_xrp_string(&info.balance)),
+            reserve_requirement_xrp,
+            network,
+            can_mint: true,
+            action_hint: "Wallet is active and ready to mint vault NFTs.".to_string(),
+            action_label: None,
+            action_url: None,
+        }),
+        Err(err) => {
+            let raw = err.to_string();
+            if raw.contains("actNotFound") || raw.contains("Account not found") {
+                Ok(XrplAccountStatus {
+                    status: "unfunded".to_string(),
+                    address: resolved_address.clone(),
+                    exists: false,
+                    balance_xrp: Some("0".to_string()),
+                    reserve_requirement_xrp,
+                    network,
+                    can_mint: false,
+                    action_hint: "Your XRPL testnet account is not activated yet. Add testnet XRP to this address, then check again.".to_string(),
+                    action_label: Some("Open XRPL Testnet Faucet".to_string()),
+                    action_url: Some(testnet_faucet_url(&resolved_address)),
+                })
+            } else {
+                Err(err)
+            }
+        },
+    }
+}
+
+#[tauri::command]
+pub async fn get_system_status(state: State<'_, Arc<AppState>>) -> Result<SystemStatus> {
+    let wallet_address = state.wallet_address().await.ok();
+    let oracle_connected = state.has_oracle_token().await;
+
+    let storage_status = match state
+        .http()
+        .get(format!(
+            "{}/health",
+            state.config.storage_node_url.trim_end_matches('/')
+        ))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => ServiceStatus {
+            status: "connected".to_string(),
+            message: Some("Storage node connected".to_string()),
+            nodes: Some(1),
+            network: None,
+            address: None,
+        },
+        Ok(resp) => ServiceStatus {
+            status: "offline".to_string(),
+            message: Some(format!("Storage node returned HTTP {}", resp.status())),
+            nodes: Some(0),
+            network: None,
+            address: None,
+        },
+        Err(_) => ServiceStatus {
+            status: "offline".to_string(),
+            message: Some("Storage node is not reachable".to_string()),
+            nodes: Some(0),
+            network: None,
+            address: None,
+        },
+    };
+
+    let xrpl_status = if let Some(address) = wallet_address.clone() {
+        match check_xrpl_account_status_inner(state.inner(), Some(address.clone())).await {
+            Ok(account) => ServiceStatus {
+                status: if account.can_mint {
+                    "connected".to_string()
+                } else {
+                    "wallet_not_funded".to_string()
+                },
+                message: Some(account.action_hint),
+                nodes: None,
+                network: Some(account.network),
+                address: Some(address),
+            },
+            Err(e) => ServiceStatus {
+                status: "offline".to_string(),
+                message: Some(format!("XRPL check failed: {e}")),
+                nodes: None,
+                network: Some(xrpl_network_label(&state.config.xrpl_node_url)),
+                address: Some(address),
+            },
+        }
+    } else {
+        ServiceStatus {
+            status: "locked".to_string(),
+            message: Some("Wallet is locked".to_string()),
+            nodes: None,
+            network: Some(xrpl_network_label(&state.config.xrpl_node_url)),
+            address: None,
+        }
+    };
+
+    Ok(SystemStatus {
+        oracle: ServiceStatus {
+            status: if oracle_connected {
+                "connected".to_string()
+            } else {
+                "checking".to_string()
+            },
+            message: Some(if oracle_connected {
+                "Oracle connected".to_string()
+            } else {
+                "Oracle is syncing".to_string()
+            }),
+            nodes: None,
+            network: None,
+            address: wallet_address.clone(),
+        },
+        storage: storage_status,
+        xrpl: xrpl_status,
+        wallet: ServiceStatus {
+            status: if wallet_address.is_some() {
+                "unlocked".to_string()
+            } else {
+                "locked".to_string()
+            },
+            message: Some(if wallet_address.is_some() {
+                "Wallet unlocked".to_string()
+            } else {
+                "Wallet locked".to_string()
+            }),
+            nodes: None,
+            network: None,
+            address: wallet_address,
+        },
+    })
 }
 
 // ==================== Oracle Auth Commands ====================
