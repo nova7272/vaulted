@@ -112,13 +112,6 @@ impl From<aes_gcm::Error> for CryptoError {
         CryptoError::AesDecryption("AES-GCM authentication failed".to_string())
     }
 }
-
-impl From<bincode::Error> for CryptoError {
-    fn from(e: bincode::Error) -> Self {
-        CryptoError::Serialization(e.to_string())
-    }
-}
-
 impl From<serde_json::Error> for CryptoError {
     fn from(e: serde_json::Error) -> Self {
         CryptoError::Serialization(e.to_string())

@@ -26,12 +26,16 @@ impl EncryptedData {
 
     /// Сериализует в бинарный формат
     pub fn to_bytes(&self) -> crate::Result<Vec<u8>> {
-        bincode::serialize(self).map_err(Into::into)
+        bincode::serde::encode_to_vec(self, bincode::config::standard())
+            .map_err(|e| crate::CryptoError::Serialization(e.to_string()))
     }
 
     /// Десериализует из бинарного формата
     pub fn from_bytes(bytes: &[u8]) -> crate::Result<Self> {
-        bincode::deserialize(bytes).map_err(Into::into)
+        let (data, _bytes_read): (Self, usize) =
+            bincode::serde::decode_from_slice(bytes, bincode::config::standard())
+                .map_err(|e| crate::CryptoError::Deserialization(e.to_string()))?;
+        Ok(data)
     }
 
     /// Сериализует в base64 (для хранения в JSON/метаданных NFT)
