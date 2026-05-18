@@ -150,6 +150,16 @@ const ERROR_MAP: ErrorMapping[] = [
 
     // ── XRPL errors ──
     {
+        patterns: ['actNotFound', 'Account not found', 'xrpl_account_not_found'],
+        message: 'Wallet is not funded yet.',
+        hint: 'Add testnet XRP to this address, then try minting again.',
+    },
+    {
+        patterns: ['Missing authorization', 'Cannot create vault for different wallet', 'JWT', 'Oracle token'],
+        message: 'Vault access needs to be refreshed.',
+        hint: 'Sign in with your Vaulted wallet again and retry the action.',
+    },
+    {
         patterns: ['insufficient', 'Balance critically low'],
         message: 'Insufficient XRP balance.',
         hint: 'You need at least 15 XRP to perform this transaction.',

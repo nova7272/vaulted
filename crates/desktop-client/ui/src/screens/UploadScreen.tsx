@@ -5,6 +5,7 @@ import { stat } from '@tauri-apps/plugin-fs'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { getNftColors } from '../utils/nft_image'
+import { formatError } from '../utils/formatError'
 
 interface FileEntry { path: string; name: string; size: number; oversized: boolean }
 
@@ -22,6 +23,11 @@ interface VaultedSubmitResponse {
 interface VaultedSignedMintResponse {
   signed: { txBlob: string | null; txHash: string | null }
   submitted: VaultedSubmitResponse | null
+}
+interface XrplAccountStatus {
+  status: string; address: string; exists: boolean; balanceXrp: string | null
+  reserveRequirementXrp: string; network: string; canMint: boolean
+  actionHint: string; actionLabel: string | null; actionUrl: string | null
 }
 interface VaultedNftMetadataPreview {
   visualSeed: string; svg: string; imageDataUri: string; metadataJson: string
@@ -75,6 +81,9 @@ export default function UploadScreen({ onNavigate }: { oracleConnected?: boolean
   const [error, setError] = useState<string|null>(null)
   const [dragOver, setDragOver] = useState(false)
   const [progress, setProgress] = useState<ProgressEvent|null>(null)
+  const [xrplStatus, setXrplStatus] = useState<XrplAccountStatus|null>(null)
+  const [checkingXrpl, setCheckingXrpl] = useState(false)
+  const [addressCopied, setAddressCopied] = useState(false)
 
   const timerRef = useRef<ReturnType<typeof setInterval>|null>(null)
   const abortedRef = useRef(false)
@@ -207,10 +216,38 @@ export default function UploadScreen({ onNavigate }: { oracleConnected?: boolean
     } finally { setCancelling(false) }
   }
 
+  const checkXrplBeforeMint = async () => {
+    setCheckingXrpl(true)
+    setError(null)
+    try {
+      const status = await invoke<XrplAccountStatus>('check_xrpl_account_status', { address: null })
+      setXrplStatus(status)
+      return status
+    } catch (e) {
+      setError(formatError(e))
+      return null
+    } finally {
+      setCheckingXrpl(false)
+    }
+  }
+
+  const copyXrplAddress = async () => {
+    if (!xrplStatus?.address) return
+    await navigator.clipboard.writeText(xrplStatus.address)
+    setAddressCopied(true)
+    setTimeout(() => setAddressCopied(false), 1800)
+  }
+
   const handleLocalMint = async () => {
     if (!result) return
     setError(null)
     setMintResult(null)
+    const account = xrplStatus?.canMint ? xrplStatus : await checkXrplBeforeMint()
+    if (!account) return
+    if (!account.canMint) {
+      setError(null)
+      return
+    }
     setClaimState('minting')
     try {
       const preview = nftPreview || await generateNftPreview(result)
@@ -255,7 +292,7 @@ export default function UploadScreen({ onNavigate }: { oracleConnected?: boolean
       setClaimState('claimed')
     } catch (e) {
       setClaimState('registered')
-      setError('Vaulted XRPL mint failed: ' + String(e))
+      setError(formatError(e))
     }
   }
 
@@ -263,7 +300,7 @@ export default function UploadScreen({ onNavigate }: { oracleConnected?: boolean
     abortedRef.current = true
     clearTimer()
     setFiles([]); setFileEntries([]); setCustomName(''); setTag('')
-    setResult(null); setClaimPayload(null); setMintResult(null); setNftPreview(null)
+    setResult(null); setClaimPayload(null); setMintResult(null); setNftPreview(null); setXrplStatus(null)
     setClaimState('loading'); setTimeLeft(CLAIM_TIMEOUT_SEC)
     setProgress(null); setError(null)
   }
@@ -475,9 +512,21 @@ export default function UploadScreen({ onNavigate }: { oracleConnected?: boolean
                         Published metadata URI: {nftPreview?.metadataUri || result.nft_uri}
                       </div>
                     </div>
+                    {xrplStatus && !xrplStatus.canMint && (
+                      <div className="v-mint-preflight-card">
+                        <div className="v-mint-preflight-title">Wallet is not funded yet</div>
+                        <div className="v-mint-preflight-copy">{xrplStatus.actionHint}</div>
+                        <div className="v-mono v-mint-address">{xrplStatus.address}</div>
+                        <div className="v-mint-preflight-actions">
+                          <button className="v-btn" onClick={copyXrplAddress}>{addressCopied ? 'Copied' : 'Copy address'}</button>
+                          {xrplStatus.actionUrl && <button className="v-btn v-btn-primary" onClick={() => window.open(xrplStatus.actionUrl!, '_blank')}>Open faucet</button>}
+                          <button className="v-btn" onClick={checkXrplBeforeMint} disabled={checkingXrpl}>{checkingXrpl ? 'Checking…' : 'I funded it — check again'}</button>
+                        </div>
+                      </div>
+                    )}
                     <div style={{display:'flex',gap:10}}>
-                      <button className="v-btn v-btn-primary" style={{ flex:1,justifyContent:'center',height:44,fontSize:14 }} onClick={handleLocalMint}>
-                        Mint with Vaulted Wallet
+                      <button className="v-btn v-btn-primary" style={{ flex:1,justifyContent:'center',height:44,fontSize:14 }} onClick={handleLocalMint} disabled={checkingXrpl || (xrplStatus ? !xrplStatus.canMint : false)}>
+                        {checkingXrpl ? 'Checking wallet…' : xrplStatus?.canMint ? 'Mint vault NFT' : 'Check wallet and mint'}
                       </button>
                       <button className="v-btn" style={{ flex:1,justifyContent:'center',height:44,fontSize:14 }} onClick={() => { resetAll(); onNavigate?.('files') }}>Skip for now</button>
                     </div>

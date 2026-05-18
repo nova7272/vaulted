@@ -45,6 +45,8 @@ fn main() {
             validate_vaulted_seed,
             has_vaulted_wallet,
             get_vaulted_xrpl_wallet,
+            check_xrpl_account_status,
+            get_system_status,
             create_vaulted_nft_mint_qr_request,
             sign_vaulted_xrpl_qr_request,
             sign_vaulted_nft_mint_transaction,

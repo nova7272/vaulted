@@ -370,3 +370,52 @@ body { font-family: var(--font-ui); font-size: 14px; line-height: 1.5; color: va
   user-select: text !important;
   -webkit-user-select: text !important;
 }
+
+/* ── Production UX polish: onboarding, status center, XRPL preflight ── */
+.v-status-anchor { position: relative; }
+.v-status-pill { display:flex; align-items:center; gap:8px; height:34px; padding:0 12px; border-radius:999px; border:1px solid var(--line); background:var(--bg-2); color:var(--fg-1); font:inherit; font-size:13px; font-weight:600; cursor:pointer; }
+.v-status-pill.ok { color:var(--ok); background:var(--ok-soft); border-color:rgba(106,199,154,0.28); }
+.v-status-pill.syncing { color:var(--warn); background:var(--warn-soft); border-color:var(--warn-line); }
+.v-status-dot { width:8px; height:8px; border-radius:999px; background:currentColor; box-shadow:0 0 0 4px color-mix(in srgb, currentColor 16%, transparent); flex-shrink:0; }
+.v-status-dot.ok { color:var(--ok); }
+.v-status-dot.warn { color:var(--warn); }
+.v-status-dot.syncing { color:var(--fg-2); }
+.v-status-center { position:absolute; right:0; top:42px; width:340px; padding:16px; border-radius:16px; border:1px solid var(--line-2); background:rgba(18,21,28,0.98); box-shadow:0 24px 70px rgba(0,0,0,0.45); z-index:100; }
+.v-status-center-title { font-size:14px; font-weight:700; color:var(--fg-0); margin-bottom:10px; }
+.v-status-row { display:grid; grid-template-columns:12px 1fr; gap:10px; padding:10px 0; border-top:1px solid var(--line); }
+.v-status-row:first-of-type { border-top:0; }
+.v-status-name { font-size:13px; font-weight:650; color:var(--fg-1); text-transform:capitalize; }
+.v-status-message { font-size:12px; color:var(--fg-2); margin-top:2px; line-height:1.35; }
+
+.v-auth-card-wide { width:640px; }
+.v-auth-sub { color:#616675; font-size:14px; margin:-6px 0 20px; line-height:1.55; }
+.v-auth-choice-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:14px; }
+.v-auth-choice { text-align:left; min-height:132px; border-radius:16px; border:1px solid #d9deea; background:#fff; padding:18px; cursor:pointer; transition:all .14s; font-family:inherit; color:#1a1d26; }
+.v-auth-choice:hover { transform:translateY(-1px); border-color:#9ab8ff; box-shadow:0 12px 30px rgba(35,49,82,0.10); }
+.v-auth-choice.primary { background:#10131b; color:#fff; border-color:#10131b; }
+.v-auth-choice-title { display:block; font-size:18px; font-weight:700; margin-bottom:8px; }
+.v-auth-choice-sub { display:block; font-size:13px; line-height:1.45; color:inherit; opacity:.72; }
+.v-advanced-toggle { text-align:left; color:#606778; font-size:13px; border-top:1px solid #dfe3ed; padding-top:12px; }
+.v-advanced-toggle summary { cursor:pointer; font-weight:650; margin-bottom:8px; }
+.v-advanced-toggle label { display:flex; align-items:center; gap:8px; }
+.v-auth-status { color:#335fc8; font-size:13px; margin-top:12px; line-height:1.45; }
+.v-auth-error { font-size:13px; color:#b84f43; margin-top:14px; padding:10px 14px; background:rgba(224,122,106,0.12); border-radius:10px; }
+.v-auth-backup-card { width:680px; text-align:left; }
+.v-auth-backup-card h3 { text-align:center; }
+.v-seed-grid { display:grid; grid-template-columns:repeat(3, 1fr); gap:8px; padding:14px; background:#eef1f7; border:1px solid #d7dbe7; border-radius:16px; user-select:text; }
+.v-seed-word { display:flex; gap:8px; align-items:center; min-height:40px; background:#fff; color:#111827; border:1px solid #e1e5ef; border-radius:10px; padding:8px 10px; font-family:var(--font-mono); font-size:13px; font-weight:650; }
+.v-seed-word span { color:#7b8191; font-size:12px; min-width:22px; }
+.v-seed-actions { display:flex; align-items:center; gap:12px; margin:14px 0; }
+.v-seed-warning { color:#7b5360; font-size:12.5px; line-height:1.4; }
+.v-backup-confirm { display:flex; align-items:center; gap:10px; color:#1f2937; font-size:14px; margin:10px 0 14px; }
+.v-btn-vaulted:disabled { opacity:.45; cursor:not-allowed; transform:none; }
+.v-auth-identity { text-align:center; font-family:var(--font-mono); color:#7a8190; font-size:12px; margin-top:12px; }
+.v-restore-textarea { width:100%; min-height:124px; border-radius:14px; border:1px solid #d7dbe7; padding:14px; resize:vertical; font:13px/1.6 var(--font-mono); color:#111827; background:#fff; margin-bottom:14px; }
+.v-auth-link-button { margin-top:12px; border:0; background:transparent; color:#657083; font-size:14px; font-weight:650; cursor:pointer; }
+
+.v-mint-preflight-card { margin:0 0 16px; border:1px solid var(--warn-line); background:var(--warn-soft); border-radius:var(--radius-md); padding:16px; }
+.v-mint-preflight-title { font-size:16px; font-weight:700; color:var(--warn); margin-bottom:4px; }
+.v-mint-preflight-copy { font-size:14px; color:var(--fg-1); line-height:1.45; }
+.v-mint-address { margin-top:10px; padding:10px 12px; border-radius:10px; background:var(--bg-1); border:1px solid var(--line); color:var(--fg-1); font-size:12px; word-break:break-all; }
+.v-mint-preflight-actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; }
+.v-mint-preflight-actions .v-btn { height:38px; font-size:13px; }
