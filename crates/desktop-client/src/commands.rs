@@ -489,19 +489,37 @@ pub async fn submit_vaulted_xrpl_tx_blob(
 ) -> Result<VaultedSubmitResponse> {
     let mut client = XrplClient::new(&state.config.xrpl_node_url);
     client.connect().await?;
+    tracing::info!("Submitting locally signed Vaulted NFTokenMint transaction");
     let result = client.submit(&tx_blob).await?;
-    let tx_hash = result.tx_hash;
-    let nft_token_id = if !tx_hash.is_empty() {
-        client
-            .extract_minted_nftoken_id(&tx_hash)
-            .await
-            .ok()
-            .flatten()
+    let accepted = result.engine_result.starts_with("tes");
+    let tx_hash = result.tx_hash.clone();
+
+    tracing::info!(
+        accepted,
+        engine_result = %result.engine_result,
+        engine_result_message = %result.engine_result_message,
+        tx_hash = %tx_hash,
+        "Vaulted NFTokenMint submit result"
+    );
+
+    let nft_token_id = if accepted && !tx_hash.is_empty() {
+        match client.extract_minted_nftoken_id(&tx_hash).await {
+            Ok(token_id) => token_id,
+            Err(err) => {
+                tracing::warn!(
+                    tx_hash = %tx_hash,
+                    error = %err,
+                    "Failed to extract minted NFTokenID after accepted submit"
+                );
+                None
+            },
+        }
     } else {
         None
     };
+
     Ok(VaultedSubmitResponse {
-        accepted: result.engine_result.starts_with("tes"),
+        accepted,
         engine_result: result.engine_result,
         engine_result_message: result.engine_result_message,
         tx_hash,
