@@ -270,20 +270,40 @@ impl XrplClient {
             .get("result")
             .ok_or_else(|| ClientError::Xrpl("No result".to_string()))?;
 
+        let engine_result = result["engine_result"].as_str().unwrap_or("").to_string();
+        let engine_result_message = result["engine_result_message"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        let tx_hash = result
+            .get("tx_json")
+            .and_then(|tx| tx.get("hash"))
+            .or_else(|| result.get("hash"))
+            .and_then(|h| h.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        if engine_result.starts_with("tes") {
+            tracing::info!(
+                engine_result = %engine_result,
+                engine_result_message = %engine_result_message,
+                tx_hash = %tx_hash,
+                "XRPL submit accepted"
+            );
+        } else {
+            tracing::warn!(
+                engine_result = %engine_result,
+                engine_result_message = %engine_result_message,
+                tx_hash = %tx_hash,
+                result = %result,
+                "XRPL submit rejected"
+            );
+        }
+
         Ok(SubmitResult {
-            engine_result: result["engine_result"].as_str().unwrap_or("").to_string(),
-            engine_result_message: result["engine_result_message"]
-                .as_str()
-                .unwrap_or("")
-                .to_string(),
-            tx_hash: result
-                .get("tx_json")
-                .and_then(|tx| tx.get("hash"))
-                .or_else(|| result.get("tx_json").and_then(|tx| tx.get("hash")))
-                .or_else(|| result.get("hash"))
-                .and_then(|h| h.as_str())
-                .unwrap_or("")
-                .to_string(),
+            engine_result,
+            engine_result_message,
+            tx_hash,
         })
     }
 

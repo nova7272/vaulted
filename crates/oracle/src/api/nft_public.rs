@@ -20,10 +20,10 @@ use crate::services::AppState;
 /// ID can be metadata_hash (from URI) or nft_token_id.
 /// Public — no auth required, no sensitive data exposed.
 pub async fn nft_metadata(State(state): State<AppState>, Path(nft_id): Path<String>) -> Response {
-    // Validate ID format (hex string, reasonable length)
-    if nft_id.len() < 8 || nft_id.len() > 128 || !nft_id.chars().all(|c| c.is_ascii_hexdigit()) {
+    // Accept both legacy/public hash IDs and algorithm-prefixed manifest hashes.
+    let Some(normalized_id) = normalize_public_nft_id(&nft_id) else {
         return (StatusCode::BAD_REQUEST, "Invalid NFT ID").into_response();
-    }
+    };
 
     // Prefer exact client-published metadata when available. This is what the
     // locally signed NFTokenMint URI points to. It keeps Oracle as a durable
@@ -32,11 +32,15 @@ pub async fn nft_metadata(State(state): State<AppState>, Path(nft_id): Path<Stri
         r#"
         SELECT manifest #> '{public_metadata,metadata_json}'
         FROM nft_metadata
-        WHERE metadata_hash = $1 OR nft_token_id = $1
+        WHERE metadata_hash = $1
+           OR nft_token_id = $1
+           OR manifest #>> '{public_metadata,metadata_json,properties,manifest_hash}' = $2
+           OR manifest #>> '{public_metadata,metadata_json,properties,manifest_hash}' = $1
         ORDER BY updated_at DESC
         LIMIT 1
         "#,
     )
+    .bind(&normalized_id)
     .bind(&nft_id)
     .fetch_optional(&state.db)
     .await
@@ -68,13 +72,13 @@ pub async fn nft_metadata(State(state): State<AppState>, Path(nft_id): Path<Stri
         format!(
             "{}/nft/{}/image.svg",
             public_url.trim_end_matches('/'),
-            nft_id
+            normalized_id
         )
     } else {
-        format!("/nft/{}/image.svg", nft_id)
+        format!("/nft/{}/image.svg", normalized_id)
     };
 
-    let metadata = nft_image::generate_nft_metadata(&nft_id, &image_url);
+    let metadata = nft_image::generate_nft_metadata(&normalized_id, &image_url);
 
     (
         StatusCode::OK,
@@ -92,10 +96,9 @@ pub async fn nft_metadata(State(state): State<AppState>, Path(nft_id): Path<Stri
 /// Returns deterministic pixel-art SVG generated from ID hash.
 /// Public — no auth required, fully deterministic (same ID = same image).
 pub async fn nft_image_svg(State(state): State<AppState>, Path(nft_id): Path<String>) -> Response {
-    // Validate ID format
-    if nft_id.len() < 8 || nft_id.len() > 128 || !nft_id.chars().all(|c| c.is_ascii_hexdigit()) {
+    let Some(normalized_id) = normalize_public_nft_id(&nft_id) else {
         return (StatusCode::BAD_REQUEST, "Invalid NFT ID").into_response();
-    }
+    };
 
     // If metadata was published with an embedded data:image/svg+xml;base64 image,
     // serve the exact client-generated SVG as a convenience endpoint too.
@@ -103,11 +106,15 @@ pub async fn nft_image_svg(State(state): State<AppState>, Path(nft_id): Path<Str
         r#"
         SELECT manifest #>> '{public_metadata,metadata_json,image}'
         FROM nft_metadata
-        WHERE metadata_hash = $1 OR nft_token_id = $1
+        WHERE metadata_hash = $1
+           OR nft_token_id = $1
+           OR manifest #>> '{public_metadata,metadata_json,properties,manifest_hash}' = $2
+           OR manifest #>> '{public_metadata,metadata_json,properties,manifest_hash}' = $1
         ORDER BY updated_at DESC
         LIMIT 1
         "#,
     )
+    .bind(&normalized_id)
     .bind(&nft_id)
     .fetch_optional(&state.db)
     .await
@@ -125,7 +132,7 @@ pub async fn nft_image_svg(State(state): State<AppState>, Path(nft_id): Path<Str
         }
     }
 
-    let svg = nft_image::generate_nft_svg(&nft_id);
+    let svg = nft_image::generate_nft_svg(&normalized_id);
 
     (
         StatusCode::OK,
@@ -136,6 +143,19 @@ pub async fn nft_image_svg(State(state): State<AppState>, Path(nft_id): Path<Str
         svg,
     )
         .into_response()
+}
+
+fn normalize_public_nft_id(id: &str) -> Option<String> {
+    let normalized = id.strip_prefix("sha256:").unwrap_or(id);
+
+    if normalized.len() < 8
+        || normalized.len() > 128
+        || !normalized.chars().all(|c| c.is_ascii_hexdigit())
+    {
+        return None;
+    }
+
+    Some(normalized.to_ascii_lowercase())
 }
 
 fn decode_svg_data_uri(uri: &str) -> Option<String> {
@@ -176,6 +196,28 @@ mod tests {
         );
 
         assert!(decode_svg_data_uri(&uri).is_none());
+    }
+
+    #[test]
+    fn normalizes_plain_hex_public_nft_id() {
+        assert_eq!(
+            normalize_public_nft_id("ABCDEF1234567890").as_deref(),
+            Some("abcdef1234567890")
+        );
+    }
+
+    #[test]
+    fn normalizes_sha256_prefixed_public_nft_id() {
+        assert_eq!(
+            normalize_public_nft_id("sha256:ABCDEF1234567890").as_deref(),
+            Some("abcdef1234567890")
+        );
+    }
+
+    #[test]
+    fn rejects_non_hex_public_nft_id() {
+        assert!(normalize_public_nft_id("sha256:not-hex").is_none());
+        assert!(normalize_public_nft_id("not-hex").is_none());
     }
 
     #[test]
