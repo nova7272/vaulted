@@ -64,6 +64,7 @@ Vaulted is an encrypted file vault with local Vaulted seed identity, client-side
 | `.ai-factory/DESCRIPTION.md` | Project specification generated from repository evidence. |
 | `.ai-factory/ARCHITECTURE.md` | Architecture guidelines and dependency rules. |
 | `.ai-factory/rules/base.md` | Auto-detected project coding and workflow conventions. |
+| Agent instructions | `.ai-factory/VAULTED_AGENT_INSTRUCTIONS.md` | Operating manual, task order, security rules, runtime verification, and XRPL Grants MVP acceptance checklist. |
 
 ## Agent Rules
 - Decompose shell commands instead of chaining unrelated operations.
@@ -72,3 +73,5 @@ Vaulted is an encrypted file vault with local Vaulted seed identity, client-side
 - Do not fetch external skills or dependencies unless the user explicitly confirms that network/DNS access should be used.
 - Respect the trust boundary: plaintext file content, file keys, seed phrases, and private wallet material stay client-side.
 - Use existing workspace commands and scripts before inventing new workflows.
+- Before planning or implementing product work, read `.ai-factory/VAULTED_AGENT_INSTRUCTIONS.md` together with `.ai-factory/DESCRIPTION.md`, `.ai-factory/ARCHITECTURE.md`, and `.ai-factory/rules/base.md`.
+- Follow the immediate task order from `.ai-factory/VAULTED_AGENT_INSTRUCTIONS.md` unless the user explicitly overrides it.
