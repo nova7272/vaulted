@@ -274,20 +274,21 @@ export default function UploadScreen({ onNavigate }: { oracleConnected?: boolean
       if (!submitted.accepted) {
         throw new Error(`${submitted.engineResult}: ${submitted.engineResultMessage}`)
       }
-
-      const mintedTokenId = submitted.nftTokenId || result.nft_token_id
-      setMintResult(submitted)
-      setResult({ ...result, nft_token_id: mintedTokenId })
-
-      if (submitted.nftTokenId) {
-        await invoke('register_minted_vault_object', {
-          vaultObjectId: result.vault_id,
-          manifestUri: preview.metadataUri,
-          manifestHash: result.manifest_hash,
-          nftTokenId: submitted.nftTokenId,
-          txHash: submitted.txHash,
-        })
+      if (!submitted.nftTokenId) {
+        setMintResult(submitted)
+        throw new Error(`XRPL mint succeeded (${submitted.txHash}), but Vaulted could not extract the minted NFTokenID for Oracle finalization. Retry finalization after refreshing.`)
       }
+
+      setMintResult(submitted)
+      setResult({ ...result, nft_token_id: submitted.nftTokenId })
+
+      await invoke('register_minted_vault_object', {
+        vaultObjectId: result.vault_id,
+        manifestUri: preview.metadataUri,
+        manifestHash: result.manifest_hash,
+        nftTokenId: submitted.nftTokenId,
+        txHash: submitted.txHash,
+      })
 
       setClaimState('claimed')
     } catch (e) {

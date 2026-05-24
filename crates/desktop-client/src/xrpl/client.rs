@@ -614,26 +614,66 @@ fn extract_minted_nftoken_id_from_tx_result(result: &Value) -> Option<String> {
         .get("meta")
         .or_else(|| result.get("metaData"))
         .or_else(|| result.get("metadata"))?;
+
+    if let Some(id) = meta.get("nftoken_id").and_then(|v| v.as_str()) {
+        return Some(id.to_string());
+    }
+
     let affected_nodes = meta.get("AffectedNodes")?.as_array()?;
 
     for node in affected_nodes {
-        let created = node.get("CreatedNode")?;
-        let ledger_entry_type = created.get("LedgerEntryType")?.as_str()?;
-        if ledger_entry_type != "NFTokenPage" {
-            continue;
+        if let Some(id) = minted_nftoken_id_from_modified_node(node) {
+            return Some(id);
         }
-        let fields = created.get("NewFields")?;
-        let tokens = fields.get("NFTokens")?.as_array()?;
-        for token in tokens {
-            let id = token
-                .get("NFToken")
-                .and_then(|v| v.get("NFTokenID"))
-                .and_then(|v| v.as_str())?;
-            return Some(id.to_string());
+
+        if let Some(id) = minted_nftoken_id_from_created_node(node) {
+            return Some(id);
         }
     }
 
     None
+}
+
+fn minted_nftoken_id_from_created_node(node: &Value) -> Option<String> {
+    let created = node.get("CreatedNode")?;
+    let ledger_entry_type = created.get("LedgerEntryType")?.as_str()?;
+    if ledger_entry_type != "NFTokenPage" {
+        return None;
+    }
+
+    let tokens = created.get("NewFields")?.get("NFTokens")?.as_array()?;
+    nftoken_id_from_last_token(tokens)
+}
+
+fn minted_nftoken_id_from_modified_node(node: &Value) -> Option<String> {
+    let modified = node.get("ModifiedNode")?;
+    let ledger_entry_type = modified.get("LedgerEntryType")?.as_str()?;
+    if ledger_entry_type != "NFTokenPage" {
+        return None;
+    }
+
+    let final_tokens = modified.get("FinalFields")?.get("NFTokens")?.as_array()?;
+    let previous_len = modified
+        .get("PreviousFields")
+        .and_then(|v| v.get("NFTokens"))
+        .and_then(|v| v.as_array())
+        .map(|tokens| tokens.len())
+        .unwrap_or(0);
+
+    if final_tokens.len() <= previous_len {
+        return None;
+    }
+
+    nftoken_id_from_last_token(final_tokens)
+}
+
+fn nftoken_id_from_last_token(tokens: &[Value]) -> Option<String> {
+    tokens
+        .last()?
+        .get("NFToken")
+        .and_then(|v| v.get("NFTokenID"))
+        .and_then(|v| v.as_str())
+        .map(|id| id.to_string())
 }
 
 /// Конвертирует hex строку в обычную строку
@@ -660,7 +700,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_minted_nftoken_id() {
+    fn test_extract_minted_nftoken_id_from_created_node() {
         let result = json!({
             "meta": {
                 "AffectedNodes": [{
@@ -679,6 +719,72 @@ mod tests {
             extract_minted_nftoken_id_from_tx_result(&result),
             Some("00080000ABC".to_string())
         );
+    }
+
+    #[test]
+    fn test_extract_minted_nftoken_id_from_direct_meta_field() {
+        let result = json!({
+            "meta": {
+                "nftoken_id": "00080000DIRECT",
+                "AffectedNodes": []
+            }
+        });
+        assert_eq!(
+            extract_minted_nftoken_id_from_tx_result(&result),
+            Some("00080000DIRECT".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_minted_nftoken_id_from_modified_node() {
+        let result = json!({
+            "meta": {
+                "AffectedNodes": [{
+                    "ModifiedNode": {
+                        "LedgerEntryType": "NFTokenPage",
+                        "FinalFields": {
+                            "NFTokens": [
+                                {"NFToken": {"NFTokenID": "00080000OLD"}},
+                                {"NFToken": {"NFTokenID": "00080000NEW"}}
+                            ]
+                        },
+                        "PreviousFields": {
+                            "NFTokens": [
+                                {"NFToken": {"NFTokenID": "00080000OLD"}}
+                            ]
+                        }
+                    }
+                }]
+            }
+        });
+        assert_eq!(
+            extract_minted_nftoken_id_from_tx_result(&result),
+            Some("00080000NEW".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_minted_nftoken_id_missing_metadata() {
+        let result = json!({
+            "meta": {
+                "AffectedNodes": [{
+                    "ModifiedNode": {
+                        "LedgerEntryType": "NFTokenPage",
+                        "FinalFields": {
+                            "NFTokens": [
+                                {"NFToken": {"NFTokenID": "00080000OLD"}}
+                            ]
+                        },
+                        "PreviousFields": {
+                            "NFTokens": [
+                                {"NFToken": {"NFTokenID": "00080000OLD"}}
+                            ]
+                        }
+                    }
+                }]
+            }
+        });
+        assert_eq!(extract_minted_nftoken_id_from_tx_result(&result), None);
     }
 
     #[test]
