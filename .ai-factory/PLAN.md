@@ -251,3 +251,12 @@ Runtime evidence still shows XRPL rejects the locally signed `NFTokenMint` as `i
 - [x] Add deterministic tests for 111-byte URI hex storage and Blob field encoding using only lengths, booleans, and field markers.
 - [x] Add deterministic internal verification for XRPL signing preimage and ECDSA signature without logging digest, public key, signature, transaction JSON, or transaction blob.
 - [x] Add deterministic canonical field marker offset checks for the signed `NFTokenMint` serialization.
+
+## Addendum: Use XRPL Mithril Codec For Local NFTokenMint Serialization
+
+Runtime evidence and local tests showed the hand-written serializer still produced `invalidTransaction`; local inspection confirmed `xrpl-mithril-codec` is already locked via Oracle and exposes canonical serialization/signing hash APIs without requiring XRPL family seed material.
+
+- [x] Add `xrpl-mithril-codec = "0.3.3"` as a direct `crypto-core` dependency without adding `xrpl-mithril-wallet`.
+- [x] Replace the local hand-written XRPL binary serialization and transaction hash path with `xrpl-mithril-codec`.
+- [x] Keep Vaulted key derivation and secp256k1 signing local in `crypto-core`.
+- [x] Update focused tests to assert only safe facts about protocol, blob validity, hash length, transaction type, URI encoding booleans, and signature inclusion behavior.

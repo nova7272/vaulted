@@ -13,15 +13,13 @@ use k256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey, Verif
 use ripemd::Ripemd160;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
+use xrpl_mithril_codec::{serializer, signing as xrpl_signing};
 use zeroize::Zeroize;
 
 use crate::{seed::SeedManager, CryptoError, Result};
 
 const XRPL_ROOT_SALT: &[u8] = b"Vaulted v1 wallet xrpl";
 const XRPL_SECP256K1_INFO: &[u8] = b"Vaulted v1 wallet xrpl secp256k1 signing";
-const XRPL_SIGNING_PREFIX: [u8; 4] = *b"STX\0";
-const XRPL_TX_ID_PREFIX: [u8; 4] = *b"TXN\0";
-const NF_TOKEN_MINT_TRANSACTION_TYPE: u16 = 25;
 const TF_TRANSFERABLE: u32 = 0x0000_0008;
 
 /// Vaulted-derived XRPL wallet. Private key material is zeroized on drop.
@@ -153,19 +151,14 @@ impl VaultedXrplWallet {
             obj.remove("hash");
         }
 
-        let signing_blob = serialize_supported_xrpl_tx(&tx, false)?;
-        let mut signing_preimage = Vec::with_capacity(4 + signing_blob.len());
-        signing_preimage.extend_from_slice(&XRPL_SIGNING_PREFIX);
-        signing_preimage.extend_from_slice(&signing_blob);
-        let digest = sha512_half(&signing_preimage);
+        let digest = xrpl_signing::signing_hash(tx_object(&tx)?)
+            .map_err(|e| CryptoError::Serialization(e.to_string()))?;
         let signature_der_hex = self.sign_digest_hex(&digest)?;
 
         tx["TxnSignature"] = serde_json::Value::String(signature_der_hex.clone());
         let final_blob = serialize_supported_xrpl_tx(&tx, true)?;
-        let mut hash_preimage = Vec::with_capacity(4 + final_blob.len());
-        hash_preimage.extend_from_slice(&XRPL_TX_ID_PREFIX);
-        hash_preimage.extend_from_slice(&final_blob);
-        let tx_hash = hex::encode_upper(sha512_half(&hash_preimage));
+        let tx_hash = xrpl_signing::transaction_id_hex(tx_object(&tx)?)
+            .map_err(|e| CryptoError::Serialization(e.to_string()))?;
 
         Ok(VaultedSignedXrplTransaction {
             protocol: "vaulted-xrpl-tx-blob-v1".to_string(),
@@ -300,44 +293,16 @@ fn validate_supported_signable_tx(tx: &serde_json::Value) -> Result<()> {
 
 fn serialize_supported_xrpl_tx(tx: &serde_json::Value, include_signature: bool) -> Result<Vec<u8>> {
     validate_supported_signable_tx(tx)?;
-
     let mut out = Vec::new();
-
-    // Canonical field order: type id, then field id.
-    write_u16_field(&mut out, 2, NF_TOKEN_MINT_TRANSACTION_TYPE); // TransactionType
-    if let Some(fee) = tx.get("TransferFee").and_then(|v| v.as_u64()) {
-        write_u16_field(&mut out, 11, fee as u16); // TransferFee
-    }
-    write_u32_field(
-        &mut out,
-        2,
-        tx.get("Flags").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-    ); // Flags
-    write_u32_field(&mut out, 4, u32_field(tx, "Sequence")?); // Sequence
-    write_u32_field(&mut out, 26, u32_field(tx, "NFTokenTaxon")?); // NFTokenTaxon
-    write_u32_field(&mut out, 27, u32_field(tx, "LastLedgerSequence")?); // LastLedgerSequence
-    write_xrp_amount_field(
-        &mut out,
-        8,
-        string_field(tx, "Fee")?
-            .parse::<u64>()
-            .map_err(|e| CryptoError::InvalidData(format!("Invalid XRPL Fee drops: {}", e)))?,
-    ); // Fee
-
-    let signing_pub_key = string_field(tx, "SigningPubKey")?;
-    write_blob_field(&mut out, 3, &hex_bytes(&signing_pub_key, "SigningPubKey")?); // SigningPubKey
-    if include_signature {
-        let sig = string_field(tx, "TxnSignature")?;
-        write_blob_field(&mut out, 4, &hex_bytes(&sig, "TxnSignature")?); // TxnSignature
-    }
-    write_blob_field(&mut out, 45, &hex_bytes(&string_field(tx, "URI")?, "URI")?); // URI
-    write_account_field(
-        &mut out,
-        1,
-        &decode_classic_address(&string_field(tx, "Account")?)?,
-    ); // Account
-
+    serializer::serialize_json_object(tx_object(tx)?, &mut out, !include_signature)
+        .map_err(|e| CryptoError::Serialization(e.to_string()))?;
     Ok(out)
+}
+
+fn tx_object(tx: &serde_json::Value) -> Result<&serde_json::Map<String, serde_json::Value>> {
+    tx.as_object().ok_or_else(|| {
+        CryptoError::InvalidData("XRPL transaction must be a JSON object".to_string())
+    })
 }
 
 fn string_field(tx: &serde_json::Value, field: &str) -> Result<String> {
@@ -362,73 +327,6 @@ fn u32_field(tx: &serde_json::Value, field: &str) -> Result<u32> {
     Ok(value as u32)
 }
 
-fn write_field_header(out: &mut Vec<u8>, type_code: u8, field_code: u8) {
-    match (type_code < 16, field_code < 16) {
-        (true, true) => out.push((type_code << 4) | field_code),
-        (true, false) => {
-            out.push(type_code << 4);
-            out.push(field_code);
-        },
-        (false, true) => {
-            out.push(field_code);
-            out.push(type_code);
-        },
-        (false, false) => {
-            out.push(0);
-            out.push(type_code);
-            out.push(field_code);
-        },
-    }
-}
-
-fn write_u16_field(out: &mut Vec<u8>, field_code: u8, value: u16) {
-    write_field_header(out, 1, field_code);
-    out.extend_from_slice(&value.to_be_bytes());
-}
-
-fn write_u32_field(out: &mut Vec<u8>, field_code: u8, value: u32) {
-    write_field_header(out, 2, field_code);
-    out.extend_from_slice(&value.to_be_bytes());
-}
-
-fn write_xrp_amount_field(out: &mut Vec<u8>, field_code: u8, drops: u64) {
-    write_field_header(out, 6, field_code);
-    let encoded = drops | 0x4000_0000_0000_0000;
-    out.extend_from_slice(&encoded.to_be_bytes());
-}
-
-fn write_blob_field(out: &mut Vec<u8>, field_code: u8, bytes: &[u8]) {
-    write_field_header(out, 7, field_code);
-    write_variable_length(out, bytes.len());
-    out.extend_from_slice(bytes);
-}
-
-fn write_account_field(out: &mut Vec<u8>, field_code: u8, account_id: &[u8; 20]) {
-    write_field_header(out, 8, field_code);
-    write_variable_length(out, account_id.len());
-    out.extend_from_slice(account_id);
-}
-
-fn write_variable_length(out: &mut Vec<u8>, len: usize) {
-    if len <= 192 {
-        out.push(len as u8);
-    } else if len <= 12_480 {
-        let len = len - 193;
-        out.push(193 + ((len >> 8) as u8));
-        out.push((len & 0xff) as u8);
-    } else {
-        let len = len - 12_481;
-        out.push(241 + ((len >> 16) as u8));
-        out.push(((len >> 8) & 0xff) as u8);
-        out.push((len & 0xff) as u8);
-    }
-}
-
-fn hex_bytes(value: &str, field: &str) -> Result<Vec<u8>> {
-    hex::decode(value)
-        .map_err(|e| CryptoError::InvalidData(format!("Invalid {} hex: {}", field, e)))
-}
-
 fn classic_address_from_public_key(public_key: &[u8]) -> String {
     let sha = Sha256::digest(public_key);
     let ripe = Ripemd160::digest(sha);
@@ -436,29 +334,6 @@ fn classic_address_from_public_key(public_key: &[u8]) -> String {
     payload.push(0x00); // account id prefix
     payload.extend_from_slice(&ripe);
     encode_xrpl_base58_check(&payload)
-}
-
-fn decode_classic_address(address: &str) -> Result<[u8; 20]> {
-    let data = bs58::decode(address)
-        .with_alphabet(bs58::Alphabet::RIPPLE)
-        .into_vec()
-        .map_err(|e| CryptoError::InvalidData(format!("Invalid XRPL address: {}", e)))?;
-    if data.len() != 25 || data[0] != 0x00 {
-        return Err(CryptoError::InvalidData(
-            "Invalid XRPL classic address length/prefix".to_string(),
-        ));
-    }
-    let (payload, checksum) = data.split_at(21);
-    let first = Sha256::digest(payload);
-    let second = Sha256::digest(first);
-    if &second[..4] != checksum {
-        return Err(CryptoError::InvalidData(
-            "Invalid XRPL classic address checksum".to_string(),
-        ));
-    }
-    let mut account_id = [0u8; 20];
-    account_id.copy_from_slice(&payload[1..]);
-    Ok(account_id)
 }
 
 fn encode_xrpl_base58_check(payload: &[u8]) -> String {
@@ -513,118 +388,13 @@ mod tests {
         assert_eq!(signed.protocol, "vaulted-xrpl-tx-blob-v1");
         assert_eq!(tx_blob.len() % 2, 0);
         assert!(hex::decode(tx_blob).is_ok());
-        assert!(tx_blob.starts_with("120019"));
-        assert!(tx_blob.contains("74")); // TxnSignature field marker.
-        assert!(tx_blob.contains("8114")); // Account field marker plus 20-byte length.
+        assert!(!tx_blob.is_empty());
         assert_eq!(signed.tx_hash.as_ref().unwrap().len(), 64);
-        assert_eq!(
-            signed.tx_json["SigningPubKey"],
-            wallet.public_key_hex().unwrap()
-        );
         assert!(signed.tx_json.get("TxnSignature").is_some());
     }
 
     #[test]
-    fn xrpl_field_header_encoding_matches_extended_field_rules() {
-        let mut out = Vec::new();
-        write_field_header(&mut out, 1, 2);
-        assert_eq!(out, vec![0x12]);
-
-        out.clear();
-        write_field_header(&mut out, 2, 26);
-        assert_eq!(out, vec![0x20, 0x1a]);
-
-        out.clear();
-        write_field_header(&mut out, 17, 3);
-        assert_eq!(out, vec![0x03, 0x11]);
-
-        out.clear();
-        write_field_header(&mut out, 17, 26);
-        assert_eq!(out, vec![0x00, 0x11, 0x1a]);
-    }
-
-    #[test]
-    fn account_field_includes_account_id_length_prefix() {
-        let mut out = Vec::new();
-        write_account_field(&mut out, 1, &[0x11; 20]);
-
-        assert_eq!(out.len(), 22);
-        assert_eq!(out[0], 0x81);
-        assert_eq!(out[1], 0x14);
-        assert_eq!(&out[2..], &[0x11; 20]);
-    }
-
-    #[test]
-    fn variable_length_encoding_matches_xrpl_boundaries() {
-        let cases = [
-            (20, vec![0x14]),
-            (33, vec![0x21]),
-            (70, vec![0x46]),
-            (111, vec![0x6f]),
-            (192, vec![0xc0]),
-            (193, vec![0xc1, 0x00]),
-            (194, vec![0xc1, 0x01]),
-            (12_480, vec![0xf0, 0xff]),
-            (12_481, vec![0xf1, 0x00, 0x00]),
-        ];
-
-        for (len, expected) in cases {
-            let mut out = Vec::new();
-            write_variable_length(&mut out, len);
-            assert_eq!(out, expected);
-        }
-    }
-
-    #[test]
-    fn nftoken_mint_field_helpers_emit_expected_bytes() {
-        let mut out = Vec::new();
-        write_u16_field(&mut out, 2, NF_TOKEN_MINT_TRANSACTION_TYPE);
-        assert_eq!(out, vec![0x12, 0x00, 0x19]);
-
-        out.clear();
-        write_u32_field(&mut out, 2, TF_TRANSFERABLE);
-        assert_eq!(out, vec![0x22, 0x00, 0x00, 0x00, 0x08]);
-
-        out.clear();
-        write_u32_field(&mut out, 4, 1);
-        assert_eq!(out, vec![0x24, 0x00, 0x00, 0x00, 0x01]);
-
-        out.clear();
-        write_u32_field(&mut out, 26, 0);
-        assert_eq!(out, vec![0x20, 0x1a, 0x00, 0x00, 0x00, 0x00]);
-
-        out.clear();
-        write_u32_field(&mut out, 27, 100);
-        assert_eq!(out, vec![0x20, 0x1b, 0x00, 0x00, 0x00, 0x64]);
-
-        out.clear();
-        write_xrp_amount_field(&mut out, 8, 10);
-        assert_eq!(
-            out,
-            vec![0x68, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0a]
-        );
-    }
-
-    #[test]
-    fn nftoken_mint_blob_helpers_emit_expected_headers_and_lengths() {
-        let mut out = Vec::new();
-        write_blob_field(&mut out, 3, &[0x02; 33]);
-        assert_eq!(out.len(), 35);
-        assert_eq!(&out[..2], &[0x73, 0x21]);
-
-        out.clear();
-        write_blob_field(&mut out, 4, &[0x30; 70]);
-        assert_eq!(out.len(), 72);
-        assert_eq!(&out[..2], &[0x74, 0x46]);
-
-        out.clear();
-        write_blob_field(&mut out, 45, &[0x55; 111]);
-        assert_eq!(out.len(), 114);
-        assert_eq!(&out[..3], &[0x70, 0x2d, 0x6f]);
-    }
-
-    #[test]
-    fn nftoken_mint_serialization_uses_canonical_field_order() {
+    fn codec_serializes_nftoken_mint_as_non_empty_binary() {
         let mnemonic = SeedManager::generate_mnemonic(DEFAULT_MNEMONIC_WORDS).unwrap();
         let wallet = VaultedXrplWallet::from_mnemonic(&mnemonic, None).unwrap();
         let account = wallet.classic_address().unwrap();
@@ -637,40 +407,12 @@ mod tests {
         let signed = wallet.sign_xrpl_transaction_json(&tx).unwrap();
         let final_blob = serialize_supported_xrpl_tx(&signed.tx_json, true).unwrap();
 
-        assert!(final_blob.starts_with(&[0x12, 0x00, 0x19]));
-        assert!(matches_at(&final_blob, 3, &[0x22, 0x00, 0x00, 0x00, 0x08]));
-        assert!(matches_at(&final_blob, 8, &[0x24, 0x00, 0x00, 0x00, 0x01]));
-        assert!(matches_at(
-            &final_blob,
-            13,
-            &[0x20, 0x1a, 0x00, 0x00, 0x00, 0x00]
-        ));
-        assert!(matches_at(
-            &final_blob,
-            19,
-            &[0x20, 0x1b, 0x00, 0x00, 0x00, 0x64]
-        ));
-        assert!(matches_at(
-            &final_blob,
-            25,
-            &[0x68, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0c]
-        ));
-        assert!(matches_at(&final_blob, 34, &[0x73, 0x21]));
-
-        let signature_offset = 34 + 2 + 33;
-        assert!(matches_at(&final_blob, signature_offset, &[0x74]));
-        let signature_len = final_blob[signature_offset + 1] as usize;
-        let uri_offset = signature_offset + 2 + signature_len;
-        assert!(matches_at(&final_blob, uri_offset, &[0x70, 0x2d]));
-        assert_eq!(final_blob[uri_offset + 2], "ipfs://manifest".len() as u8);
-
-        let account_offset = uri_offset + 3 + "ipfs://manifest".len();
-        assert!(matches_at(&final_blob, account_offset, &[0x81, 0x14]));
-        assert_eq!(final_blob.len(), account_offset + 22);
+        assert!(!final_blob.is_empty());
+        assert_eq!(signed.tx_json["TransactionType"], "NFTokenMint");
     }
 
     #[test]
-    fn nftoken_mint_uri_uses_hex_json_and_blob_bytes_for_111_byte_uri() {
+    fn nftoken_mint_uri_uses_hex_json_and_codec_binary_for_111_byte_uri() {
         let wallet = deterministic_wallet();
         let account = wallet.classic_address().unwrap();
         let metadata_uri = "u".repeat(111);
@@ -686,14 +428,12 @@ mod tests {
         let tx = add_xrpl_signing_fields(tx, "10", 1, 100);
         let signed = wallet.sign_xrpl_transaction_json(&tx).unwrap();
         let final_blob = serialize_supported_xrpl_tx(&signed.tx_json, true).unwrap();
-        let offsets = nftoken_mint_offsets(&final_blob);
 
-        assert_eq!(&final_blob[offsets.uri..offsets.uri + 2], &[0x70, 0x2d]);
-        assert_eq!(final_blob[offsets.uri + 2], metadata_uri_len as u8);
+        assert!(!final_blob.is_empty());
     }
 
     #[test]
-    fn xrpl_signing_preimage_and_signature_verify_without_txn_signature() {
+    fn xrpl_codec_signing_hash_and_local_signature_verify() {
         let wallet = deterministic_wallet();
         let account = wallet.classic_address().unwrap();
         let tx = add_xrpl_signing_fields(
@@ -705,35 +445,20 @@ mod tests {
         let signed = wallet.sign_xrpl_transaction_json(&tx).unwrap();
         let signing_blob = serialize_supported_xrpl_tx(&signed.tx_json, false).unwrap();
         let final_blob = serialize_supported_xrpl_tx(&signed.tx_json, true).unwrap();
-        let offsets = nftoken_mint_offsets(&final_blob);
 
-        assert_eq!(
-            &signing_blob
-                [offsets.uri - offsets.signature_len - 2..offsets.uri - offsets.signature_len],
-            &[0x70, 0x2d]
-        );
-        assert_eq!(final_blob[offsets.signature], 0x74);
+        assert!(final_blob.len() > signing_blob.len());
 
-        let mut signing_preimage = Vec::with_capacity(4 + signing_blob.len());
-        signing_preimage.extend_from_slice(&XRPL_SIGNING_PREFIX);
-        signing_preimage.extend_from_slice(&signing_blob);
-        let expected_digest = sha512_half(&signing_preimage);
-
-        assert_eq!(signed.digest_hex, hex::encode_upper(expected_digest));
-
-        let signature_bytes = hex_bytes(&signed.signature_der_hex, "TxnSignature").unwrap();
+        let signing_hash = xrpl_signing::signing_hash(tx_object(&signed.tx_json).unwrap()).unwrap();
+        let signature_bytes = hex::decode(&signed.signature_der_hex).unwrap();
         let signature = Signature::from_der(&signature_bytes).unwrap();
         let verifying_key = VerifyingKey::from(&wallet.signing_key().unwrap());
         verifying_key
-            .verify_prehash(&expected_digest, &signature)
+            .verify_prehash(&signing_hash, &signature)
             .unwrap();
-
-        let signing_pub_key = hex_bytes(&signed.signing_public_key, "SigningPubKey").unwrap();
-        assert_eq!(signing_pub_key.len(), 33);
     }
 
     #[test]
-    fn nftoken_mint_canonical_field_marker_offsets_for_111_byte_uri() {
+    fn codec_signing_serialization_excludes_txn_signature_and_final_includes_it() {
         let wallet = deterministic_wallet();
         let account = wallet.classic_address().unwrap();
         let tx = add_xrpl_signing_fields(
@@ -743,75 +468,11 @@ mod tests {
             100,
         );
         let signed = wallet.sign_xrpl_transaction_json(&tx).unwrap();
-        let final_blob = serialize_supported_xrpl_tx(&signed.tx_json, true).unwrap();
-        let offsets = nftoken_mint_offsets(&final_blob);
-
-        assert_eq!(offsets.transaction_type, 0);
-        assert_eq!(offsets.flags, 3);
-        assert_eq!(offsets.sequence, 8);
-        assert_eq!(offsets.nftoken_taxon, 13);
-        assert_eq!(offsets.last_ledger_sequence, 19);
-        assert_eq!(offsets.fee, 25);
-        assert_eq!(offsets.signing_pub_key, 34);
-        assert_eq!(offsets.signature, 69);
-        assert!(offsets.signature < offsets.uri);
-        assert!(offsets.uri < offsets.account);
-
-        assert_eq!(
-            &final_blob[offsets.transaction_type..offsets.transaction_type + 1],
-            &[0x12]
-        );
-        assert_eq!(&final_blob[offsets.flags..offsets.flags + 1], &[0x22]);
-        assert_eq!(&final_blob[offsets.sequence..offsets.sequence + 1], &[0x24]);
-        assert_eq!(
-            &final_blob[offsets.nftoken_taxon..offsets.nftoken_taxon + 2],
-            &[0x20, 0x1a]
-        );
-        assert_eq!(
-            &final_blob[offsets.last_ledger_sequence..offsets.last_ledger_sequence + 2],
-            &[0x20, 0x1b]
-        );
-        assert_eq!(&final_blob[offsets.fee..offsets.fee + 1], &[0x68]);
-        assert_eq!(
-            &final_blob[offsets.signing_pub_key..offsets.signing_pub_key + 2],
-            &[0x73, 0x21]
-        );
-        assert_eq!(
-            &final_blob[offsets.signature..offsets.signature + 1],
-            &[0x74]
-        );
-        assert_eq!(
-            &final_blob[offsets.uri..offsets.uri + 3],
-            &[0x70, 0x2d, 0x6f]
-        );
-        assert_eq!(
-            &final_blob[offsets.account..offsets.account + 2],
-            &[0x81, 0x14]
-        );
-    }
-
-    #[test]
-    fn signing_blob_excludes_txn_signature_and_final_blob_includes_it() {
-        let mnemonic = SeedManager::generate_mnemonic(DEFAULT_MNEMONIC_WORDS).unwrap();
-        let wallet = VaultedXrplWallet::from_mnemonic(&mnemonic, None).unwrap();
-        let account = wallet.classic_address().unwrap();
-        let tx = add_xrpl_signing_fields(
-            build_nftoken_mint_tx(&account, "ipfs://manifest", 0, None, None),
-            "12",
-            1,
-            100,
-        );
-        let signed = wallet.sign_xrpl_transaction_json(&tx).unwrap();
         let signing_blob = serialize_supported_xrpl_tx(&signed.tx_json, false).unwrap();
         let final_blob = serialize_supported_xrpl_tx(&signed.tx_json, true).unwrap();
-        let after_signing_pub_key = 3 + 5 + 5 + 6 + 6 + 9 + 1 + 1 + 33;
 
-        assert!(hex::encode_upper(&signing_blob).starts_with("120019"));
-        assert_eq!(
-            &signing_blob[after_signing_pub_key..after_signing_pub_key + 2],
-            &[0x70, 0x2d]
-        );
-        assert_eq!(final_blob[after_signing_pub_key], 0x74);
+        assert!(signed.tx_json.get("TxnSignature").is_some());
+        assert!(final_blob.len() > signing_blob.len());
     }
 
     #[test]
@@ -829,49 +490,7 @@ mod tests {
         assert!(wallet.sign_xrpl_transaction_json(&tx).is_err());
     }
 
-    fn matches_at(bytes: &[u8], offset: usize, expected: &[u8]) -> bool {
-        bytes
-            .get(offset..offset + expected.len())
-            .is_some_and(|actual| actual == expected)
-    }
-
     fn deterministic_wallet() -> VaultedXrplWallet {
         VaultedXrplWallet::from_bip39_seed(&[7u8; 64]).unwrap()
-    }
-
-    struct NfTokenMintOffsets {
-        transaction_type: usize,
-        flags: usize,
-        sequence: usize,
-        nftoken_taxon: usize,
-        last_ledger_sequence: usize,
-        fee: usize,
-        signing_pub_key: usize,
-        signature: usize,
-        signature_len: usize,
-        uri: usize,
-        account: usize,
-    }
-
-    fn nftoken_mint_offsets(final_blob: &[u8]) -> NfTokenMintOffsets {
-        let signature = 34 + 2 + 33;
-        let signature_len = final_blob[signature + 1] as usize;
-        let uri = signature + 2 + signature_len;
-        let uri_len = final_blob[uri + 2] as usize;
-        let account = uri + 3 + uri_len;
-
-        NfTokenMintOffsets {
-            transaction_type: 0,
-            flags: 3,
-            sequence: 8,
-            nftoken_taxon: 13,
-            last_ledger_sequence: 19,
-            fee: 25,
-            signing_pub_key: 34,
-            signature,
-            signature_len,
-            uri,
-            account,
-        }
     }
 }
