@@ -467,13 +467,27 @@ pub async fn mint_vaulted_nft_locally(
     request: VaultedNftMintSigningRequest,
     submit: Option<bool>,
 ) -> Result<VaultedSignedMintResponse> {
+    let metadata_uri_len = request.metadata_uri.len();
+    let mint_account = state.inner().get_xrpl_wallet().await?.classic_address()?;
     let signed = sign_vaulted_nft_mint_transaction_inner(state.inner(), request).await?;
 
     let submitted = if submit.unwrap_or(false) {
         let tx_blob = signed.tx_blob.clone().ok_or_else(|| {
-            ClientError::Xrpl("Local signing did not produce an XRPL tx_blob".to_string())
+            ClientError::Xrpl(
+                "Local signing did not produce a signed XRPL transaction payload".to_string(),
+            )
         })?;
-        Some(submit_vaulted_xrpl_tx_blob(state, tx_blob).await?)
+        Some(
+            submit_vaulted_xrpl_tx_blob_inner(
+                state.inner(),
+                tx_blob,
+                Some(MintSubmitDiagnostics {
+                    classic_address: mint_account,
+                    metadata_uri_len,
+                }),
+            )
+            .await?,
+        )
     } else {
         None
     };
@@ -487,6 +501,19 @@ pub async fn submit_vaulted_xrpl_tx_blob(
     state: State<'_, Arc<AppState>>,
     tx_blob: String,
 ) -> Result<VaultedSubmitResponse> {
+    submit_vaulted_xrpl_tx_blob_inner(state.inner(), tx_blob, None).await
+}
+
+struct MintSubmitDiagnostics {
+    classic_address: String,
+    metadata_uri_len: usize,
+}
+
+async fn submit_vaulted_xrpl_tx_blob_inner(
+    state: &Arc<AppState>,
+    tx_blob: String,
+    diagnostics: Option<MintSubmitDiagnostics>,
+) -> Result<VaultedSubmitResponse> {
     let mut client = XrplClient::new(&state.config.xrpl_node_url);
     client.connect().await?;
     tracing::info!("Submitting locally signed Vaulted NFTokenMint transaction");
@@ -494,21 +521,33 @@ pub async fn submit_vaulted_xrpl_tx_blob(
     let accepted = result.engine_result.starts_with("tes");
     let tx_hash = result.tx_hash.clone();
 
-    tracing::info!(
-        accepted,
-        engine_result = %result.engine_result,
-        engine_result_message = %result.engine_result_message,
-        tx_hash = %tx_hash,
-        "Vaulted NFTokenMint submit result"
-    );
+    if let Some(ctx) = diagnostics.as_ref() {
+        tracing::info!(
+            accepted,
+            engine_result = %result.engine_result,
+            engine_result_message = %result.engine_result_message,
+            tx_hash = %tx_hash,
+            classic_address = %ctx.classic_address,
+            metadata_uri_len = ctx.metadata_uri_len,
+            "Vaulted NFTokenMint submit result"
+        );
+    } else {
+        tracing::info!(
+            accepted,
+            engine_result = %result.engine_result,
+            engine_result_message = %result.engine_result_message,
+            tx_hash = %tx_hash,
+            "Vaulted XRPL submit result"
+        );
+    }
 
     let nft_token_id = if accepted && !tx_hash.is_empty() {
         match client.extract_minted_nftoken_id(&tx_hash).await {
             Ok(token_id) => token_id,
-            Err(err) => {
+            Err(_) => {
                 tracing::warn!(
                     tx_hash = %tx_hash,
-                    error = %err,
+                    accepted,
                     "Failed to extract minted NFTokenID after accepted submit"
                 );
                 None
