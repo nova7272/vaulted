@@ -86,12 +86,32 @@ impl XrplClient {
 
     /// Отправляет запрос и ждёт ответ
     async fn request(&self, command: &str, params: Value) -> Result<Value> {
-        let sender = self
-            .sender
-            .as_ref()
-            .ok_or_else(|| ClientError::Xrpl("Not connected".to_string()))?;
+        self.request_with_id(command, params)
+            .await
+            .map(|(_, response)| response)
+    }
 
+    async fn request_with_id(&self, command: &str, params: Value) -> Result<(u64, Value)> {
         let id = self.request_id.fetch_add(1, Ordering::SeqCst);
+        let log_submit_transport = command == "submit";
+
+        if log_submit_transport {
+            tracing::info!(request_id = id, method = "submit", phase = "started");
+        }
+
+        let sender = self.sender.as_ref().ok_or_else(|| {
+            let message = "Not connected";
+            if log_submit_transport {
+                tracing::warn!(
+                    request_id = id,
+                    method = "submit",
+                    phase = "transport_failed",
+                    transport_error_kind = "not_connected",
+                    transport_error_message = message
+                );
+            }
+            ClientError::Xrpl(message.to_string())
+        })?;
 
         let request = json!({
             "id": id,
@@ -116,16 +136,66 @@ impl XrplClient {
         sender
             .send(Message::Text(serde_json::to_string(&request)?))
             .await
-            .map_err(|e| ClientError::WebSocket(e.to_string()))?;
+            .map_err(|e| {
+                let message = safe_transport_error_message(&e.to_string());
+                if log_submit_transport {
+                    tracing::warn!(
+                        request_id = id,
+                        method = "submit",
+                        phase = "transport_failed",
+                        transport_error_kind = classify_transport_error(&message),
+                        transport_error_message = %message
+                    );
+                }
+                ClientError::WebSocket(e.to_string())
+            })?;
 
         // Ждём ответ с таймаутом
         let response = tokio::time::timeout(std::time::Duration::from_secs(30), rx)
             .await
-            .map_err(|_| ClientError::Xrpl("Request timeout".to_string()))?
-            .map_err(|_| ClientError::Xrpl("Response channel closed".to_string()))?;
+            .map_err(|_| {
+                if log_submit_transport {
+                    tracing::warn!(
+                        request_id = id,
+                        method = "submit",
+                        phase = "transport_failed",
+                        transport_error_kind = "timeout",
+                        transport_error_message = "Request timeout",
+                        timeout = true
+                    );
+                }
+                ClientError::Xrpl("Request timeout".to_string())
+            })?
+            .map_err(|_| {
+                let message = "Response channel closed";
+                if log_submit_transport {
+                    tracing::warn!(
+                        request_id = id,
+                        method = "submit",
+                        phase = "transport_failed",
+                        transport_error_kind = "websocket_closed",
+                        transport_error_message = message
+                    );
+                }
+                ClientError::Xrpl(message.to_string())
+            })?;
 
         // Проверяем на ошибку
         if let Some(error) = response.get("error") {
+            if log_submit_transport {
+                let message = response
+                    .get("error_message")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("Unknown");
+                let message = safe_transport_error_message(message);
+                tracing::warn!(
+                    request_id = id,
+                    method = "submit",
+                    phase = "transport_failed",
+                    transport_error_kind = "xrpl_error_response",
+                    transport_error_message = %message
+                );
+            }
             return Err(ClientError::Xrpl(format!(
                 "{}: {}",
                 error,
@@ -133,7 +203,7 @@ impl XrplClient {
             )));
         }
 
-        Ok(response)
+        Ok((id, response))
     }
 
     /// Получает информацию об аккаунте
@@ -257,8 +327,8 @@ impl XrplClient {
 
     /// Отправляет подписанную транзакцию
     pub async fn submit(&self, tx_blob: &str) -> Result<SubmitResult> {
-        let response = self
-            .request(
+        let (request_id, response) = self
+            .request_with_id(
                 "submit",
                 json!({
                     "tx_blob": tx_blob
@@ -266,14 +336,26 @@ impl XrplClient {
             )
             .await?;
 
-        let result = response
-            .get("result")
-            .ok_or_else(|| ClientError::Xrpl("No result".to_string()))?;
+        let result = response.get("result").ok_or_else(|| {
+            tracing::warn!(
+                request_id,
+                method = "submit",
+                phase = "missing_result",
+                transport_error_kind = "missing_result",
+                transport_error_message = "No result"
+            );
+            ClientError::Xrpl("No result".to_string())
+        })?;
 
         let submit_result = parse_submit_result(result);
+        let accepted = submit_result.engine_result.starts_with("tes");
 
-        if submit_result.engine_result.starts_with("tes") {
+        if accepted {
             tracing::info!(
+                request_id,
+                method = "submit",
+                phase = "parsed",
+                accepted,
                 engine_result = %submit_result.engine_result,
                 engine_result_message = %submit_result.engine_result_message,
                 tx_hash = %submit_result.tx_hash,
@@ -281,6 +363,10 @@ impl XrplClient {
             );
         } else {
             tracing::warn!(
+                request_id,
+                method = "submit",
+                phase = "parsed",
+                accepted,
                 engine_result = %submit_result.engine_result,
                 engine_result_message = %submit_result.engine_result_message,
                 tx_hash = %submit_result.tx_hash,
@@ -410,6 +496,62 @@ fn parse_submit_result(result: &Value) -> SubmitResult {
     }
 }
 
+fn classify_transport_error(message: &str) -> &'static str {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("timeout") {
+        "timeout"
+    } else if lower.contains("closed") || lower.contains("close") {
+        "websocket_closed"
+    } else if lower.contains("websocket")
+        || lower.contains("connection")
+        || lower.contains("io error")
+    {
+        "websocket_error"
+    } else if lower.contains("not connected") {
+        "not_connected"
+    } else {
+        "transport_error"
+    }
+}
+
+fn safe_transport_error_message(message: &str) -> String {
+    const MAX_MESSAGE_LEN: usize = 240;
+    let mut safe = message
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect::<String>();
+
+    for forbidden in [
+        "tx_blob",
+        "txBlob",
+        "tx_json",
+        "txJson",
+        "seed",
+        "Seed",
+        "private key",
+        "private_key",
+        "Private key",
+        "jwt",
+        "JWT",
+        "aes key",
+        "aes_key",
+        "AES key",
+        "plaintext",
+        "plain text",
+        "recovery phrase",
+        "Recovery phrase",
+        "mnemonic entropy",
+    ] {
+        safe = safe.replace(forbidden, "[redacted]");
+    }
+
+    if safe.len() > MAX_MESSAGE_LEN {
+        safe.truncate(MAX_MESSAGE_LEN);
+    }
+
+    safe
+}
+
 /// Информация о сервере
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerInfo {
@@ -523,5 +665,31 @@ mod tests {
             "Insufficient reserve to complete transaction."
         );
         assert_eq!(parsed.tx_hash, "DEF456");
+    }
+
+    #[test]
+    fn test_classify_transport_error() {
+        assert_eq!(classify_transport_error("Request timeout"), "timeout");
+        assert_eq!(
+            classify_transport_error("Response channel closed"),
+            "websocket_closed"
+        );
+        assert_eq!(
+            classify_transport_error("WebSocket protocol error"),
+            "websocket_error"
+        );
+    }
+
+    #[test]
+    fn test_safe_transport_error_message_redacts_sensitive_payload_terms() {
+        let safe = safe_transport_error_message(
+            "server rejected tx_blob and tx_json with seed and private key fields",
+        );
+
+        assert!(!safe.contains("tx_blob"));
+        assert!(!safe.contains("tx_json"));
+        assert!(!safe.contains("seed"));
+        assert!(!safe.contains("private key"));
+        assert!(safe.contains("[redacted]"));
     }
 }
