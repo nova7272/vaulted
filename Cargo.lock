@@ -8014,6 +8014,7 @@ dependencies = [
  "tokio",
  "umbral-pre",
  "x25519-dalek",
+ "xrpl-mithril-codec",
  "zeroize",
 ]
 
