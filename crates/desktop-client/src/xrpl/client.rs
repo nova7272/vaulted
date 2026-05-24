@@ -181,25 +181,25 @@ impl XrplClient {
             })?;
 
         // Проверяем на ошибку
-        if let Some(error) = response.get("error") {
+        if response.get("error").is_some() {
             if log_submit_transport {
-                let message = response
-                    .get("error_message")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("Unknown");
-                let message = safe_transport_error_message(message);
+                let fields = extract_xrpl_error_response_fields(&response);
                 tracing::warn!(
                     request_id = id,
                     method = "submit",
                     phase = "transport_failed",
                     transport_error_kind = "xrpl_error_response",
-                    transport_error_message = %message
+                    error = %fields.error,
+                    error_code = %fields.error_code,
+                    error_message = %fields.error_message,
+                    status = %fields.status,
+                    transport_error_message = %fields.error_message
                 );
             }
+            let fields = extract_xrpl_error_response_fields(&response);
             return Err(ClientError::Xrpl(format!(
                 "{}: {}",
-                error,
-                response.get("error_message").unwrap_or(&json!("Unknown"))
+                fields.error, fields.error_message
             )));
         }
 
@@ -475,6 +475,41 @@ pub struct SubmitResult {
     pub tx_hash: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct XrplErrorResponseFields {
+    error: String,
+    error_code: String,
+    error_message: String,
+    status: String,
+}
+
+fn extract_xrpl_error_response_fields(response: &Value) -> XrplErrorResponseFields {
+    XrplErrorResponseFields {
+        error: top_level_safe_field(response, "error").unwrap_or_else(|| "unknown".to_string()),
+        error_code: top_level_safe_field(response, "error_code").unwrap_or_default(),
+        error_message: top_level_safe_field(response, "error_message")
+            .unwrap_or_else(|| "Unknown".to_string()),
+        status: top_level_safe_field(response, "status").unwrap_or_default(),
+    }
+}
+
+fn top_level_safe_field(response: &Value, field: &str) -> Option<String> {
+    let value = response.get(field)?;
+    let text = if let Some(text) = value.as_str() {
+        text.to_string()
+    } else if let Some(number) = value.as_i64() {
+        number.to_string()
+    } else if let Some(number) = value.as_u64() {
+        number.to_string()
+    } else if let Some(boolean) = value.as_bool() {
+        boolean.to_string()
+    } else {
+        return None;
+    };
+
+    Some(safe_transport_error_message(&text))
+}
+
 fn parse_submit_result(result: &Value) -> SubmitResult {
     let engine_result = result["engine_result"].as_str().unwrap_or("").to_string();
     let engine_result_message = result["engine_result_message"]
@@ -665,6 +700,63 @@ mod tests {
             "Insufficient reserve to complete transaction."
         );
         assert_eq!(parsed.tx_hash, "DEF456");
+    }
+
+    #[test]
+    fn test_extract_xrpl_error_response_fields() {
+        let response = json!({
+            "id": 1,
+            "status": "error",
+            "error": "invalidParams",
+            "error_code": 31,
+            "error_message": "Malformed request"
+        });
+
+        let fields = extract_xrpl_error_response_fields(&response);
+
+        assert_eq!(fields.error, "invalidParams");
+        assert_eq!(fields.error_code, "31");
+        assert_eq!(fields.error_message, "Malformed request");
+        assert_eq!(fields.status, "error");
+    }
+
+    #[test]
+    fn test_extract_xrpl_error_response_fields_handles_missing_fields() {
+        let fields = extract_xrpl_error_response_fields(&json!({ "id": 1 }));
+
+        assert_eq!(fields.error, "unknown");
+        assert_eq!(fields.error_code, "");
+        assert_eq!(fields.error_message, "Unknown");
+        assert_eq!(fields.status, "");
+    }
+
+    #[test]
+    fn test_extract_xrpl_error_response_fields_ignores_nested_forbidden_fields() {
+        let response = json!({
+            "id": 1,
+            "status": "error",
+            "error": "invalidParams",
+            "error_code": "31",
+            "error_message": "Malformed request",
+            "request": {
+                "tx_blob": "SECRET_TX_BLOB",
+                "params": {
+                    "tx_json": "SECRET_TX_JSON"
+                }
+            }
+        });
+
+        let fields = extract_xrpl_error_response_fields(&response);
+        let combined = format!(
+            "{} {} {} {}",
+            fields.error, fields.error_code, fields.error_message, fields.status
+        );
+
+        assert_eq!(fields.error_code, "31");
+        assert!(!combined.contains("SECRET_TX_BLOB"));
+        assert!(!combined.contains("SECRET_TX_JSON"));
+        assert!(!combined.contains("tx_blob"));
+        assert!(!combined.contains("tx_json"));
     }
 
     #[test]

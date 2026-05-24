@@ -210,3 +210,11 @@ Runtime evidence after commit `316cea7` showed submit starts but no `engine_resu
 - [x] Preserve accepted/rejected submit logs with `engine_result`, `engine_result_message`, `tx_hash`, and `accepted`.
 - [x] Add focused pure helper tests.
 - [x] Run required Rust and sensitive-log checks.
+
+## Addendum: Safe XRPL JSON-RPC Error Fields
+
+Runtime evidence after commit `dbae0bc` showed the submit path receives an XRPL JSON-RPC error response, but only logs `transport_error_message=Unknown`.
+
+- [x] Extract only top-level safe XRPL error response fields: `error`, `error_code`, `error_message`, and `status`.
+- [x] Include those fields in the submit-specific `xrpl_error_response` log without raw JSON request/response data, params, `tx_blob`, or `tx_json`.
+- [x] Add focused tests for present fields, missing fields, and ignored nested forbidden fields.
