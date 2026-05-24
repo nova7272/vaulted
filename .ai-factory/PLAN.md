@@ -226,3 +226,10 @@ Runtime evidence showed XRPL returns `invalidTransaction` before `engine_result`
 - [x] Inspect submit request format and local NFTokenMint signing/serialization path.
 - [x] Add safe structural diagnostics for transaction type, metadata URI length, account, sequence, fee, last ledger sequence, transaction blob length, and hex validity.
 - [x] Add focused tests for transaction blob hex validation.
+
+## Addendum: Fix Local XRPL NFTokenMint Serialization
+
+Serializer inspection found a narrow AccountID encoding defect: the Account field wrote the `0x81` field header directly followed by 20 AccountID bytes, but XRPL AccountID fields require a variable-length prefix (`0x14`) before the 20-byte value.
+
+- [x] Add the AccountID variable-length prefix in the supported XRPL serializer.
+- [x] Add regression tests for XRPL field header encoding, AccountID length-prefix encoding, and NFTokenMint binary blob structure.

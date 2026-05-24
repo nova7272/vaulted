@@ -405,6 +405,7 @@ fn write_blob_field(out: &mut Vec<u8>, field_code: u8, bytes: &[u8]) {
 
 fn write_account_field(out: &mut Vec<u8>, field_code: u8, account_id: &[u8; 20]) {
     write_field_header(out, 8, field_code);
+    write_variable_length(out, account_id.len());
     out.extend_from_slice(account_id);
 }
 
@@ -506,15 +507,74 @@ mod tests {
         let tx = build_nftoken_mint_tx(&account, "ipfs://manifest", 0, None, None);
         let tx = add_xrpl_signing_fields(tx, "12", 1, 100);
         let signed = wallet.sign_xrpl_transaction_json(&tx).unwrap();
+        let tx_blob = signed.tx_blob.as_ref().unwrap();
 
         assert_eq!(signed.protocol, "vaulted-xrpl-tx-blob-v1");
-        assert!(signed.tx_blob.as_ref().unwrap().starts_with("120019"));
+        assert_eq!(tx_blob.len() % 2, 0);
+        assert!(hex::decode(tx_blob).is_ok());
+        assert!(tx_blob.starts_with("120019"));
+        assert!(tx_blob.contains("74")); // TxnSignature field marker.
+        assert!(tx_blob.contains("8114")); // Account field marker plus 20-byte length.
         assert_eq!(signed.tx_hash.as_ref().unwrap().len(), 64);
         assert_eq!(
             signed.tx_json["SigningPubKey"],
             wallet.public_key_hex().unwrap()
         );
         assert!(signed.tx_json.get("TxnSignature").is_some());
+    }
+
+    #[test]
+    fn xrpl_field_header_encoding_matches_extended_field_rules() {
+        let mut out = Vec::new();
+        write_field_header(&mut out, 1, 2);
+        assert_eq!(out, vec![0x12]);
+
+        out.clear();
+        write_field_header(&mut out, 2, 26);
+        assert_eq!(out, vec![0x20, 0x1a]);
+
+        out.clear();
+        write_field_header(&mut out, 17, 3);
+        assert_eq!(out, vec![0x03, 0x11]);
+
+        out.clear();
+        write_field_header(&mut out, 17, 26);
+        assert_eq!(out, vec![0x00, 0x11, 0x1a]);
+    }
+
+    #[test]
+    fn account_field_includes_account_id_length_prefix() {
+        let mut out = Vec::new();
+        write_account_field(&mut out, 1, &[0x11; 20]);
+
+        assert_eq!(out.len(), 22);
+        assert_eq!(out[0], 0x81);
+        assert_eq!(out[1], 0x14);
+        assert_eq!(&out[2..], &[0x11; 20]);
+    }
+
+    #[test]
+    fn signing_blob_excludes_txn_signature_and_final_blob_includes_it() {
+        let mnemonic = SeedManager::generate_mnemonic(DEFAULT_MNEMONIC_WORDS).unwrap();
+        let wallet = VaultedXrplWallet::from_mnemonic(&mnemonic, None).unwrap();
+        let account = wallet.classic_address().unwrap();
+        let tx = add_xrpl_signing_fields(
+            build_nftoken_mint_tx(&account, "ipfs://manifest", 0, None, None),
+            "12",
+            1,
+            100,
+        );
+        let signed = wallet.sign_xrpl_transaction_json(&tx).unwrap();
+        let signing_blob = serialize_supported_xrpl_tx(&signed.tx_json, false).unwrap();
+        let final_blob = serialize_supported_xrpl_tx(&signed.tx_json, true).unwrap();
+        let after_signing_pub_key = 3 + 5 + 5 + 6 + 6 + 9 + 1 + 1 + 33;
+
+        assert!(hex::encode_upper(&signing_blob).starts_with("120019"));
+        assert_eq!(
+            &signing_blob[after_signing_pub_key..after_signing_pub_key + 2],
+            &[0x70, 0x2d]
+        );
+        assert_eq!(final_blob[after_signing_pub_key], 0x74);
     }
 
     #[test]
