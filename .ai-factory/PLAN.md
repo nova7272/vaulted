@@ -54,6 +54,12 @@ Branch: current branch, no branch changes planned
 
 ## Tasks
 
+- [x] 1. Sanitize XRPL submit logging
+- [x] 2. Add command-level safe mint diagnostics
+- [x] 3. Preserve structured rejected-submit response to the UI
+- [x] 4. Improve XRPL error mapping
+- [x] 5. Verify allow-list compliance
+
 ### 1. Sanitize XRPL submit logging
 Deliverable:
 - In `crates/desktop-client/src/xrpl/client.rs`, keep `XrplClient::submit` logs limited to `engine_result`, `engine_result_message`, `tx_hash`, and accepted/rejected status.

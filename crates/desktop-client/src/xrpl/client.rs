@@ -270,41 +270,25 @@ impl XrplClient {
             .get("result")
             .ok_or_else(|| ClientError::Xrpl("No result".to_string()))?;
 
-        let engine_result = result["engine_result"].as_str().unwrap_or("").to_string();
-        let engine_result_message = result["engine_result_message"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
-        let tx_hash = result
-            .get("tx_json")
-            .and_then(|tx| tx.get("hash"))
-            .or_else(|| result.get("hash"))
-            .and_then(|h| h.as_str())
-            .unwrap_or("")
-            .to_string();
+        let submit_result = parse_submit_result(result);
 
-        if engine_result.starts_with("tes") {
+        if submit_result.engine_result.starts_with("tes") {
             tracing::info!(
-                engine_result = %engine_result,
-                engine_result_message = %engine_result_message,
-                tx_hash = %tx_hash,
+                engine_result = %submit_result.engine_result,
+                engine_result_message = %submit_result.engine_result_message,
+                tx_hash = %submit_result.tx_hash,
                 "XRPL submit accepted"
             );
         } else {
             tracing::warn!(
-                engine_result = %engine_result,
-                engine_result_message = %engine_result_message,
-                tx_hash = %tx_hash,
-                result = %result,
+                engine_result = %submit_result.engine_result,
+                engine_result_message = %submit_result.engine_result_message,
+                tx_hash = %submit_result.tx_hash,
                 "XRPL submit rejected"
             );
         }
 
-        Ok(SubmitResult {
-            engine_result,
-            engine_result_message,
-            tx_hash,
-        })
+        Ok(submit_result)
     }
 
     /// Returns current validated ledger index.
@@ -405,6 +389,27 @@ pub struct SubmitResult {
     pub tx_hash: String,
 }
 
+fn parse_submit_result(result: &Value) -> SubmitResult {
+    let engine_result = result["engine_result"].as_str().unwrap_or("").to_string();
+    let engine_result_message = result["engine_result_message"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    let tx_hash = result
+        .get("tx_json")
+        .and_then(|tx| tx.get("hash"))
+        .or_else(|| result.get("hash"))
+        .and_then(|h| h.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    SubmitResult {
+        engine_result,
+        engine_result_message,
+        tx_hash,
+    }
+}
+
 /// Информация о сервере
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerInfo {
@@ -483,5 +488,40 @@ mod tests {
             extract_minted_nftoken_id_from_tx_result(&result),
             Some("00080000ABC".to_string())
         );
+    }
+
+    #[test]
+    fn test_parse_submit_result_accepted_with_tx_json_hash() {
+        let result = json!({
+            "engine_result": "tesSUCCESS",
+            "engine_result_message": "The transaction was applied.",
+            "tx_json": {
+                "hash": "ABC123"
+            }
+        });
+
+        let parsed = parse_submit_result(&result);
+
+        assert_eq!(parsed.engine_result, "tesSUCCESS");
+        assert_eq!(parsed.engine_result_message, "The transaction was applied.");
+        assert_eq!(parsed.tx_hash, "ABC123");
+    }
+
+    #[test]
+    fn test_parse_submit_result_rejected_with_top_level_hash() {
+        let result = json!({
+            "engine_result": "tecINSUFF_RESERVE",
+            "engine_result_message": "Insufficient reserve to complete transaction.",
+            "hash": "DEF456"
+        });
+
+        let parsed = parse_submit_result(&result);
+
+        assert_eq!(parsed.engine_result, "tecINSUFF_RESERVE");
+        assert_eq!(
+            parsed.engine_result_message,
+            "Insufficient reserve to complete transaction."
+        );
+        assert_eq!(parsed.tx_hash, "DEF456");
     }
 }

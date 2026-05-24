@@ -138,6 +138,11 @@ const ERROR_MAP: ErrorMapping[] = [
         hint: 'Please check your internet connection.',
     },
     {
+        patterns: ['XRPL error: Request timeout', 'XRPL connection timed out'],
+        message: 'XRPL connection timed out.',
+        hint: 'The network did not answer in time. Try minting again.',
+    },
+    {
         patterns: ['timeout', 'Timeout', 'timed out'],
         message: 'Request timed out.',
         hint: 'The server took too long to respond. Please try again.',
@@ -155,6 +160,21 @@ const ERROR_MAP: ErrorMapping[] = [
         hint: 'Add testnet XRP to this address, then try minting again.',
     },
     {
+        patterns: ['tecINSUFF_RESERVE'],
+        message: 'Not enough XRP reserve.',
+        hint: 'Add more testnet XRP to this wallet, then try minting again.',
+    },
+    {
+        patterns: ['tefPAST_SEQ'],
+        message: 'Transaction sequence is stale.',
+        hint: 'Retry minting so Vaulted can build the transaction with a fresh sequence.',
+    },
+    {
+        patterns: ['terQUEUED'],
+        message: 'Transaction queued on XRPL.',
+        hint: 'Check the wallet status shortly before retrying.',
+    },
+    {
         patterns: ['Missing authorization', 'Cannot create vault for different wallet', 'JWT', 'Oracle token'],
         message: 'Vault access needs to be refreshed.',
         hint: 'Sign in with your Vaulted wallet again and retry the action.',
@@ -168,11 +188,6 @@ const ERROR_MAP: ErrorMapping[] = [
         patterns: ['XRPL error', 'xrpl error', 'Transaction failed'],
         message: 'Blockchain transaction failed.',
         hint: 'The XRPL network may be congested. Try again in a few moments.',
-    },
-    {
-        patterns: ['tefPAST_SEQ'],
-        message: 'Transaction was already submitted.',
-        hint: 'This can happen with slow connections. Check your wallet for the transaction.',
     },
     {
         patterns: ['Transaction validation timeout'],
