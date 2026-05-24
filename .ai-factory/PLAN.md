@@ -201,3 +201,12 @@ Run from `crates/desktop-client/ui`.
 - Do not fix the underlying NFTokenMint failure in this task unless the diagnostics change itself reveals a trivial typo that must be corrected to compile.
 - Do not alter seed policy, wallet tab, QR login, transfer/re-encryption, storage-node behavior, or Oracle mint authority.
 - Do not add external dependencies or fetch external skills.
+
+## Addendum: Safe XRPL Submit Transport Diagnostics
+
+Runtime evidence after commit `316cea7` showed submit starts but no `engine_result` is parsed. This addendum tracks the approved follow-up plan to capture pre-parse transport failures without logging raw request/response JSON, params, `tx_blob`, `tx_json`, seed, private keys, JWT, AES keys, plaintext files, recovery phrase, or mnemonic entropy.
+
+- [x] Add submit-only transport diagnostics with `request_id`, `method="submit"`, `phase`, `transport_error_kind`, safe `transport_error_message`, and `timeout` when applicable.
+- [x] Preserve accepted/rejected submit logs with `engine_result`, `engine_result_message`, `tx_hash`, and `accepted`.
+- [x] Add focused pure helper tests.
+- [x] Run required Rust and sensitive-log checks.
