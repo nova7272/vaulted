@@ -75,3 +75,16 @@ Vaulted is an encrypted file vault with local Vaulted seed identity, client-side
 - Use existing workspace commands and scripts before inventing new workflows.
 - Before planning or implementing product work, read `.ai-factory/VAULTED_AGENT_INSTRUCTIONS.md` together with `.ai-factory/DESCRIPTION.md`, `.ai-factory/ARCHITECTURE.md`, and `.ai-factory/rules/base.md`.
 - Follow the immediate task order from `.ai-factory/VAULTED_AGENT_INSTRUCTIONS.md` unless the user explicitly overrides it.
+
+## Autonomous Agent Mode
+
+When the user asks for autonomous work:
+
+- Work one logical task at a time.
+- Always read `.ai-factory/VAULTED_AGENT_INSTRUCTIONS.md` before choosing the next task.
+- Plan, implement, test, fix, and commit locally.
+- Do not run `git push` without explicit user approval.
+- Do not use external network, install dependencies, or fetch external skills without explicit approval.
+- Do not reset runtime state, log out, clear wallets, delete user data, or modify `.env` without explicit approval.
+- Stop if a task requires secrets, credentials, manual UI interaction, or XRPL/runtime evidence that is not available.
+- Never expose seed phrases, private keys, tx_blob, JWTs, AES keys, plaintext files, recovery phrases, or mnemonic entropy.
