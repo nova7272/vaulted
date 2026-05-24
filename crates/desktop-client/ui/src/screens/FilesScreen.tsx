@@ -671,6 +671,7 @@ export default function FilesScreen({onNavigate,searchQuery=''}:FilesScreenProps
 
                 // ===== GRID VIEW — 2-column horizontal cards =====
                 const isDeleted = nft.fileStatus === 'deleted'
+                const isUnavailable = nft.fileStatus === 'unavailable' || nft.fileStatus === 'metadata_unlinked'
                 const cleanName = name.replace(/\[[^\]]+\]/g,'').trim()
                 const hasExt = cleanName.includes('.') && cleanName.lastIndexOf('.') > 0
                 const fileExt = hasExt ? cleanName.split('.').pop()?.toLowerCase() || '' : ''
@@ -730,6 +731,7 @@ export default function FilesScreen({onNavigate,searchQuery=''}:FilesScreenProps
                             <span style={{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{baseName}</span>
                             {fileExt && !isSecure && <span className="v-ext" style={{fontSize:17}}>.{fileExt}</span>}
                             {isDeleted && <span className="v-badge err" style={{fontSize:11}}>DELETED</span>}
+                            {isUnavailable && <span className="v-badge warn" style={{fontSize:11}}>UNAVAILABLE</span>}
                           </div>
 
                           {mintDate && <div style={{fontSize:15,color:'var(--fg-2)'}}>{mintDate}</div>}
@@ -743,6 +745,11 @@ export default function FilesScreen({onNavigate,searchQuery=''}:FilesScreenProps
                               <span className="v-file-status warn" style={{fontSize:15}}>
                                   <span className="dot"/>
                                   Vaulted keys: different owner
+                                </span>
+                          ) : isUnavailable ? (
+                              <span className="v-file-status warn" style={{fontSize:15}}>
+                                  <span className="dot"/>
+                                  Oracle link unavailable · retry
                                 </span>
                           ) : (
                               <span className="v-file-status" style={{fontSize:15}}>
@@ -771,13 +778,14 @@ export default function FilesScreen({onNavigate,searchQuery=''}:FilesScreenProps
                                 ) : (
                                     <button className="v-btn" style={{flex:1,height:50,justifyContent:'center',fontSize:15,gap:7}}
                                             onClick={()=>download(nft)}
-                                            disabled={downloading===nft.nftTokenId||!!nft.preKeyMismatch}>
+                                            disabled={downloading===nft.nftTokenId||!!nft.preKeyMismatch||isUnavailable}>
                                       <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                                       {downloading===nft.nftTokenId?'...':'Download'}
                                     </button>
                                 )}
                                 <button className="v-btn" style={{flex:1,height:50,justifyContent:'center',fontSize:15,gap:7}}
-                                        onClick={()=>openShareModal(nft)}>
+                                        onClick={()=>openShareModal(nft)}
+                                        disabled={isUnavailable}>
                                   <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M4 12v7a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-7"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>
                                   Share
                                 </button>

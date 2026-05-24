@@ -2276,13 +2276,24 @@ pub async fn list_my_nfts(state: State<'_, Arc<AppState>>) -> Result<Vec<NftInfo
             let client = client.clone();
             async move {
                 match client.get(&url).send().await {
-                    Ok(resp) if resp.status().is_success() => resp
-                        .json::<serde_json::Value>()
-                        .await
-                        .ok()
-                        .map(|data| ("available".to_string(), data)),
-                    Ok(resp) if resp.status().as_u16() == 404 => {
-                        Some(("deleted".to_string(), serde_json::Value::Null))
+                    Ok(resp) => match file_access_status_from_http_status(resp.status()) {
+                        Some("available") => resp
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()
+                            .map(|data| ("available".to_string(), data)),
+                        Some(status_enum) => {
+                            tracing::info!(
+                                nft_token_id = %nft.nft_token_id,
+                                uri_len = nft.uri.len(),
+                                http_status = resp.status().as_u16(),
+                                lookup_key_type = "nft_token_id",
+                                status_enum,
+                                "On-chain Vaulted NFT has no Oracle file access record yet"
+                            );
+                            Some((status_enum.to_string(), serde_json::Value::Null))
+                        },
+                        None => None,
                     },
                     _ => None,
                 }
@@ -2322,9 +2333,9 @@ pub async fn list_my_nfts(state: State<'_, Arc<AppState>>) -> Result<Vec<NftInfo
                     nft.filename = Some(format!("Vault #{}", &nft.nft_token_id[..8]));
                 }
             },
-            Some((status, _)) if status == "deleted" => {
-                nft.file_status = "deleted".to_string();
-                nft.filename = Some(format!("Deleted file #{}", &nft.nft_token_id[..8]));
+            Some((status, _)) if status == "unavailable" => {
+                nft.file_status = "unavailable".to_string();
+                nft.filename = Some(format!("Vault #{}", &nft.nft_token_id[..8]));
             },
             _ => {
                 nft.file_status = "unknown".to_string();
@@ -2347,7 +2358,50 @@ pub struct NftInfo {
     pub uri: String,
     pub filename: Option<String>,
     pub created_at: Option<String>,
-    pub file_status: String, // "available" | "deleted" | "unknown"
+    pub file_status: String, // "available" | "unavailable" | "deleted" | "unknown"
+}
+
+fn file_access_status_from_http_status(status: reqwest::StatusCode) -> Option<&'static str> {
+    if status.is_success() {
+        Some("available")
+    } else if status == reqwest::StatusCode::NOT_FOUND {
+        Some("unavailable")
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::file_access_status_from_http_status;
+
+    #[test]
+    fn file_access_404_maps_to_unavailable_not_deleted() {
+        assert_eq!(
+            file_access_status_from_http_status(reqwest::StatusCode::NOT_FOUND),
+            Some("unavailable")
+        );
+    }
+
+    #[test]
+    fn file_access_success_maps_to_available() {
+        assert_eq!(
+            file_access_status_from_http_status(reqwest::StatusCode::OK),
+            Some("available")
+        );
+    }
+
+    #[test]
+    fn file_access_transient_failures_do_not_claim_deleted() {
+        assert_eq!(
+            file_access_status_from_http_status(reqwest::StatusCode::INTERNAL_SERVER_ERROR),
+            None
+        );
+        assert_ne!(
+            file_access_status_from_http_status(reqwest::StatusCode::NOT_FOUND),
+            Some("deleted")
+        );
+    }
 }
 
 #[tauri::command]
