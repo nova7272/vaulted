@@ -327,6 +327,14 @@ impl XrplClient {
 
     /// Отправляет подписанную транзакцию
     pub async fn submit(&self, tx_blob: &str) -> Result<SubmitResult> {
+        tracing::info!(
+            method = "submit",
+            phase = "prepared",
+            tx_blob_len = tx_blob.len(),
+            tx_blob_is_hex = is_xrpl_tx_blob_hex(tx_blob),
+            "XRPL submit payload diagnostics"
+        );
+
         let (request_id, response) = self
             .request_with_id(
                 "submit",
@@ -508,6 +516,12 @@ fn top_level_safe_field(response: &Value, field: &str) -> Option<String> {
     };
 
     Some(safe_transport_error_message(&text))
+}
+
+pub(crate) fn is_xrpl_tx_blob_hex(tx_blob: &str) -> bool {
+    !tx_blob.is_empty()
+        && tx_blob.len() % 2 == 0
+        && tx_blob.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn parse_submit_result(result: &Value) -> SubmitResult {
@@ -757,6 +771,16 @@ mod tests {
         assert!(!combined.contains("SECRET_TX_JSON"));
         assert!(!combined.contains("tx_blob"));
         assert!(!combined.contains("tx_json"));
+    }
+
+    #[test]
+    fn test_is_xrpl_tx_blob_hex() {
+        assert!(is_xrpl_tx_blob_hex("120019"));
+        assert!(is_xrpl_tx_blob_hex("abcdef"));
+        assert!(is_xrpl_tx_blob_hex("ABCDEF"));
+        assert!(!is_xrpl_tx_blob_hex(""));
+        assert!(!is_xrpl_tx_blob_hex("12001"));
+        assert!(!is_xrpl_tx_blob_hex("12001Z"));
     }
 
     #[test]
