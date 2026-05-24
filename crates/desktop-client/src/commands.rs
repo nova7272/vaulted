@@ -28,6 +28,7 @@ use crate::oracle::api::{
     VaultFragment, VaultManifest, VaultObjectResponse,
 };
 use crate::state::AppState;
+use crate::xrpl::client::is_xrpl_tx_blob_hex;
 use crate::xrpl::XrplClient;
 
 // ==================== Vaulted Identity Commands ====================
@@ -457,6 +458,15 @@ async fn sign_vaulted_nft_mint_transaction_inner(
     };
 
     let tx = add_xrpl_signing_fields(tx, fee_drops, sequence, last_ledger_sequence);
+    tracing::info!(
+        transaction_type = "NFTokenMint",
+        metadata_uri_len = request.metadata_uri.len(),
+        account = %account,
+        sequence,
+        fee = %tx.get("Fee").and_then(|value| value.as_str()).unwrap_or(""),
+        last_ledger_sequence,
+        "Prepared Vaulted NFTokenMint signing fields"
+    );
     wallet.sign_xrpl_transaction_json(&tx).map_err(Into::into)
 }
 
@@ -477,6 +487,14 @@ pub async fn mint_vaulted_nft_locally(
                 "Local signing did not produce a signed XRPL transaction payload".to_string(),
             )
         })?;
+        tracing::info!(
+            transaction_type = "NFTokenMint",
+            metadata_uri_len,
+            account = %mint_account,
+            tx_blob_len = tx_blob.len(),
+            tx_blob_is_hex = is_xrpl_tx_blob_hex(&tx_blob),
+            "Prepared locally signed Vaulted NFTokenMint submit payload"
+        );
         Some(
             submit_vaulted_xrpl_tx_blob_inner(
                 state.inner(),
@@ -516,7 +534,13 @@ async fn submit_vaulted_xrpl_tx_blob_inner(
 ) -> Result<VaultedSubmitResponse> {
     let mut client = XrplClient::new(&state.config.xrpl_node_url);
     client.connect().await?;
-    tracing::info!("Submitting locally signed Vaulted NFTokenMint transaction");
+    tracing::info!(
+        method = "submit",
+        phase = "prepared",
+        tx_blob_len = tx_blob.len(),
+        tx_blob_is_hex = is_xrpl_tx_blob_hex(&tx_blob),
+        "Submitting locally signed Vaulted NFTokenMint transaction"
+    );
     let result = client.submit(&tx_blob).await?;
     let accepted = result.engine_result.starts_with("tes");
     let tx_hash = result.tx_hash.clone();

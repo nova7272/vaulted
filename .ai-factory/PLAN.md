@@ -218,3 +218,11 @@ Runtime evidence after commit `dbae0bc` showed the submit path receives an XRPL 
 - [x] Extract only top-level safe XRPL error response fields: `error`, `error_code`, `error_message`, and `status`.
 - [x] Include those fields in the submit-specific `xrpl_error_response` log without raw JSON request/response data, params, `tx_blob`, or `tx_json`.
 - [x] Add focused tests for present fields, missing fields, and ignored nested forbidden fields.
+
+## Addendum: Diagnose invalidTransaction Before Engine Result
+
+Runtime evidence showed XRPL returns `invalidTransaction` before `engine_result`, with no NFTokenMint in `account_tx`.
+
+- [x] Inspect submit request format and local NFTokenMint signing/serialization path.
+- [x] Add safe structural diagnostics for transaction type, metadata URI length, account, sequence, fee, last ledger sequence, transaction blob length, and hex validity.
+- [x] Add focused tests for transaction blob hex validation.
