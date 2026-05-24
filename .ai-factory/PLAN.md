@@ -243,3 +243,11 @@ Serializer inspection found a narrow AccountID encoding defect: the Account fiel
 
 - [x] Add the AccountID variable-length prefix in the supported XRPL serializer.
 - [x] Add regression tests for XRPL field header encoding, AccountID length-prefix encoding, and NFTokenMint binary blob structure.
+
+## Addendum: Verify NFTokenMint URI, Signing, And Field Order
+
+Runtime evidence still shows XRPL rejects the locally signed `NFTokenMint` as `invalidTransaction` before producing `engine_result`.
+
+- [x] Add deterministic tests for 111-byte URI hex storage and Blob field encoding using only lengths, booleans, and field markers.
+- [x] Add deterministic internal verification for XRPL signing preimage and ECDSA signature without logging digest, public key, signature, transaction JSON, or transaction blob.
+- [x] Add deterministic canonical field marker offset checks for the signed `NFTokenMint` serialization.
