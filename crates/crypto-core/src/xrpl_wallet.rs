@@ -554,6 +554,121 @@ mod tests {
     }
 
     #[test]
+    fn variable_length_encoding_matches_xrpl_boundaries() {
+        let cases = [
+            (20, vec![0x14]),
+            (33, vec![0x21]),
+            (70, vec![0x46]),
+            (111, vec![0x6f]),
+            (192, vec![0xc0]),
+            (193, vec![0xc1, 0x00]),
+            (194, vec![0xc1, 0x01]),
+            (12_480, vec![0xf0, 0xff]),
+            (12_481, vec![0xf1, 0x00, 0x00]),
+        ];
+
+        for (len, expected) in cases {
+            let mut out = Vec::new();
+            write_variable_length(&mut out, len);
+            assert_eq!(out, expected);
+        }
+    }
+
+    #[test]
+    fn nftoken_mint_field_helpers_emit_expected_bytes() {
+        let mut out = Vec::new();
+        write_u16_field(&mut out, 2, NF_TOKEN_MINT_TRANSACTION_TYPE);
+        assert_eq!(out, vec![0x12, 0x00, 0x19]);
+
+        out.clear();
+        write_u32_field(&mut out, 2, TF_TRANSFERABLE);
+        assert_eq!(out, vec![0x22, 0x00, 0x00, 0x00, 0x08]);
+
+        out.clear();
+        write_u32_field(&mut out, 4, 1);
+        assert_eq!(out, vec![0x24, 0x00, 0x00, 0x00, 0x01]);
+
+        out.clear();
+        write_u32_field(&mut out, 26, 0);
+        assert_eq!(out, vec![0x20, 0x1a, 0x00, 0x00, 0x00, 0x00]);
+
+        out.clear();
+        write_u32_field(&mut out, 27, 100);
+        assert_eq!(out, vec![0x20, 0x1b, 0x00, 0x00, 0x00, 0x64]);
+
+        out.clear();
+        write_xrp_amount_field(&mut out, 8, 10);
+        assert_eq!(
+            out,
+            vec![0x68, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0a]
+        );
+    }
+
+    #[test]
+    fn nftoken_mint_blob_helpers_emit_expected_headers_and_lengths() {
+        let mut out = Vec::new();
+        write_blob_field(&mut out, 3, &[0x02; 33]);
+        assert_eq!(out.len(), 35);
+        assert_eq!(&out[..2], &[0x73, 0x21]);
+
+        out.clear();
+        write_blob_field(&mut out, 4, &[0x30; 70]);
+        assert_eq!(out.len(), 72);
+        assert_eq!(&out[..2], &[0x74, 0x46]);
+
+        out.clear();
+        write_blob_field(&mut out, 45, &[0x55; 111]);
+        assert_eq!(out.len(), 114);
+        assert_eq!(&out[..3], &[0x70, 0x2d, 0x6f]);
+    }
+
+    #[test]
+    fn nftoken_mint_serialization_uses_canonical_field_order() {
+        let mnemonic = SeedManager::generate_mnemonic(DEFAULT_MNEMONIC_WORDS).unwrap();
+        let wallet = VaultedXrplWallet::from_mnemonic(&mnemonic, None).unwrap();
+        let account = wallet.classic_address().unwrap();
+        let tx = add_xrpl_signing_fields(
+            build_nftoken_mint_tx(&account, "ipfs://manifest", 0, None, None),
+            "12",
+            1,
+            100,
+        );
+        let signed = wallet.sign_xrpl_transaction_json(&tx).unwrap();
+        let final_blob = serialize_supported_xrpl_tx(&signed.tx_json, true).unwrap();
+
+        assert!(final_blob.starts_with(&[0x12, 0x00, 0x19]));
+        assert!(matches_at(&final_blob, 3, &[0x22, 0x00, 0x00, 0x00, 0x08]));
+        assert!(matches_at(&final_blob, 8, &[0x24, 0x00, 0x00, 0x00, 0x01]));
+        assert!(matches_at(
+            &final_blob,
+            13,
+            &[0x20, 0x1a, 0x00, 0x00, 0x00, 0x00]
+        ));
+        assert!(matches_at(
+            &final_blob,
+            19,
+            &[0x20, 0x1b, 0x00, 0x00, 0x00, 0x64]
+        ));
+        assert!(matches_at(
+            &final_blob,
+            25,
+            &[0x68, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0c]
+        ));
+        assert!(matches_at(&final_blob, 34, &[0x73, 0x21]));
+
+        let signature_offset = 34 + 2 + 33;
+        assert!(matches_at(&final_blob, signature_offset, &[0x74]));
+        let signature_len = final_blob[signature_offset + 1] as usize;
+        let uri_offset = signature_offset + 2 + signature_len;
+        assert!(matches_at(&final_blob, uri_offset, &[0x70, 0x2d]));
+        assert_eq!(final_blob[uri_offset + 2], "ipfs://manifest".len() as u8);
+
+        let account_offset = uri_offset + 3 + "ipfs://manifest".len();
+        assert!(matches_at(&final_blob, account_offset, &[0x81, 0x14]));
+        assert_eq!(final_blob.len(), account_offset + 22);
+    }
+
+    #[test]
     fn signing_blob_excludes_txn_signature_and_final_blob_includes_it() {
         let mnemonic = SeedManager::generate_mnemonic(DEFAULT_MNEMONIC_WORDS).unwrap();
         let wallet = VaultedXrplWallet::from_mnemonic(&mnemonic, None).unwrap();
@@ -590,5 +705,11 @@ mod tests {
         );
         let tx = add_xrpl_signing_fields(tx, "12", 1, 100);
         assert!(wallet.sign_xrpl_transaction_json(&tx).is_err());
+    }
+
+    fn matches_at(bytes: &[u8], offset: usize, expected: &[u8]) -> bool {
+        bytes
+            .get(offset..offset + expected.len())
+            .is_some_and(|actual| actual == expected)
     }
 }

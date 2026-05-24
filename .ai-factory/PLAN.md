@@ -219,6 +219,16 @@ Runtime evidence after commit `dbae0bc` showed the submit path receives an XRPL 
 - [x] Include those fields in the submit-specific `xrpl_error_response` log without raw JSON request/response data, params, `tx_blob`, or `tx_json`.
 - [x] Add focused tests for present fields, missing fields, and ignored nested forbidden fields.
 
+## Addendum: Inspect Remaining NFTokenMint Binary Serialization
+
+Runtime evidence after commit `90a8d70` showed AccountID serialization was fixed, but XRPL still rejects the locally signed `NFTokenMint` before producing `engine_result`.
+
+- [x] Inspect remaining `NFTokenMint` binary serialization helpers in `crates/crypto-core/src/xrpl_wallet.rs`.
+- [x] Verify field headers for `URI`, `SigningPubKey`, `TxnSignature`, `NFTokenTaxon`, `LastLedgerSequence`, `Fee`, `Flags`, `Sequence`, and `Account`.
+- [x] Verify canonical field ordering by type code then field code.
+- [x] Verify variable-length encoding for 20-byte AccountID, 33-byte public key, 70-byte DER fixture, and 111-byte URI fixture.
+- [x] Add deterministic helper tests for field bytes without logging signed blobs or secret material.
+
 ## Addendum: Diagnose invalidTransaction Before Engine Result
 
 Runtime evidence showed XRPL returns `invalidTransaction` before `engine_result`, with no NFTokenMint in `account_tx`.
