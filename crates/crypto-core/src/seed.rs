@@ -11,8 +11,6 @@ use crate::{CryptoError, Result};
 
 /// Default Vaulted mnemonic length for standard UX.
 pub const DEFAULT_MNEMONIC_WORDS: usize = 12;
-/// Advanced high-security Vaulted mnemonic length.
-pub const ADVANCED_MNEMONIC_WORDS: usize = 24;
 /// Shortest supported Vaulted mnemonic length.  Never use fewer than 12 words.
 pub const MIN_MNEMONIC_WORDS: usize = 12;
 
@@ -20,14 +18,13 @@ pub const MIN_MNEMONIC_WORDS: usize = 12;
 pub struct SeedManager;
 
 impl SeedManager {
-    /// Generates a new BIP-39 mnemonic. Supported values are 12 or 24 words.
+    /// Generates a new BIP-39 mnemonic. Vaulted MVP supports exactly 12 words.
     pub fn generate_mnemonic(word_count: usize) -> Result<String> {
         let entropy_len = match word_count {
             12 => 16,
-            24 => 32,
             _ => {
                 return Err(CryptoError::InvalidData(
-                    "Vaulted mnemonics must be 12 or 24 words".to_string(),
+                    "Vaulted recovery phrase must be exactly 12 words".to_string(),
                 ))
             },
         };
@@ -43,9 +40,9 @@ impl SeedManager {
     /// Validates a BIP-39 mnemonic without returning secret seed material.
     pub fn validate_mnemonic(mnemonic: &str) -> Result<()> {
         let word_count = mnemonic.split_whitespace().count();
-        if word_count != DEFAULT_MNEMONIC_WORDS && word_count != ADVANCED_MNEMONIC_WORDS {
+        if word_count != DEFAULT_MNEMONIC_WORDS {
             return Err(CryptoError::InvalidData(
-                "Vaulted recovery phrase must be 12 or 24 words".to_string(),
+                "Vaulted recovery phrase must be exactly 12 words".to_string(),
             ));
         }
         Mnemonic::parse_in_normalized(Language::English, mnemonic)
@@ -74,15 +71,23 @@ mod tests {
     }
 
     #[test]
-    fn supports_24_word_advanced_mnemonic_policy() {
-        let mnemonic = SeedManager::generate_mnemonic(ADVANCED_MNEMONIC_WORDS).unwrap();
-        assert_eq!(mnemonic.split_whitespace().count(), ADVANCED_MNEMONIC_WORDS);
-        SeedManager::validate_mnemonic(&mnemonic).unwrap();
+    fn rejects_24_word_mnemonic_generation_under_mvp_policy() {
+        let err = SeedManager::generate_mnemonic(24).unwrap_err();
+        assert!(err.to_string().contains("exactly 12 words"));
     }
 
     #[test]
-    fn rejects_six_word_mnemonic() {
-        let err = SeedManager::validate_mnemonic("one two three four five six").unwrap_err();
-        assert!(err.to_string().contains("12 or 24"));
+    fn rejects_non_12_word_mnemonic_restore_policy() {
+        for phrase in [repeated_words(6), repeated_words(18), repeated_words(24)] {
+            let err = SeedManager::validate_mnemonic(&phrase).unwrap_err();
+            assert!(err.to_string().contains("exactly 12 words"));
+        }
+    }
+
+    fn repeated_words(count: usize) -> String {
+        std::iter::repeat("abandon")
+            .take(count)
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 }

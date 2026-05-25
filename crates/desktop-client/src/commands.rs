@@ -58,7 +58,7 @@ pub async fn create_vaulted_wallet(
     word_count: Option<usize>,
     passphrase: Option<String>,
 ) -> Result<VaultedIdentityResponse> {
-    let mnemonic = SeedManager::generate_mnemonic(word_count.unwrap_or(DEFAULT_MNEMONIC_WORDS))?;
+    let mnemonic = generate_create_wallet_mnemonic(word_count)?;
     let identity = state
         .init_vaulted_identity_from_mnemonic(&mnemonic, passphrase.as_deref())
         .await?;
@@ -105,6 +105,20 @@ pub async fn restore_vaulted_wallet(
 #[tauri::command(rename_all = "camelCase")]
 pub async fn validate_vaulted_seed(mnemonic: String) -> Result<bool> {
     Ok(SeedManager::validate_mnemonic(&mnemonic).is_ok())
+}
+
+fn validate_create_wallet_word_count(word_count: Option<usize>) -> Result<usize> {
+    match word_count {
+        None | Some(DEFAULT_MNEMONIC_WORDS) => Ok(DEFAULT_MNEMONIC_WORDS),
+        Some(_) => Err(ClientError::Validation(
+            "Vaulted recovery phrase must be exactly 12 words".to_string(),
+        )),
+    }
+}
+
+fn generate_create_wallet_mnemonic(word_count: Option<usize>) -> Result<String> {
+    SeedManager::generate_mnemonic(validate_create_wallet_word_count(word_count)?)
+        .map_err(ClientError::from)
 }
 
 /// Returns whether the seed-based Vaulted wallet is currently unlocked.
@@ -2537,7 +2551,11 @@ fn file_access_status_from_http_status(status: reqwest::StatusCode) -> Option<&'
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_recoverable_mint_status, file_access_status_from_http_status};
+    use super::{
+        ensure_recoverable_mint_status, file_access_status_from_http_status,
+        generate_create_wallet_mnemonic, validate_create_wallet_word_count,
+    };
+    use xrpl_vault_crypto_core::{SeedManager, DEFAULT_MNEMONIC_WORDS};
 
     #[test]
     fn file_access_404_maps_to_unavailable_not_deleted() {
@@ -2579,6 +2597,23 @@ mod tests {
         assert!(err
             .to_string()
             .contains("Vault mint recovery is not available for status burned"));
+    }
+
+    #[test]
+    fn create_wallet_mnemonic_generation_returns_12_words() {
+        let mnemonic = generate_create_wallet_mnemonic(None).unwrap();
+        assert_eq!(mnemonic.split_whitespace().count(), DEFAULT_MNEMONIC_WORDS);
+        SeedManager::validate_mnemonic(&mnemonic).unwrap();
+    }
+
+    #[test]
+    fn create_wallet_word_count_rejects_non_12_word_requests() {
+        assert_eq!(
+            validate_create_wallet_word_count(Some(DEFAULT_MNEMONIC_WORDS)).unwrap(),
+            DEFAULT_MNEMONIC_WORDS
+        );
+        assert!(validate_create_wallet_word_count(None).is_ok());
+        assert!(validate_create_wallet_word_count(Some(24)).is_err());
     }
 }
 
