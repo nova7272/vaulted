@@ -177,6 +177,10 @@ fn api_v1_routes(auth_rate_limiter: RateLimiter) -> Router<AppState> {
             get(vault_objects::grant_file_access),
         )
         // Vault - protected (HIGH-01: moved from public — exposes filenames)
+        .route(
+            "/vault/:vault_id/mint-recovery",
+            get(vault::get_vault_mint_recovery),
+        )
         .route("/vault/:vault_id", get(vault::get_vault))
         // Transfer lookups - protected (HIGH-01: moved from public — exposes from/to addresses)
         .route(

@@ -1,208 +1,168 @@
-# Plan: Runtime Diagnose And Relink Minted Vault Objects
+# Plan: No-Remint Recovery For Pending Mint Finalization After Restart
 Created: 2026-05-25
 Mode: fast
 Branch: current branch, no branch changes planned
 
 ## Settings
-- **Testing:** yes, only after evidence points to a minimal code or repair path
+- **Testing:** yes, focused Oracle/desktop/UI checks
 - **Logging:** diagnostic allow-list only
 - **Docs:** no docs checkpoint for this task
-- **Security:** preserve all Vaulted secret boundaries
+- **Security:** preserve all Vaulted secret boundaries; do not remint or reset runtime state
 
 ## Scope
-- Diagnose why existing minted NFTs still return 404 from `/api/v1/vault-objects/by-nft/{NFTokenID}` after commit `d92c579`.
-- Diagnose why the current `Mint vault NFT` button fails after `Encrypted vault registered`.
-- Create a minimal idempotent relink/recovery path for already minted NFTs only if `vault_id` and manifest metadata can be recovered from Oracle DB or safe local runtime state.
-- Do not remint old NFTs.
+- Recover a successful on-chain XRPL mint whose Oracle finalization did not run before app restart.
+- Do not remint.
+- Do not touch XRPL signing/serialization, stale-sequence or `tefPAST_SEQ` retry logic, encryption/decryption, wallet/key derivation, or plaintext handling.
+- Keep recovery idempotent and safe to retry.
 
-## Known Runtime Evidence
-- Commit `d92c579 Link vault objects after local mint finalization` is applied.
-- Services started.
-- Already minted NFTs still return 404 from `/api/v1/vault-objects/by-nft/{NFTokenID}`.
-- Upload screen can create/register encrypted vault metadata and shows `Encrypted vault registered`.
-- Clicking `Mint vault NFT` currently ends with generic UI error: `Something went wrong. Please try again.`
-- Metadata URI example:
-  - `http://127.0.0.1:3000/nft/sha256:6329e957301d68c7b4dac47f8a09ee7e61d3385a38d83fd615abc67e8f1b2403/metadata.json`
+## Known Pending Mint
+- `vault_id=b524fe14-4976-448f-a3c6-1f43c249a5ff`
+- `tx_hash=2E084681288AEC19132D70F2B970AE78089D6A66B27E25EC95683F5BF7ECBB7F`
+- `NFTokenID=00080000DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4FAEB4C857010D42BC`
+- `metadata_hash=sha256:6329e957301d68c7b4dac47f8a09ee7e61d3385a38d83fd615abc67e8f1b2403`
+- `metadata_uri=http://127.0.0.1:3000/nft/sha256:6329e957301d68c7b4dac47f8a09ee7e61d3385a38d83fd615abc67e8f1b2403/metadata.json`
+- Oracle `nft_metadata` row exists with `status=pending_claim`.
+- `vault_objects` has no row for this metadata hash or NFTokenID.
+- `/api/v1/vault-objects/by-nft/{NFTokenID}` still returns 404.
 
-## Known Minted NFTs
-- `NFTokenID=00080000DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4F80E92655010D42BA`
-  - `tx_hash=1121120F413DB9B4BD4284226754D8436C9F3D17BECCCE89304F3840B0B98B7D`
-- `NFTokenID=00080000DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4F97CEF756010D42BB`
-  - `tx_hash=887322BE984053DC3D2BBEA2F8CB976D699763CD6C98D97D9E408A275E5BD138`
+## Findings From Code Inspection
+- The `Finalize existing mint` button did not appear after restart because [UploadScreen.tsx](/home/riggle/vaulted/crates/desktop-client/ui/src/screens/UploadScreen.tsx) stores `result`, `mintResult`, and `nftPreview` only in React memory. There is no `localStorage`, `sessionStorage`, or desktop-side pending mint persistence for the accepted `tx_hash`.
+- The command added in `e7248df`, `finalize_pending_vault_mint`, already does the correct no-remint core operation when supplied with `vault_object_id`, `manifest_uri`, `manifest_hash`, and `tx_hash`.
+- `register_minted_vault_object_inner` already reuses Oracle `finalize_vault_mint`, then the idempotent `/vault-objects/register` path.
+- Oracle `finalize_vault_mint` already updates `nft_metadata`, `file_replicas`, and upserts `vault_objects` in one transaction.
+- Current Oracle `GET /api/v1/vault/{id}` returns status and pending token information, but the desktop client type only exposes `vault_id`, `nft_token_id`, `status`, and `offer_index`; it does not currently give the desktop a typed `metadata_hash` and public `metadata_uri` recovery payload.
+- There is no current authenticated API that lists recoverable `pending_claim` rows for the owner.
 
-## Code Findings
-- `finalize_vault_mint` now requires `owner_identity_id`, checks it is an active `vaulted_identities.id`, then upserts `vault_objects` inside the same DB transaction at [vault.rs](/home/riggle/vaulted/crates/oracle/src/api/vault.rs:501).
-- Existing old minted NFTs will not be repaired by `d92c579` unless finalize/register is re-run or a safe relink repair updates `vault_objects`.
-- `register_minted_vault_object` sends `owner_identity_id: identity.identity_id_hex()` to finalize, then calls `/vault-objects/register` as an idempotent follow-up at [commands.rs](/home/riggle/vaulted/crates/desktop-client/src/commands.rs:598).
-- The current mint button calls `publish_vaulted_nft_metadata`, `mint_vaulted_nft_locally`, then `register_minted_vault_object`; failures are collapsed through `formatError` at [UploadScreen.tsx](/home/riggle/vaulted/crates/desktop-client/ui/src/screens/UploadScreen.tsx:241).
-- `formatError` returns `Something went wrong. Please try again.` when the cleaned error is long or contains stack-like text at [formatError.ts](/home/riggle/vaulted/crates/desktop-client/ui/src/utils/formatError.ts:206). Oracle JSON error bodies can plausibly be hidden here.
-- The Oracle client currently returns `Oracle API error: HTTP <status>: <raw JSON body>` for failed responses at [api.rs](/home/riggle/vaulted/crates/desktop-client/src/oracle/api.rs:136), so UI generic text does not prove the backend error is generic.
+## Questions Answered
+- **Why did the recovery button not appear after restart?** The button is conditional on in-memory `mintResult?.accepted && mintResult.txHash && !mintResult.nftTokenId` plus `result`; all of that is lost on app restart.
+- **Is there persisted UI/local state for successful `tx_hash`?** No evidence in `UploadScreen.tsx`; the accepted submit result is not persisted.
+- **Should `tx_hash` be stored when submit succeeds?** Yes for future robustness, but the smallest current recovery should not rely on state that was never persisted for this already-minted token.
+- **Can the app discover `pending_claim` rows with metadata URI/hash and ask user for `tx_hash`?** Not with current typed desktop APIs. Oracle can read the row, but the API surface should expose only safe recovery fields.
+- **Is a manual repair command enough for now?** A manual UI action with `vault_id` and `tx_hash` is the smallest safe user-accessible fix. A raw Tauri command alone is not enough after restart because there is no easy supported way for the user to invoke it.
+- **What is the smallest safe fix?** Add a narrow recovery command that resolves safe pending mint fields by `vault_id`, extracts the real `NFTokenID` from the validated XRPL `tx_hash`, and reuses `register_minted_vault_object_inner`; expose it via a small Upload-screen recovery action.
 
-## Questions To Answer With Runtime Evidence
-- Are the old NFT `tx_hash` values present anywhere in Oracle DB?
-- Can each known `NFTokenID` be mapped to a `vault_id` or `manifest_hash` from existing DB/local state?
-- Does `nft_metadata` contain the real `nft_token_id` while `vault_objects` lacks it?
-- Does `vault_objects` contain rows keyed by pending upload key or rows with missing `nft_token_id`?
-- Is `owner_identity_id` available and active when `finalize_vault_mint` is called?
-- What exact safe error is returned by Oracle/desktop for the current mint failure?
-- Does the UI hide the real error behind generic `Something went wrong`?
-- Is there already a safe command/API path to retry finalize/register without remint?
-- If not, what is the smallest safe repair path?
+## Preferred Design
+- Add an authenticated Oracle recovery lookup for a single vault id, or extend `GET /api/v1/vault/{id}` with optional safe fields:
+  - `vault_id`
+  - `status`
+  - `metadata_hash`
+  - `metadata_uri`
+  - optional `vault_object_nft_token_id`
+  - optional `owner_identity_id`
+- Add a desktop command such as `recover_pending_vault_mint(vault_id, tx_hash)`:
+  - Loads safe recovery fields from Oracle.
+  - Requires `status` to be `pending_claim` or treats already `active` plus matching by-NFT link as idempotent success.
+  - Calls `extract_minted_nftoken_id(tx_hash)`.
+  - Calls existing `register_minted_vault_object_inner` with recovered `manifest_hash` and `manifest_uri`.
+  - Does not mint, sign, submit, decrypt, reset state, or touch file plaintext.
+- Add a minimal Upload-screen recovery action:
+  - Inputs: `vault_id`, `tx_hash`.
+  - Button: `Finalize previous mint`.
+  - Result: shows the recovered `NFTokenID` and returns the app to the claimed/linked state.
 
 ## Tasks
 
-- [x] Runtime fix implemented: post-submit NFTokenID extraction now polls the validated XRPL `tx` response and directly supports `meta.nftoken_id` / `meta.NFTokenID` before falling back to existing affected-node parsing.
-  - Changed files:
-    - [crates/desktop-client/src/xrpl/client.rs](/home/riggle/vaulted/crates/desktop-client/src/xrpl/client.rs)
-  - Verification: desktop tests cover direct validated `meta.nftoken_id`, uppercase `NFTokenID`, existing `CreatedNode`, existing `ModifiedNode`, and missing metadata fallback.
-  - Logging requirements: extraction diagnostics use only allowed fields.
+- [x] 1. Add a safe Oracle recovery lookup for one pending vault
+  - Files likely to change:
+    - [crates/oracle/src/api/vault.rs](/home/riggle/vaulted/crates/oracle/src/api/vault.rs)
+    - [crates/desktop-client/src/oracle/api.rs](/home/riggle/vaulted/crates/desktop-client/src/oracle/api.rs)
+  - Deliverable: desktop can request safe recovery fields for a specific `vault_id` owned by the authenticated wallet.
+  - Expected behavior: response includes `vault_id`, `status`, `metadata_hash`, and `metadata_uri` for `pending_claim` rows without returning encrypted manifest, encrypted keys, raw file metadata, JWTs, or plaintext.
+  - Logging requirements: if logs are added, only log `vault_id`, `metadata_hash`, metadata URI length, lookup key type, `owner_identity_id`, status enum, HTTP status code, and request phase.
+  - Dependency notes: prefer extending the existing `GET /api/v1/vault/{id}` response if backward compatible; otherwise add a narrow route such as `GET /api/v1/vault/{id}/mint-recovery`.
 
-- [x] Runtime recovery implemented: a successful submitted mint can be finalized later without reminting by extracting `NFTokenID` from the known `tx_hash` and reusing the existing `register_minted_vault_object` / Oracle finalize path.
-  - Changed files:
+- [x] 2. Add a no-remint desktop recovery command
+  - Files likely to change:
     - [crates/desktop-client/src/commands.rs](/home/riggle/vaulted/crates/desktop-client/src/commands.rs)
     - [crates/desktop-client/src/main.rs](/home/riggle/vaulted/crates/desktop-client/src/main.rs)
+    - [crates/desktop-client/src/oracle/api.rs](/home/riggle/vaulted/crates/desktop-client/src/oracle/api.rs)
+  - Deliverable: command `recover_pending_vault_mint(vaultId, txHash)` or equivalent resolves persisted Oracle metadata, extracts `NFTokenID` from XRPL validated tx metadata, then reuses `register_minted_vault_object_inner`.
+  - Expected behavior: the known pending mint finalizes without reminting and writes `vault_objects.nft_token_id=00080000DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4FAEB4C857010D42BC`.
+  - Idempotency: if recovery is rerun for the same `vault_id` and `tx_hash`, it updates the same `vault_objects` row and returns success; it must not create conflicting rows.
+  - Logging requirements: only `NFTokenID`, `tx_hash`, `metadata_hash`, metadata URI length, lookup key type, `vault_id`, `owner_identity_id`, status enum, `engine_result`, HTTP status code, and request phase.
+  - Dependency notes: do not alter XRPL signing, submit, serialization, retry, or wallet derivation code.
+
+- [x] 3. Add a minimal user-accessible recovery action after restart
+  - Files likely to change:
     - [crates/desktop-client/ui/src/screens/UploadScreen.tsx](/home/riggle/vaulted/crates/desktop-client/ui/src/screens/UploadScreen.tsx)
     - [crates/desktop-client/ui/src/utils/formatError.ts](/home/riggle/vaulted/crates/desktop-client/ui/src/utils/formatError.ts)
-  - Expected recovery for current pending mint:
-    - `vault_id=b524fe14-4976-448f-a3c6-1f43c249a5ff`
-    - `tx_hash=2E084681288AEC19132D70F2B970AE78089D6A66B27E25EC95683F5BF7ECBB7F`
-    - `NFTokenID=00080000DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4FAEB4C857010D42BC`
-    - `metadata_hash=sha256:6329e957301d68c7b4dac47f8a09ee7e61d3385a38d83fd615abc67e8f1b2403`
-  - UI behavior: if mint submit succeeded but `NFTokenID` was unavailable, the screen can show `Finalize existing mint` and complete Oracle linking without another XRPL mint.
-  - Error behavior: missing `NFTokenID` maps to a safe actionable error instead of the generic fallback.
+  - Deliverable: a small recovery control on the Upload screen that accepts `vault_id` and `tx_hash`, calls the new desktop recovery command, and shows a safe success/error state.
+  - Expected behavior: after app restart, the user can finalize the known successful mint by entering the known `vault_id` and `tx_hash`; the app must not call `mint_vaulted_nft_locally`.
+  - Logging requirements: UI must not print forbidden fields; displayed diagnostics should be limited to `NFTokenID`, `tx_hash`, `metadata_hash`, status enum, and request phase.
+  - Dependency notes: keep the existing in-memory `Finalize existing mint` path, but route both it and the manual recovery action through the same desktop recovery/finalization logic if practical.
 
-- [ ] 1. Collect safe runtime logs for current mint failure
-  - Files likely to inspect/change:
-    - [crates/desktop-client/src/commands.rs](/home/riggle/vaulted/crates/desktop-client/src/commands.rs)
-    - [crates/desktop-client/src/oracle/api.rs](/home/riggle/vaulted/crates/desktop-client/src/oracle/api.rs)
-    - [crates/oracle/src/api/vault.rs](/home/riggle/vaulted/crates/oracle/src/api/vault.rs)
-    - [crates/desktop-client/ui/src/utils/formatError.ts](/home/riggle/vaulted/crates/desktop-client/ui/src/utils/formatError.ts)
-  - Deliverable: identify the exact failing phase: XRPL submit, missing `submitted.nftTokenId`, finalize validation, owner identity validation, ledger verification, `vault_objects` upsert, or post-finalize register.
-  - Logging requirements: only `NFTokenID`, `tx_hash`, `metadata_hash`, metadata URI length, HTTP status code, lookup key type, `vault_id`, `owner_identity_id`, status enum, `engine_result`, and request phase.
-  - Dependency note: this task gates all code/repair decisions.
-
-- [ ] 2. Inspect Oracle DB state for old minted NFTs and current prepared vault
-  - Files likely to inspect/change:
-    - No source changes expected in this task.
-  - Deliverable: table mapping each known `NFTokenID`/`tx_hash` to DB evidence: `nft_metadata.id`, `nft_metadata.nft_token_id`, `metadata_hash`, published metadata URI, manifest `xrpl_tx_hash`, `vault_objects.id`, `vault_objects.nft_token_id`, `owner_identity_id`, and status.
-  - Logging requirements: do not print encrypted AES keys, encrypted manifest content, raw manifest JSON, JWTs, or plaintext file metadata. Select only safe columns listed in the command section.
-  - Dependency note: this task determines whether relink is possible without reminting.
-
-- [ ] 3. Decide and implement the smallest safe diagnosis improvement if runtime error is hidden
-  - Files likely to change only if evidence shows the UI/desktop hides the actionable error:
-    - [crates/desktop-client/ui/src/utils/formatError.ts](/home/riggle/vaulted/crates/desktop-client/ui/src/utils/formatError.ts)
-    - [crates/desktop-client/src/oracle/api.rs](/home/riggle/vaulted/crates/desktop-client/src/oracle/api.rs)
-    - [crates/desktop-client/src/commands.rs](/home/riggle/vaulted/crates/desktop-client/src/commands.rs)
-  - Deliverable: preserve a safe actionable error such as owner identity inactive, missing NFTokenID, Oracle validation status, or XRPL `engine_result`, without exposing forbidden fields.
-  - Expected behavior: `Mint vault NFT` no longer collapses allowed Oracle/XRPL diagnostics into only `Something went wrong`.
-  - Logging requirements: only allowed diagnostics; do not show request/response bodies wholesale if they may contain forbidden content.
-
-- [ ] 4. Design and implement an idempotent relink path for recoverable old NFTs
-  - Files likely to change only after task 2 proves a mapping exists:
-    - Prefer existing Oracle API/desktop command if safe.
-    - If no safe path exists, add the smallest repair-only path in [crates/oracle/src/api/vault.rs](/home/riggle/vaulted/crates/oracle/src/api/vault.rs) or [crates/oracle/src/api/vault_objects.rs](/home/riggle/vaulted/crates/oracle/src/api/vault_objects.rs), plus a desktop command only if needed.
-  - Deliverable: for each old minted NFT with recoverable `vault_id`, manifest URI/hash, owner wallet, and active `owner_identity_id`, update/upsert `vault_objects` so `/by-nft/{NFTokenID}` resolves.
-  - Expected behavior: repair is idempotent; repeated repair for the same `vault_id`/`NFTokenID` updates the same row and creates no conflicting rows.
-  - Logging requirements: log `NFTokenID`, `tx_hash`, `metadata_hash`, metadata URI length, lookup key type, `vault_id`, `owner_identity_id`, status enum, and request phase only.
-  - Dependency note: do not add repair if DB/local state cannot prove the mapping.
-
-- [ ] 5. Add focused tests and run verification
+- [x] 4. Persist future accepted submit recovery state
   - Files likely to change:
-    - Oracle unit/integration tests near [vault.rs](/home/riggle/vaulted/crates/oracle/src/api/vault.rs) or [vault_objects.rs](/home/riggle/vaulted/crates/oracle/src/api/vault_objects.rs)
-    - Desktop/UI tests only if error-formatting code changes.
-  - Deliverable: prove idempotent relink/upsert behavior and safe error propagation for the observed failure class.
-  - Logging requirements: tests must not print forbidden values.
+    - [crates/desktop-client/ui/src/screens/UploadScreen.tsx](/home/riggle/vaulted/crates/desktop-client/ui/src/screens/UploadScreen.tsx)
+    - Optional desktop-local helper in [crates/desktop-client/src/commands.rs](/home/riggle/vaulted/crates/desktop-client/src/commands.rs) only if browser storage is not appropriate.
+  - Deliverable: when an XRPL submit returns `accepted=true` and a `tx_hash`, persist only safe recovery fields needed to show the recovery action after restart: `vault_id`, `tx_hash`, `metadata_hash`, `metadata_uri`, status enum, and timestamp.
+  - Expected behavior: future post-submit extraction failures can be recovered after restart without re-entering all fields.
+  - Logging requirements: no secret-bearing fields; do not persist file paths, plaintext file names, raw metadata JSON, encrypted AES keys, JWTs, seeds, or tx blobs.
+  - Dependency notes: this task helps future failures, but task 2 and task 3 must be enough to recover the known current mint even if no prior state exists.
 
-## Database Inspection Commands
+- [x] 5. Add focused tests and run verification
+  - Files likely to change:
+    - Oracle tests near [crates/oracle/src/api/vault.rs](/home/riggle/vaulted/crates/oracle/src/api/vault.rs)
+    - Desktop tests near [crates/desktop-client/src/commands.rs](/home/riggle/vaulted/crates/desktop-client/src/commands.rs) or [crates/desktop-client/src/xrpl/client.rs](/home/riggle/vaulted/crates/desktop-client/src/xrpl/client.rs)
+    - UI type/lint checks for [UploadScreen.tsx](/home/riggle/vaulted/crates/desktop-client/ui/src/screens/UploadScreen.tsx)
+  - Deliverable: coverage that recovery lookup returns only safe fields, recovery reuses existing finalization/register logic, and missing/invalid recovery data produces actionable safe errors.
+  - Expected behavior: no tests or logs expose forbidden values.
+  - Logging requirements: test output must not include seed, private keys, JWT, AES keys, plaintext, recovery phrase, mnemonic entropy, `tx_blob`, signatures, decrypted content, or raw file metadata.
 
-Run commands separately. These commands select only safe diagnostic columns.
+## One-Time Recovery Action Proposal
+- After implementation, open Upload and use the recovery control with:
+  - `vault_id=b524fe14-4976-448f-a3c6-1f43c249a5ff`
+  - `tx_hash=2E084681288AEC19132D70F2B970AE78089D6A66B27E25EC95683F5BF7ECBB7F`
+- The app should recover `metadata_hash` and `metadata_uri` from Oracle, extract `NFTokenID` from XRPL, then call the existing Oracle finalization/register flow.
+- Do not press `Mint vault NFT` for this vault.
 
-Check infrastructure and DB readiness:
+## Database Verification Commands
 
-```bash
-docker compose ps postgres
-docker compose exec postgres pg_isready -U xrpl_vault -d xrpl_vault
-```
+Run commands separately and select only safe columns.
 
-Find known NFT/tx rows in `nft_metadata`:
-
-```bash
-docker compose exec -T postgres psql -U xrpl_vault -d xrpl_vault -c "SELECT id, nft_token_id, metadata_hash, status, offer_index, manifest #>> '{public_metadata,metadata_uri}' AS metadata_uri, manifest #>> '{xrpl_tx_hash}' AS xrpl_tx_hash FROM nft_metadata WHERE nft_token_id IN ('00080000DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4F80E92655010D42BA','00080000DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4F97CEF756010D42BB') OR manifest #>> '{xrpl_tx_hash}' IN ('1121120F413DB9B4BD4284226754D8436C9F3D17BECCCE89304F3840B0B98B7D','887322BE984053DC3D2BBEA2F8CB976D699763CD6C98D97D9E408A275E5BD138') ORDER BY updated_at DESC;"
-```
-
-Find rows by the latest visible metadata hash:
-
-```bash
-docker compose exec -T postgres psql -U xrpl_vault -d xrpl_vault -c "SELECT id, nft_token_id, metadata_hash, status, offer_index, manifest #>> '{public_metadata,metadata_uri}' AS metadata_uri, manifest #>> '{public_metadata,metadata_hash}' AS metadata_json_hash, manifest #>> '{xrpl_tx_hash}' AS xrpl_tx_hash FROM nft_metadata WHERE metadata_hash IN ('6329e957301d68c7b4dac47f8a09ee7e61d3385a38d83fd615abc67e8f1b2403','sha256:6329e957301d68c7b4dac47f8a09ee7e61d3385a38d83fd615abc67e8f1b2403') OR manifest #>> '{public_metadata,metadata_uri}' LIKE '%6329e957301d68c7b4dac47f8a09ee7e61d3385a38d83fd615abc67e8f1b2403%' ORDER BY updated_at DESC;"
-```
-
-Compare `nft_metadata` and `vault_objects` by vault id, manifest hash, and NFT token id:
-
-```bash
-docker compose exec -T postgres psql -U xrpl_vault -d xrpl_vault -c "SELECT nm.id AS vault_id, nm.nft_token_id AS metadata_nft_token_id, nm.metadata_hash, nm.status AS metadata_status, nm.manifest #>> '{public_metadata,metadata_uri}' AS metadata_uri, nm.manifest #>> '{xrpl_tx_hash}' AS xrpl_tx_hash, vo.id AS vault_object_id, vo.nft_token_id AS vault_object_nft_token_id, vo.owner_identity_id, vo.status AS vault_object_status FROM nft_metadata nm LEFT JOIN vault_objects vo ON vo.id = nm.id::text OR vo.manifest_hash = nm.metadata_hash OR vo.nft_token_id = nm.nft_token_id WHERE nm.nft_token_id IN ('00080000DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4F80E92655010D42BA','00080000DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4F97CEF756010D42BB') OR nm.manifest #>> '{xrpl_tx_hash}' IN ('1121120F413DB9B4BD4284226754D8436C9F3D17BECCCE89304F3840B0B98B7D','887322BE984053DC3D2BBEA2F8CB976D699763CD6C98D97D9E408A275E5BD138') OR nm.manifest #>> '{public_metadata,metadata_uri}' LIKE '%6329e957301d68c7b4dac47f8a09ee7e61d3385a38d83fd615abc67e8f1b2403%' ORDER BY nm.updated_at DESC;"
-```
-
-Inspect candidate `vault_objects` rows that may be missing or carrying pending keys:
+Check pending row before recovery:
 
 ```bash
-docker compose exec -T postgres psql -U xrpl_vault -d xrpl_vault -c "SELECT id, owner_identity_id, manifest_hash, manifest_uri, nft_chain, nft_token_id, status, updated_at FROM vault_objects WHERE nft_token_id IN ('00080000DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4F80E92655010D42BA','00080000DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4F97CEF756010D42BB') OR manifest_uri LIKE '%6329e957301d68c7b4dac47f8a09ee7e61d3385a38d83fd615abc67e8f1b2403%' OR manifest_hash IN ('6329e957301d68c7b4dac47f8a09ee7e61d3385a38d83fd615abc67e8f1b2403','sha256:6329e957301d68c7b4dac47f8a09ee7e61d3385a38d83fd615abc67e8f1b2403') ORDER BY updated_at DESC;"
+docker compose exec -T postgres psql -U xrpl_vault -d xrpl_vault -c "SELECT id AS vault_id, nft_token_id, metadata_hash, status, manifest #>> '{public_metadata,metadata_uri}' AS metadata_uri, manifest #>> '{xrpl_tx_hash}' AS xrpl_tx_hash FROM nft_metadata WHERE id = 'b524fe14-4976-448f-a3c6-1f43c249a5ff';"
 ```
 
-Check active identity availability for candidate owners:
+Check missing vault object before recovery:
+
+```bash
+docker compose exec -T postgres psql -U xrpl_vault -d xrpl_vault -c "SELECT id, owner_identity_id, manifest_hash, manifest_uri, nft_chain, nft_token_id, status FROM vault_objects WHERE id = 'b524fe14-4976-448f-a3c6-1f43c249a5ff' OR nft_token_id = '00080000DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4FAEB4C857010D42BC' OR manifest_hash = 'sha256:6329e957301d68c7b4dac47f8a09ee7e61d3385a38d83fd615abc67e8f1b2403';"
+```
+
+Check active owner identity availability:
 
 ```bash
 docker compose exec -T postgres psql -U xrpl_vault -d xrpl_vault -c "SELECT vi.id AS owner_identity_id, vi.status, lw.chain, lw.address FROM vaulted_identities vi LEFT JOIN linked_wallets lw ON lw.identity_id = vi.id WHERE vi.status = 'active' ORDER BY vi.updated_at DESC LIMIT 20;"
 ```
 
-## Log Grep Commands
-
-Use existing runtime log files if services were started with `tee`; otherwise restart with safe `RUST_LOG` settings and reproduce once.
-
-Oracle logs:
+Check post-recovery link:
 
 ```bash
-rg -n "finalize-mint|Finalized Vaulted mint|owner_identity_id|validation_error|xrpl_error|database_error|vault_mint_finalized|vault object" /tmp/vaulted-oracle.log
-```
-
-Desktop logs:
-
-```bash
-rg -n "Vaulted NFTokenMint submit result|Failed to extract minted NFTokenID|Registering locally minted vault object|Oracle mint finalization completed|Vault object manifest link registered|engine_result|HTTP 400|HTTP 409|HTTP 502|owner_identity_id" /tmp/vaulted-desktop.log
-```
-
-If logs do not exist, start fresh diagnostic sessions:
-
-```bash
-RUST_LOG=xrpl_vault_oracle=debug,tower_http=debug cargo run -p xrpl-vault-oracle --bin oracle
-```
-
-```bash
-RUST_LOG=xrpl_vault_desktop=debug cargo run -p xrpl-vault-desktop
+docker compose exec -T postgres psql -U xrpl_vault -d xrpl_vault -c "SELECT nm.id AS vault_id, nm.nft_token_id AS metadata_nft_token_id, nm.status AS metadata_status, nm.metadata_hash, nm.manifest #>> '{xrpl_tx_hash}' AS xrpl_tx_hash, vo.id AS vault_object_id, vo.nft_token_id AS vault_object_nft_token_id, vo.status AS vault_object_status FROM nft_metadata nm LEFT JOIN vault_objects vo ON vo.id = nm.id::text WHERE nm.id = 'b524fe14-4976-448f-a3c6-1f43c249a5ff';"
 ```
 
 ## Runtime Verification Commands
 
-After DB/log diagnosis and any approved repair:
+Check Oracle health:
 
 ```bash
 curl -i http://127.0.0.1:3000/health
 ```
 
-Use an authenticated app/API request for protected by-NFT lookups without printing JWTs:
+After recovery, verify by-NFT lookup through the authenticated app path. If using raw curl, do not print or paste JWTs:
 
 ```bash
-curl -i http://127.0.0.1:3000/api/v1/vault-objects/by-nft/00080000DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4F80E92655010D42BA
+curl -i http://127.0.0.1:3000/api/v1/vault-objects/by-nft/00080000DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4FAEB4C857010D42BC
 ```
 
-```bash
-curl -i http://127.0.0.1:3000/api/v1/vault-objects/by-nft/00080000DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4F97CEF756010D42BB
-```
-
-If endpoint auth blocks raw `curl`, verify through the desktop Files tab or a local authenticated command that does not print tokens.
+If raw curl is blocked by auth, verify through the desktop Files tab or an authenticated local command that does not print tokens.
 
 ## Verification Commands After Code Changes
 
-Run only if implementation changes are made:
+Run commands separately:
 
 ```bash
 cargo fmt --all --check
@@ -210,29 +170,29 @@ cargo check -p xrpl-vault-oracle
 cargo test -p xrpl-vault-oracle
 cargo check -p xrpl-vault-desktop
 cargo test -p xrpl-vault-desktop
+```
+
+```bash
 cd crates/desktop-client/ui
 npm run lint
 npx tsc --noEmit --project tsconfig.json
 npm run build
-cd ../../..
+```
+
+```bash
 ./scripts/check-sensitive-logs.sh
 git diff --check
 ```
 
 ## Expected Successful State
-- Each recoverable old `NFTokenID` maps to exactly one `vault_objects` row with:
-  - `id = recovered vault_id`
-  - `nft_token_id = real NFTokenID`
-  - `manifest_hash` and `manifest_uri` matching the prepared/published metadata
-  - `owner_identity_id` active
-  - `status = active`
-- `GET /api/v1/vault-objects/by-nft/{NFTokenID}` returns 200 through an authenticated path.
-- Files tab no longer shows Oracle link unavailable for relinked NFTs.
-- Current `Mint vault NFT` failure surfaces a safe actionable error instead of only `Something went wrong`.
-- Any repair/relink can be re-run for the same `vault_id`/`NFTokenID` without duplicate or conflicting rows.
-
-## Out Of Scope
-- Do not remint old NFTs.
-- Do not touch XRPL signing/serialization.
-- Do not touch stale-sequence or `tefPAST_SEQ` retry logic unless runtime evidence proves the current button error is only stale sequence.
-- Do not touch encryption/decryption, wallet/key derivation, plaintext file handling, or runtime state reset/logout.
+- The known pending mint is finalized without a second XRPL mint.
+- `nft_metadata.id=b524fe14-4976-448f-a3c6-1f43c249a5ff` has:
+  - `nft_token_id=00080000DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4FAEB4C857010D42BC`
+  - `status=active`
+  - `manifest.xrpl_tx_hash=2E084681288AEC19132D70F2B970AE78089D6A66B27E25EC95683F5BF7ECBB7F`
+- `vault_objects.id=b524fe14-4976-448f-a3c6-1f43c249a5ff` exists with:
+  - `manifest_hash=sha256:6329e957301d68c7b4dac47f8a09ee7e61d3385a38d83fd615abc67e8f1b2403`
+  - `nft_token_id=00080000DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4FAEB4C857010D42BC`
+  - `status=active`
+- `/api/v1/vault-objects/by-nft/00080000DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4FAEB4C857010D42BC` returns 200 through the authenticated app path.
+- Re-running recovery for the same `vault_id` and `tx_hash` returns the same linked object and creates no duplicate or conflicting row.

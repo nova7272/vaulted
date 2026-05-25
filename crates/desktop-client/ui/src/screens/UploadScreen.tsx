@@ -27,6 +27,14 @@ interface VaultedSignedMintResponse {
 interface VaultObjectResponse {
   nft_token_id: string | null
 }
+interface PendingMintRecovery {
+  vaultId: string
+  txHash: string
+  metadataHash: string
+  metadataUri: string
+  status: string
+  timestamp: string
+}
 interface XrplAccountStatus {
   status: string; address: string; exists: boolean; balanceXrp: string | null
   reserveRequirementXrp: string; network: string; canMint: boolean
@@ -47,6 +55,7 @@ interface ProgressEvent {
 }
 
 const CLAIM_TIMEOUT_SEC = 300 // 5 minutes
+const PENDING_MINT_RECOVERY_KEY = 'vaulted.pendingMintRecovery'
 
 const fmt = (b: number) =>
     b < 1024 ? `${b} B` : b < 1048576 ? `${(b/1024).toFixed(1)} KB` : `${(b/1048576).toFixed(1)} MB`
@@ -87,10 +96,34 @@ export default function UploadScreen({ onNavigate }: { oracleConnected?: boolean
   const [xrplStatus, setXrplStatus] = useState<XrplAccountStatus|null>(null)
   const [checkingXrpl, setCheckingXrpl] = useState(false)
   const [finalizingMint, setFinalizingMint] = useState(false)
+  const [recoveringMint, setRecoveringMint] = useState(false)
+  const [manualRecoveryVaultId, setManualRecoveryVaultId] = useState('')
+  const [manualRecoveryTxHash, setManualRecoveryTxHash] = useState('')
+  const [recoveryMessage, setRecoveryMessage] = useState<string | null>(null)
   const [addressCopied, setAddressCopied] = useState(false)
 
   const timerRef = useRef<ReturnType<typeof setInterval>|null>(null)
   const abortedRef = useRef(false)
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(PENDING_MINT_RECOVERY_KEY)
+      if (!raw) return
+      const pending = JSON.parse(raw) as PendingMintRecovery
+      setManualRecoveryVaultId(pending.vaultId || '')
+      setManualRecoveryTxHash(pending.txHash || '')
+    } catch {
+      localStorage.removeItem(PENDING_MINT_RECOVERY_KEY)
+    }
+  }, [])
+
+  const persistPendingMintRecovery = (pending: PendingMintRecovery) => {
+    localStorage.setItem(PENDING_MINT_RECOVERY_KEY, JSON.stringify(pending))
+  }
+
+  const clearPendingMintRecovery = () => {
+    localStorage.removeItem(PENDING_MINT_RECOVERY_KEY)
+  }
 
   // --- Cleanup timer ---
   const clearTimer = useCallback(() => {
@@ -278,6 +311,18 @@ export default function UploadScreen({ onNavigate }: { oracleConnected?: boolean
       if (!submitted.accepted) {
         throw new Error(`${submitted.engineResult}: ${submitted.engineResultMessage}`)
       }
+      if (submitted.txHash) {
+        persistPendingMintRecovery({
+          vaultId: result.vault_id,
+          txHash: submitted.txHash,
+          metadataHash: result.manifest_hash,
+          metadataUri: preview.metadataUri,
+          status: submitted.nftTokenId ? 'ready_to_finalize' : 'pending_nftoken_id',
+          timestamp: new Date().toISOString(),
+        })
+        setManualRecoveryVaultId(result.vault_id)
+        setManualRecoveryTxHash(submitted.txHash)
+      }
       if (!submitted.nftTokenId) {
         setMintResult(submitted)
         throw new Error(`XRPL mint succeeded (${submitted.txHash}), but Vaulted could not extract the minted NFTokenID for Oracle finalization. Retry finalization after refreshing.`)
@@ -295,6 +340,7 @@ export default function UploadScreen({ onNavigate }: { oracleConnected?: boolean
       })
 
       setClaimState('claimed')
+      clearPendingMintRecovery()
     } catch (e) {
       setClaimState('registered')
       setError(formatError(e))
@@ -323,11 +369,41 @@ export default function UploadScreen({ onNavigate }: { oracleConnected?: boolean
       setResult({ ...result, nft_token_id: nftTokenId })
       setMintResult({ ...mintResult, nftTokenId })
       setClaimState('claimed')
+      clearPendingMintRecovery()
     } catch (e) {
       setClaimState('registered')
       setError(formatError(e))
     } finally {
       setFinalizingMint(false)
+    }
+  }
+
+  const handleManualMintRecovery = async () => {
+    const vaultId = manualRecoveryVaultId.trim()
+    const txHash = manualRecoveryTxHash.trim()
+    if (!vaultId || !txHash) return
+    setError(null)
+    setRecoveryMessage(null)
+    setRecoveringMint(true)
+    try {
+      const linked = await invoke<VaultObjectResponse>('recover_pending_vault_mint', {
+        vaultId,
+        txHash,
+      })
+      const nftTokenId = linked.nft_token_id
+      if (!nftTokenId) {
+        throw new Error(`Missing NFTokenID after recovery. tx_hash=${txHash}`)
+      }
+      setRecoveryMessage(`Recovered Oracle link for NFTokenID ${nftTokenId}`)
+      if (result) {
+        setResult({ ...result, nft_token_id: nftTokenId })
+        setClaimState('claimed')
+      }
+      clearPendingMintRecovery()
+    } catch (e) {
+      setError(formatError(e))
+    } finally {
+      setRecoveringMint(false)
     }
   }
 
@@ -337,7 +413,7 @@ export default function UploadScreen({ onNavigate }: { oracleConnected?: boolean
     setFiles([]); setFileEntries([]); setCustomName(''); setTag('')
     setResult(null); setClaimPayload(null); setMintResult(null); setNftPreview(null); setXrplStatus(null)
     setClaimState('loading'); setTimeLeft(CLAIM_TIMEOUT_SEC)
-    setProgress(null); setError(null); setFinalizingMint(false)
+    setProgress(null); setError(null); setFinalizingMint(false); setRecoveryMessage(null)
   }
 
   const isFolder = files.length === 1 && !files[0].includes('.')
@@ -357,6 +433,31 @@ export default function UploadScreen({ onNavigate }: { oracleConnected?: boolean
                 <div className="title">{dragOver ? 'Drop files here' : 'Drop files here or click to browse'}</div>
                 <div className="sub">Max 100 MB per file · AES-256 encryption before upload</div>
               </div>
+
+              {files.length === 0 && (
+                <div style={{background:'var(--surface-2)',border:'1px solid var(--line)',borderRadius:'var(--radius-md)',padding:18,marginTop:18,display:'grid',gap:12}}>
+                  <div style={{display:'flex',justifyContent:'space-between',gap:12,alignItems:'center',flexWrap:'wrap'}}>
+                    <div>
+                      <div style={{fontSize:14,fontWeight:600,color:'var(--fg)'}}>Recover previous mint</div>
+                      <div style={{fontSize:12,color:'var(--fg-2)',marginTop:3}}>Finalize a successful XRPL mint without minting again.</div>
+                    </div>
+                    {recoveryMessage && <div className="v-mono" style={{fontSize:12,color:'var(--ok)',wordBreak:'break-all'}}>{recoveryMessage}</div>}
+                  </div>
+                  <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(220px,1fr))',gap:10}}>
+                    <div className="v-field" style={{margin:0}}>
+                      <div className="v-label">Vault ID</div>
+                      <input className="v-input" type="text" value={manualRecoveryVaultId} onChange={e=>setManualRecoveryVaultId(e.target.value)} placeholder="vault_id" />
+                    </div>
+                    <div className="v-field" style={{margin:0}}>
+                      <div className="v-label">Transaction hash</div>
+                      <input className="v-input" type="text" value={manualRecoveryTxHash} onChange={e=>setManualRecoveryTxHash(e.target.value.toUpperCase())} placeholder="tx_hash" />
+                    </div>
+                  </div>
+                  <button className="v-btn v-btn-primary" style={{justifyContent:'center',height:42}} onClick={handleManualMintRecovery} disabled={recoveringMint || !manualRecoveryVaultId.trim() || !manualRecoveryTxHash.trim()}>
+                    {recoveringMint ? 'Finalizing…' : 'Finalize previous mint'}
+                  </button>
+                </div>
+              )}
 
               {files.length > 0 && (
                   <div className="v-col" style={{ gap: 14 }}>

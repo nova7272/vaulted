@@ -527,6 +527,15 @@ impl OracleClient {
         self.get(&format!("/api/v1/vault/{}", vault_id)).await
     }
 
+    /// Gets safe fields for completing a local mint after desktop restart.
+    pub async fn get_vault_mint_recovery(
+        &self,
+        vault_id: &str,
+    ) -> Result<VaultMintRecoveryResponse> {
+        self.get(&format!("/api/v1/vault/{}/mint-recovery", vault_id))
+            .await
+    }
+
     // ==================== Transfer API ====================
 
     /// Инициирует передачу NFT (PRE перешифровку)
@@ -1177,6 +1186,16 @@ pub struct VaultStatusResponse {
     pub nft_token_id: String,
     pub status: String,
     pub offer_index: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct VaultMintRecoveryResponse {
+    pub vault_id: String,
+    pub status: String,
+    pub metadata_hash: String,
+    pub metadata_uri: String,
+    pub vault_object_nft_token_id: Option<String>,
+    pub owner_identity_id: Option<String>,
 }
 
 // ==================== Transfer Types ====================
