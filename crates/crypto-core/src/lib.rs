@@ -53,7 +53,7 @@ pub use pre::{
 pub use qr_payload::{
     VaultedQrIntent, VaultedQrPayloadBody, VaultedSignedQrPayload, VAULTED_QR_PROTOCOL,
 };
-pub use seed::{SeedManager, ADVANCED_MNEMONIC_WORDS, DEFAULT_MNEMONIC_WORDS, MIN_MNEMONIC_WORDS};
+pub use seed::{SeedManager, DEFAULT_MNEMONIC_WORDS, MIN_MNEMONIC_WORDS};
 pub use transfer::{TransferProof, TransferService, TransferVerification};
 pub use types::*;
 pub use xrpl_wallet::{

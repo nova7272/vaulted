@@ -49,7 +49,6 @@ export default function AuthScreen({ onLogin }: AuthScreenProps) {
     const [status, setStatus] = useState('')
     const [createdIdentity, setCreatedIdentity] = useState<VaultedIdentityResponse|null>(null)
     const [restorePhrase, setRestorePhrase] = useState('')
-    const [advancedSeed, setAdvancedSeed] = useState(false)
     const [seedSaved, setSeedSaved] = useState(false)
     const [copyArmed, setCopyArmed] = useState(false)
     const [copied, setCopied] = useState(false)
@@ -65,11 +64,10 @@ export default function AuthScreen({ onLogin }: AuthScreenProps) {
             setSeedSaved(false)
             setCopied(false)
             setCopyArmed(false)
-            const wordCount = advancedSeed ? 24 : 12
-            const identity = await invoke<VaultedIdentityResponse>('create_vaulted_wallet', { wordCount, passphrase: null })
+            const identity = await invoke<VaultedIdentityResponse>('create_vaulted_wallet', { wordCount: 12, passphrase: null })
             setCreatedIdentity(identity)
             setStep('backup')
-            setStatus(`Write down your ${wordCount}-word recovery phrase. You will only see it once.`)
+            setStatus('Write down your 12-word recovery phrase. You will only see it once.')
         } catch(e) {
             setError(formatError(e))
             setStep('initial')
@@ -123,17 +121,10 @@ export default function AuthScreen({ onLogin }: AuthScreenProps) {
                         </button>
                         <button className="v-auth-choice" onClick={() => setStep('restore')}>
                             <span className="v-auth-choice-title">Restore wallet</span>
-                            <span className="v-auth-choice-sub">Unlock Vaulted with your existing 12 or 24 word phrase.</span>
+                            <span className="v-auth-choice-sub">Unlock Vaulted with your existing 12-word phrase.</span>
                         </button>
                     </div>
 
-                    <details className="v-advanced-toggle">
-                        <summary>Advanced</summary>
-                        <label>
-                            <input type="checkbox" checked={advancedSeed} onChange={e => setAdvancedSeed(e.target.checked)} />
-                            Generate a 24-word seed phrase instead of the standard 12-word phrase
-                        </label>
-                    </details>
                     {status && <div className="v-auth-status">{status}</div>}
                     {error && <div className="v-auth-error">{error}</div>}
                 </div>
@@ -174,9 +165,9 @@ export default function AuthScreen({ onLogin }: AuthScreenProps) {
                         className="v-restore-textarea"
                         value={restorePhrase}
                         onChange={e => setRestorePhrase(e.target.value)}
-                        placeholder="Enter your 12 or 24 word Vaulted seed phrase"
+                        placeholder="Enter your 12-word Vaulted seed phrase"
                     />
-                    <button className="v-btn-vaulted" onClick={restoreVaultedWallet} disabled={restorePhrase.trim().split(/\s+/).filter(Boolean).length < 12}>Restore wallet</button>
+                    <button className="v-btn-vaulted" onClick={restoreVaultedWallet} disabled={restorePhrase.trim().split(/\s+/).filter(Boolean).length !== 12}>Restore wallet</button>
                     <button className="v-auth-link-button" onClick={() => { setStep('initial'); setError(null); setStatus('') }}>Back</button>
                     {status && <div className="v-auth-status">{status}</div>}
                     {error && <div className="v-auth-error">{error}</div>}

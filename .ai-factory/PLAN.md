@@ -1,188 +1,143 @@
-# Plan: Oracle XRPL HTTP RPC Verification Endpoint
+# Plan: Enforce 12-Word Seed Only
 Created: 2026-05-25
 Mode: fast
 Branch: current branch, no branch changes planned
 
 ## Settings
-- **Testing:** yes, focused Oracle config/XRPL verification checks
-- **Logging:** diagnostic allow-list only
-- **Docs:** update env examples/docs only where endpoint config is documented
-- **Security:** preserve ledger verification; do not remint or bypass XRPL validation
+- **Testing:** yes, focused crypto-core, desktop command, and UI checks
+- **Logging:** no secret diagnostics; allowed fields only are `word_count`, `validation_status`, command name, UI step, and error code/status
+- **Docs:** update only seed-policy docs or user-facing copy directly affected by removing 24-word support
+- **Security:** do not log or print seed phrases, mnemonic entropy, private keys, derived keys, AES keys, JWTs, plaintext files, `tx_blob`, signatures, or decrypted content
+
+## Roadmap Linkage
+- **Milestone:** `VAULTED_AGENT_INSTRUCTIONS.md` task 5, "Enforce 12-word seed only"
+- **Rationale:** XRPL mint / Oracle finalize / by-NFT linkage blocker is complete, and the instruction file marks 12-word seed enforcement as the next production MVP task.
 
 ## Scope
-- Fix Oracle `finalize_vault_mint` XRPL ledger verification so it uses a valid HTTP JSON-RPC endpoint.
-- Keep desktop WebSocket XRPL flows working.
-- Do not remint.
-- Do not touch XRPL transaction signing/serialization, stale-sequence or `tefPAST_SEQ` retry logic, encryption/decryption, wallet/key derivation, plaintext handling, runtime reset, or logout.
-- Do not bypass ledger verification.
+- Enforce the production MVP policy that Vaulted seed phrases are exactly 12 words.
+- Create wallet must generate exactly 12 words.
+- Restore and validation commands must reject 6, 18, and 24 words before key derivation.
+- Auth UI must contain no 24-word option, no Advanced 24-word mode, and no copy that says 12 or 24 words.
+- Keep the intended backup ceremony, including one-time display, copy warning, and "I saved this seed phrase offline" gate.
+- Do not touch XRPL mint/signing/serialization, Oracle finalize/linking, file encryption/decryption, transfer/re-encryption, QR login, Wallet tab, or runtime reset/logout.
 
-## Runtime Evidence
-- Recovery UI and `recover_pending_vault_mint` work.
-- Oracle `GET /api/v1/vault/b524fe14-4976-448f-a3c6-1f43c249a5ff/mint-recovery` returns 200.
-- Desktop extracted the correct `NFTokenID`:
-  - `NFTokenID=00080000DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4FAEB4C857010D42BC`
-  - `tx_hash=2E084681288AEC19132D70F2B970AE78089D6A66B27E25EC95683F5BF7ECBB7F`
-- Oracle `POST /api/v1/vault/finalize-mint` is reached.
-- Oracle fails during XRPL tx verification:
-  - `XRPL error: HTTP error: builder error for url (wss://s.altnet.rippletest.net:51233/)`
-- Oracle returns 502.
-- DB remains `pending_claim`; `vault_objects` is still missing.
-
-## Code Findings
-- Oracle XRPL verification uses [crates/oracle/src/xrpl.rs](/home/riggle/vaulted/crates/oracle/src/xrpl.rs), which stores `XrplConfig.node_url` as a JSON-RPC URL and sends JSON-RPC requests with `reqwest::Client.post(&self.config.node_url)`.
-- `verify_local_nft_mint` calls `self.rpc("tx", ...)` and `account_nfts`, so it requires an HTTP(S) JSON-RPC endpoint.
-- Oracle config currently has only `Config.xrpl_node_url`, loaded from `XRPL_NODE_URL` in [crates/oracle/src/config.rs](/home/riggle/vaulted/crates/oracle/src/config.rs).
-- [crates/oracle/src/services/app_state.rs](/home/riggle/vaulted/crates/oracle/src/services/app_state.rs) passes `config.xrpl_node_url` directly into `XrplConfig.node_url`.
-- `XrplConfig::default()` already defaults to `https://s.altnet.rippletest.net:51234`, but that default is bypassed when `XRPL_NODE_URL=wss://s.altnet.rippletest.net:51233` is set.
-- `.env.example`, `README.md`, and `QUICKSTART.md` document `XRPL_NODE_URL` as a WebSocket URL (`wss://s.altnet.rippletest.net:51233`).
-- The desktop XRPL client is WebSocket-based and should keep using `XRPL_NODE_URL` as a WebSocket endpoint.
+## Findings
+- [crates/desktop-client/ui/src/screens/AuthScreen.tsx](/home/riggle/vaulted/crates/desktop-client/ui/src/screens/AuthScreen.tsx:52) stores `advancedSeed` UI state.
+- [crates/desktop-client/ui/src/screens/AuthScreen.tsx](/home/riggle/vaulted/crates/desktop-client/ui/src/screens/AuthScreen.tsx:68) chooses `wordCount = advancedSeed ? 24 : 12`.
+- [crates/desktop-client/ui/src/screens/AuthScreen.tsx](/home/riggle/vaulted/crates/desktop-client/ui/src/screens/AuthScreen.tsx:126) tells users restore supports "12 or 24 word phrase".
+- [crates/desktop-client/ui/src/screens/AuthScreen.tsx](/home/riggle/vaulted/crates/desktop-client/ui/src/screens/AuthScreen.tsx:130) exposes the Advanced 24-word checkbox.
+- [crates/desktop-client/ui/src/screens/AuthScreen.tsx](/home/riggle/vaulted/crates/desktop-client/ui/src/screens/AuthScreen.tsx:177) restore placeholder says "12 or 24 word".
+- [crates/desktop-client/src/commands.rs](/home/riggle/vaulted/crates/desktop-client/src/commands.rs:56) accepts an optional `word_count` in `create_vaulted_wallet` and passes it through to `SeedManager::generate_mnemonic`.
+- [crates/desktop-client/src/commands.rs](/home/riggle/vaulted/crates/desktop-client/src/commands.rs:86) restore relies on `SeedManager::validate_mnemonic`, so restore currently accepts 24 words.
+- [crates/crypto-core/src/seed.rs](/home/riggle/vaulted/crates/crypto-core/src/seed.rs:13) defines `DEFAULT_MNEMONIC_WORDS = 12`.
+- [crates/crypto-core/src/seed.rs](/home/riggle/vaulted/crates/crypto-core/src/seed.rs:15) defines `ADVANCED_MNEMONIC_WORDS = 24`.
+- [crates/crypto-core/src/seed.rs](/home/riggle/vaulted/crates/crypto-core/src/seed.rs:24) generates 12 words from 16 bytes of OS CSPRNG entropy and 24 words from 32 bytes.
+- [crates/crypto-core/src/seed.rs](/home/riggle/vaulted/crates/crypto-core/src/seed.rs:44) validates either 12 or 24 words.
+- [crates/crypto-core/src/seed.rs](/home/riggle/vaulted/crates/crypto-core/src/seed.rs:76) has a test proving 24-word support, which must be inverted/removed.
+- No React test files were found under `crates/desktop-client/ui/src`; UI coverage should come from lint, TypeScript, build, and runtime checks unless a test framework is introduced in a separate task.
 
 ## Questions Answered
-- **Which env/config value supplies Oracle XRPL verification URL?** `XRPL_NODE_URL` currently supplies it through `Config.xrpl_node_url` into `XrplService`.
-- **Is Oracle using `XRPL_NODE_URL=wss://s.altnet.rippletest.net:51233/` with an HTTP client?** Yes, runtime evidence plus `reqwest::Client.post(&self.config.node_url)` confirms the mismatch.
-- **Does the code already support a separate HTTP JSON-RPC URL?** No. There is only `xrpl_node_url` in Oracle config, although `XrplConfig` expects JSON-RPC.
-- **Should Oracle derive `https://...:51234` from `wss://...:51233`, or require explicit `XRPL_HTTP_URL` / `XRPL_RPC_URL`?** Prefer an explicit Oracle HTTP JSON-RPC env var, with a small compatibility conversion for standard `ws://`/`wss://` values to avoid breaking existing dev configs.
-- **What is the smallest safe fix?** Add `XRPL_RPC_URL` / `XRPL_HTTP_URL` config for Oracle verification, validate that the final URL scheme is `http` or `https`, and fall back by converting `wss` to `https` and `ws` to `http` only when no explicit HTTP URL is set.
-
-## Preferred Design
-- Add `Config.xrpl_rpc_url: Option<String>` for Oracle HTTP JSON-RPC.
-- Load from env in this precedence:
-  1. `XRPL_RPC_URL`
-  2. `XRPL_HTTP_URL`
-  3. derived from `XRPL_NODE_URL` if it is `ws://` or `wss://`
-  4. existing `XRPL_NODE_URL` if it is already `http://` or `https://`
-  5. default `https://s.altnet.rippletest.net:51234`
-- For the public XRPL testnet default, convert:
-  - `wss://s.altnet.rippletest.net:51233` -> `https://s.altnet.rippletest.net:51234`
-  - `ws://...:51233` -> `http://...:51234`
-- For other WebSocket URLs, convert only the scheme unless a port-specific public-testnet rule is clearly applicable. Do not hardcode testnet-only behavior as the only path.
-- Reject unsupported schemes with a clear config error before runtime verification, logging only `XRPL endpoint scheme`.
-- Keep `XRPL_NODE_URL` available for desktop/WebSocket flows and compatibility docs.
+- **Where is 24-word generation currently exposed?** In `AuthScreen.tsx` via `advancedSeed`, `wordCount = advancedSeed ? 24 : 12`, and the `<details className="v-advanced-toggle">` checkbox.
+- **Does backend accept `wordCount=24` or arbitrary word counts?** It accepts the `word_count` parameter and delegates to `SeedManager::generate_mnemonic`; current crypto-core accepts 12 and 24, rejects other counts.
+- **Does restore accept 24-word mnemonic today?** Yes. `restore_vaulted_wallet` calls `SeedManager::validate_mnemonic`, which currently accepts 12 or 24 words.
+- **Is seed generated through BIP-39 + OS CSPRNG with 128-bit entropy for 12 words?** Yes. `SeedManager::generate_mnemonic(12)` fills 16 bytes with `OsRng`, builds a BIP-39 English mnemonic with `Mnemonic::from_entropy_in`, then zeroizes the entropy buffer.
+- **What exact files need minimal changes?** `crates/crypto-core/src/seed.rs`, `crates/crypto-core/src/lib.rs`, `crates/desktop-client/src/commands.rs`, `crates/desktop-client/ui/src/screens/AuthScreen.tsx`, and directly affected docs such as `README.md`, `QUICKSTART.md`, or `SECURITY.md` only if they mention 12/24-word support.
+- **What tests should be added or updated?** Update crypto-core seed tests to prove 12-word generation and reject 6/18/24-word validation/generation. Add desktop command-level tests only if existing command test scaffolding can do so without constructing full Tauri state; otherwise rely on crypto-core plus UI/static checks for this narrow policy.
 
 ## Tasks
 
-- [x] 1. Add Oracle HTTP RPC endpoint config resolution
+- [x] 1. Enforce strict 12-word policy in crypto-core
   - Files likely to change:
-    - [crates/oracle/src/config.rs](/home/riggle/vaulted/crates/oracle/src/config.rs)
-    - [crates/oracle/src/services/app_state.rs](/home/riggle/vaulted/crates/oracle/src/services/app_state.rs)
-  - Deliverable: Oracle resolves a validated HTTP JSON-RPC endpoint separately from the WebSocket-style `XRPL_NODE_URL`.
-  - Expected behavior: `XRPL_RPC_URL=https://s.altnet.rippletest.net:51234/` is used directly; if only `XRPL_NODE_URL=wss://s.altnet.rippletest.net:51233/` is set, Oracle derives `https://s.altnet.rippletest.net:51234/`.
-  - Logging requirements: log only endpoint scheme, request phase, and status enum; do not log full URLs.
-  - Dependency notes: do not alter desktop config or XRPL signing/submission code.
+    - [crates/crypto-core/src/seed.rs](/home/riggle/vaulted/crates/crypto-core/src/seed.rs)
+    - [crates/crypto-core/src/lib.rs](/home/riggle/vaulted/crates/crypto-core/src/lib.rs)
+  - Deliverable: `SeedManager::generate_mnemonic` accepts only `DEFAULT_MNEMONIC_WORDS`, and `SeedManager::validate_mnemonic` accepts only 12 words before parsing/seed derivation.
+  - Expected behavior: 12-word generation still uses BIP-39 with 16 bytes from `OsRng`; 6, 18, 24, and arbitrary counts fail with a safe policy error that does not echo mnemonic words.
+  - Logging requirements: add no logs; errors may mention only required `word_count` policy, not provided words.
+  - Dependency notes: preserve `mnemonic_to_seed` flow and only tighten validation; do not change derivation paths or wallet/key derivation.
 
-- [x] 2. Validate XRPL JSON-RPC URL scheme before verification
+- [x] 2. Ignore/remove create-wallet word count override in desktop command boundary
   - Files likely to change:
-    - [crates/oracle/src/config.rs](/home/riggle/vaulted/crates/oracle/src/config.rs)
-    - [crates/oracle/src/xrpl.rs](/home/riggle/vaulted/crates/oracle/src/xrpl.rs)
-  - Deliverable: unsupported schemes such as `wss` reaching the HTTP RPC client produce an actionable config error instead of a `reqwest` builder error.
-  - Expected behavior: Oracle startup or `XrplService` construction rejects non-HTTP final RPC URLs with a safe message like `XRPL JSON-RPC URL must use http or https`.
-  - Logging requirements: allowed diagnostic is `XRPL endpoint scheme only`; do not log full endpoint strings.
-  - Dependency notes: ledger verification remains mandatory and fail-closed.
+    - [crates/desktop-client/src/commands.rs](/home/riggle/vaulted/crates/desktop-client/src/commands.rs)
+  - Deliverable: `create_vaulted_wallet` always generates `DEFAULT_MNEMONIC_WORDS` and no longer honors a caller-supplied 24-word request.
+  - Expected behavior: even if an old UI or manual invoke passes `wordCount: 24`, the command returns a 12-word mnemonic or rejects non-12 input with a safe error; choose the smaller code path consistent with the final `SeedManager` API.
+  - Logging requirements: add no seed logs; if diagnostics are needed, log only command name, `word_count`, and validation status.
+  - Dependency notes: keep response shape unchanged so the backup UI still receives `mnemonic` only during creation.
 
-- [x] 3. Wire finalize verification to the resolved HTTP RPC endpoint
+- [x] 3. Remove 24-word option and copy from Auth UI
   - Files likely to change:
-    - [crates/oracle/src/services/app_state.rs](/home/riggle/vaulted/crates/oracle/src/services/app_state.rs)
-    - [crates/oracle/src/xrpl.rs](/home/riggle/vaulted/crates/oracle/src/xrpl.rs)
-    - [crates/oracle/src/api/vault.rs](/home/riggle/vaulted/crates/oracle/src/api/vault.rs) only if safer diagnostics are needed around `verify_local_nft_mint`.
-  - Deliverable: `finalize_vault_mint` verification uses the HTTP JSON-RPC endpoint for `tx` and `account_nfts`.
-  - Expected behavior: recovery retry reaches XRPL verification without `builder error for url (wss://...)`.
-  - Logging requirements: if adding diagnostics, only log `NFTokenID`, `tx_hash`, `metadata_hash`, metadata URI length, `vault_id`, status enum, request phase, HTTP status code, and endpoint scheme.
-  - Dependency notes: do not bypass or weaken `validated`, `tesSUCCESS`, `NFTokenMint`, Account, NFTokenID, URI, or ownership checks.
+    - [crates/desktop-client/ui/src/screens/AuthScreen.tsx](/home/riggle/vaulted/crates/desktop-client/ui/src/screens/AuthScreen.tsx)
+    - [crates/desktop-client/ui/src/index.css](/home/riggle/vaulted/crates/desktop-client/ui/src/index.css) only if unused advanced-toggle styles are removed
+  - Deliverable: Auth UI has no `advancedSeed` state, no Advanced 24-word checkbox, no 24-word text, and create calls `create_vaulted_wallet` without a selectable word count or with fixed `wordCount: 12`.
+  - Expected behavior: create flow status says 12-word recovery phrase; restore copy and placeholder say 12 words; restore button can remain disabled until at least/exactly 12 entered, with command validation as the source of truth.
+  - Logging requirements: no console logs or seed diagnostics; UI errors must not include mnemonic words.
+  - Dependency notes: keep backup ceremony unchanged and do not touch QR login, Wallet tab, logout/reset, mint, upload, or file screens.
 
-- [x] 4. Update env examples and docs for split endpoints
+- [x] 4. Update focused tests for strict seed policy
   - Files likely to change:
-    - [.env.example](/home/riggle/vaulted/.env.example)
+    - [crates/crypto-core/src/seed.rs](/home/riggle/vaulted/crates/crypto-core/src/seed.rs)
+    - [crates/desktop-client/src/commands.rs](/home/riggle/vaulted/crates/desktop-client/src/commands.rs) only if practical command-boundary tests can be added without broad Tauri state setup
+  - Deliverable: tests prove generation produces 12 words and strict restore validation rejects 6, 18, and 24 words.
+  - Expected behavior: replace the current `supports_24_word_advanced_mnemonic_policy` test with rejection coverage; include a valid 12-word generated mnemonic validation test without printing the phrase.
+  - Logging requirements: tests must not print mnemonic words, entropy, private keys, or derived secrets.
+  - Dependency notes: do not introduce a frontend test framework in this task; use existing Rust and UI build checks.
+
+- [x] 5. Update directly affected docs and run verification
+  - Files likely to change:
     - [README.md](/home/riggle/vaulted/README.md)
     - [QUICKSTART.md](/home/riggle/vaulted/QUICKSTART.md)
-  - Deliverable: docs distinguish WebSocket `XRPL_NODE_URL` from Oracle HTTP JSON-RPC `XRPL_RPC_URL` / `XRPL_HTTP_URL`.
-  - Expected behavior: local dev config clearly includes `XRPL_NODE_URL=wss://s.altnet.rippletest.net:51233` and `XRPL_RPC_URL=https://s.altnet.rippletest.net:51234`.
-  - Logging requirements: no runtime logging changes in docs.
-  - Dependency notes: do not document secrets or wallet seed values.
+    - [SECURITY.md](/home/riggle/vaulted/SECURITY.md)
+    - historical reports only if they contain active current guidance, not archival notes
+  - Deliverable: any current docs that mention seed length describe exactly 12 words and do not mention 24-word mode.
+  - Expected behavior: docs remain concise and do not include example seed phrases.
+  - Logging requirements: no runtime logging changes.
+  - Dependency notes: skip archival/historical docs unless their wording is presented as current product behavior.
 
-- [x] 5. Add focused tests
-  - Files likely to change:
-    - [crates/oracle/src/config.rs](/home/riggle/vaulted/crates/oracle/src/config.rs)
-    - [crates/oracle/src/xrpl.rs](/home/riggle/vaulted/crates/oracle/src/xrpl.rs)
-  - Deliverable: unit tests for URL resolution and scheme validation.
-  - Required test cases:
-    - explicit `XRPL_RPC_URL=https://...` wins over `XRPL_NODE_URL=wss://...`
-    - `wss://s.altnet.rippletest.net:51233` converts to `https://s.altnet.rippletest.net:51234`
-    - `https://...` remains unchanged
-    - unsupported schemes fail with a safe error that does not include secrets
-  - Logging requirements: tests must not print full secret-bearing URLs; use benign example hosts only.
-
-## Env / Config Update Needed
-- Add to `.env` for the current runtime:
-
-```bash
-XRPL_RPC_URL=https://s.altnet.rippletest.net:51234/
-```
-
-- Keep existing desktop/WebSocket setting if needed:
-
-```bash
-XRPL_NODE_URL=wss://s.altnet.rippletest.net:51233/
-```
-
-## Verification Commands After Code Changes
+## Verification Commands
 
 Run commands separately:
 
 ```bash
 cargo fmt --all --check
-cargo check -p xrpl-vault-oracle
-cargo test -p xrpl-vault-oracle
-./scripts/check-sensitive-logs.sh
-git diff --check
-```
-
-If docs or desktop config surfaces are touched unexpectedly, also run:
-
-```bash
+cargo check -p xrpl-vault-crypto-core
+cargo test -p xrpl-vault-crypto-core
 cargo check -p xrpl-vault-desktop
 cargo test -p xrpl-vault-desktop
+```
+
+Run UI checks because `AuthScreen.tsx` changes:
+
+```bash
 cd crates/desktop-client/ui
 npm run lint
 npx tsc --noEmit --project tsconfig.json
 npm run build
+cd ../../..
 ```
 
-## Runtime Recovery Retry Command
-
-After restarting Oracle with the fixed HTTP RPC config, retry the existing no-remint recovery from the desktop Upload screen with:
-
-```text
-vault_id=b524fe14-4976-448f-a3c6-1f43c249a5ff
-tx_hash=2E084681288AEC19132D70F2B970AE78089D6A66B27E25EC95683F5BF7ECBB7F
-```
-
-Do not press `Mint vault NFT`.
-
-## Runtime Verification Commands
-
-Check Oracle health:
+Run security/diff checks:
 
 ```bash
-curl -i http://127.0.0.1:3000/health
+./scripts/check-sensitive-logs.sh
+git diff --check
 ```
 
-Check DB state after recovery:
+Optional broader check if time permits:
 
 ```bash
-docker compose exec -T postgres psql -U xrpl_vault -d xrpl_vault -c "SELECT nm.id AS vault_id, nm.nft_token_id AS metadata_nft_token_id, nm.status AS metadata_status, nm.metadata_hash, nm.manifest #>> '{xrpl_tx_hash}' AS xrpl_tx_hash, vo.id AS vault_object_id, vo.nft_token_id AS vault_object_nft_token_id, vo.status AS vault_object_status FROM nft_metadata nm LEFT JOIN vault_objects vo ON vo.id = nm.id::text WHERE nm.id = 'b524fe14-4976-448f-a3c6-1f43c249a5ff';"
+cargo test --workspace
 ```
 
-Verify by-NFT lookup through the authenticated app path, or use raw curl only if it does not require printing tokens:
-
-```bash
-curl -i http://127.0.0.1:3000/api/v1/vault-objects/by-nft/00080000DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4FAEB4C857010D42BC
-```
+## Runtime UI Checks
+- Start the desktop UI in the normal dev flow.
+- On the initial Auth screen, verify there is no Advanced section and no 24-word option.
+- Click `Create wallet`; verify the backup ceremony shows exactly 12 numbered words.
+- Verify `Continue to Vaulted` stays disabled until `I saved this seed phrase offline` is checked.
+- Verify restore placeholder and helper text mention only 12 words.
+- Attempt restore with 6, 18, and 24 words; verify each fails with a safe generic policy error that does not display or log the entered phrase.
+- Restore with a valid 12-word Vaulted phrase only in a safe local test session; do not print or save the phrase outside the intended backup ceremony.
 
 ## Expected Successful State
-- Oracle verification uses `https://s.altnet.rippletest.net:51234/` or another explicit HTTP JSON-RPC endpoint.
-- `finalize_vault_mint` still verifies the XRPL ledger and then finalizes:
-  - `nft_metadata.status=active`
-  - `nft_metadata.nft_token_id=00080000DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4FAEB4C857010D42BC`
-  - `vault_objects.nft_token_id=00080000DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4FAEB4C857010D42BC`
-- `/api/v1/vault-objects/by-nft/{NFTokenID}` returns 200 through the authenticated app path.
-- Re-running recovery remains idempotent and does not create conflicting rows.
+- `SeedManager::generate_mnemonic(DEFAULT_MNEMONIC_WORDS)` generates exactly 12 BIP-39 words using 128 bits of OS CSPRNG entropy.
+- `SeedManager::generate_mnemonic(24)` and restore validation for 24 words fail under the strict MVP policy.
+- Auth UI has no 24-word option, advanced 24-word mode, or 12/24 wording.
+- No seed phrase, mnemonic entropy, private key, or derived secret is logged or displayed outside the intended backup ceremony.
