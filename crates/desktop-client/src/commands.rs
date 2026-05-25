@@ -658,6 +658,79 @@ pub async fn finalize_pending_vault_mint(
     .await
 }
 
+/// Recovers Oracle finalization for a mint that succeeded before the desktop restarted.
+///
+/// This does not mint, sign, or submit. Oracle supplies the published metadata
+/// pointer for the vault id, XRPL supplies the validated NFTokenID by tx hash,
+/// and the existing finalization/register flow performs the idempotent link.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn recover_pending_vault_mint(
+    state: State<'_, Arc<AppState>>,
+    vault_id: String,
+    tx_hash: String,
+) -> Result<VaultObjectResponse> {
+    let oracle = state.get_oracle_client_with_timeout(30).await?;
+    let recovery = oracle.get_vault_mint_recovery(&vault_id).await?;
+    ensure_recoverable_mint_status(&recovery.status)?;
+
+    let mut client = XrplClient::new(&state.config.xrpl_node_url);
+    client.connect().await?;
+    let nft_token_id = client
+        .extract_minted_nftoken_id(&tx_hash)
+        .await?
+        .ok_or_else(|| {
+            ClientError::Xrpl(format!(
+                "Missing NFTokenID after successful XRPL mint. tx_hash={tx_hash}"
+            ))
+        })?;
+
+    tracing::info!(
+        nft_token_id = %nft_token_id,
+        tx_hash = %tx_hash,
+        metadata_hash = %recovery.metadata_hash,
+        metadata_uri_len = recovery.metadata_uri.len(),
+        vault_id = %recovery.vault_id,
+        owner_identity_id = recovery.owner_identity_id.as_deref().unwrap_or(""),
+        status = %recovery.status,
+        request_phase = "recover_pending_mint",
+        "Recovering Vaulted mint finalization after restart"
+    );
+
+    if recovery.vault_object_nft_token_id.as_deref() == Some(nft_token_id.as_str()) {
+        tracing::info!(
+            nft_token_id = %nft_token_id,
+            tx_hash = %tx_hash,
+            metadata_hash = %recovery.metadata_hash,
+            metadata_uri_len = recovery.metadata_uri.len(),
+            vault_id = %recovery.vault_id,
+            owner_identity_id = recovery.owner_identity_id.as_deref().unwrap_or(""),
+            status = "already_linked",
+            request_phase = "recover_pending_mint",
+            "Vaulted mint recovery found an existing matching vault object link"
+        );
+    }
+
+    register_minted_vault_object_inner(
+        state.inner(),
+        recovery.vault_id,
+        recovery.metadata_uri,
+        recovery.metadata_hash,
+        nft_token_id,
+        tx_hash,
+    )
+    .await
+}
+
+fn ensure_recoverable_mint_status(status: &str) -> Result<()> {
+    if status == "pending_claim" || status == "active" {
+        return Ok(());
+    }
+
+    Err(ClientError::Validation(format!(
+        "Vault mint recovery is not available for status {status}"
+    )))
+}
+
 async fn register_minted_vault_object_inner(
     state: &Arc<AppState>,
     vault_object_id: String,
@@ -2464,7 +2537,7 @@ fn file_access_status_from_http_status(status: reqwest::StatusCode) -> Option<&'
 
 #[cfg(test)]
 mod tests {
-    use super::file_access_status_from_http_status;
+    use super::{ensure_recoverable_mint_status, file_access_status_from_http_status};
 
     #[test]
     fn file_access_404_maps_to_unavailable_not_deleted() {
@@ -2492,6 +2565,20 @@ mod tests {
             file_access_status_from_http_status(reqwest::StatusCode::NOT_FOUND),
             Some("deleted")
         );
+    }
+
+    #[test]
+    fn pending_mint_recovery_accepts_pending_or_active_status() {
+        assert!(ensure_recoverable_mint_status("pending_claim").is_ok());
+        assert!(ensure_recoverable_mint_status("active").is_ok());
+    }
+
+    #[test]
+    fn pending_mint_recovery_rejects_nonrecoverable_status() {
+        let err = ensure_recoverable_mint_status("burned").unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Vault mint recovery is not available for status burned"));
     }
 }
 

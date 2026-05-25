@@ -736,6 +736,17 @@ pub struct VaultStatus {
     pub created_at: String,
 }
 
+/// Safe fields needed to complete a local mint after the desktop restarted.
+#[derive(Debug, Serialize)]
+pub struct VaultMintRecovery {
+    pub vault_id: Uuid,
+    pub status: String,
+    pub metadata_hash: String,
+    pub metadata_uri: String,
+    pub vault_object_nft_token_id: Option<String>,
+    pub owner_identity_id: Option<String>,
+}
+
 pub async fn get_vault(
     _auth: crate::auth::AuthenticatedUser,
     State(state): State<AppState>,
@@ -762,6 +773,85 @@ pub async fn get_vault(
         owner_address: row.3,
         nft_uri: format!("vaulted://{}", row.4),
         created_at: row.5.to_rfc3339(),
+    }))
+}
+
+/// GET /api/v1/vault/:id/mint-recovery - safe local-mint recovery fields.
+pub async fn get_vault_mint_recovery(
+    auth: crate::auth::AuthenticatedUser,
+    State(state): State<AppState>,
+    axum::extract::Path(vault_id): axum::extract::Path<Uuid>,
+) -> Result<Json<VaultMintRecovery>> {
+    let row = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            Option<String>,
+            String,
+            Option<String>,
+            Option<String>,
+        ),
+    >(
+        r#"
+        SELECT
+            nm.status,
+            nm.metadata_hash,
+            COALESCE(nm.manifest #>> '{public_metadata,metadata_uri}', ''),
+            vo.nft_token_id,
+            u.wallet_address,
+            vo.owner_identity_id,
+            vi.id
+        FROM nft_metadata nm
+        JOIN users u ON nm.owner_id = u.id
+        LEFT JOIN vault_objects vo ON vo.id = nm.id::text
+        LEFT JOIN vaulted_identities vi ON vi.id = vo.owner_identity_id AND vi.status = 'active'
+        WHERE nm.id = $1
+        "#,
+    )
+    .bind(vault_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| ApiError::NotFound(format!("Vault {} not found", vault_id)))?;
+
+    let (
+        status,
+        metadata_hash,
+        metadata_uri,
+        vault_object_nft_token_id,
+        owner_wallet,
+        owner_identity_id,
+        active_owner_identity_id,
+    ) = row;
+    if !auth.wallet_address.eq_ignore_ascii_case(&owner_wallet) {
+        return Err(ApiError::Forbidden(
+            "Only the vault owner can recover mint finalization".into(),
+        ));
+    }
+    if metadata_uri.is_empty() {
+        return Err(ApiError::Validation(
+            "Public metadata must be published before mint recovery".into(),
+        ));
+    }
+
+    tracing::info!(
+        vault_id = %vault_id,
+        metadata_hash = %metadata_hash,
+        metadata_uri_len = metadata_uri.len(),
+        owner_identity_id = active_owner_identity_id.as_deref().unwrap_or(""),
+        status = %status,
+        request_phase = "mint_recovery_lookup",
+        "Loaded safe Vaulted mint recovery fields"
+    );
+
+    Ok(Json(VaultMintRecovery {
+        vault_id,
+        status,
+        metadata_hash,
+        metadata_uri,
+        vault_object_nft_token_id,
+        owner_identity_id,
     }))
 }
 /// Получение информации о файле по NFT token ID
@@ -1328,5 +1418,33 @@ mod local_mint_metadata_tests {
         assert!(sql.contains("ON CONFLICT (id) DO UPDATE"));
         assert!(sql.contains("nft_token_id = EXCLUDED.nft_token_id"));
         assert!(sql.contains("status = 'active'"));
+    }
+
+    #[test]
+    fn vault_mint_recovery_serializes_only_safe_fields() {
+        let response = VaultMintRecovery {
+            vault_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").unwrap(),
+            status: "pending_claim".to_string(),
+            metadata_hash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_string(),
+            metadata_uri: "https://oracle.example/nft/sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/metadata.json".to_string(),
+            vault_object_nft_token_id: None,
+            owner_identity_id: Some("owner-id".to_string()),
+        };
+
+        let value = serde_json::to_value(response).unwrap();
+        let object = value.as_object().unwrap();
+
+        assert!(object.contains_key("vault_id"));
+        assert!(object.contains_key("status"));
+        assert!(object.contains_key("metadata_hash"));
+        assert!(object.contains_key("metadata_uri"));
+        assert!(object.contains_key("vault_object_nft_token_id"));
+        assert!(object.contains_key("owner_identity_id"));
+        assert!(!object.contains_key("manifest"));
+        assert!(!object.contains_key("encrypted_manifest"));
+        assert!(!object.contains_key("encrypted_aes_key"));
+        assert!(!object.contains_key("jwt"));
+        assert!(!object.contains_key("plaintext"));
     }
 }

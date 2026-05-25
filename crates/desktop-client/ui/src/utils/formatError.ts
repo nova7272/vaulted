@@ -180,6 +180,11 @@ const ERROR_MAP: ErrorMapping[] = [
         hint: 'Do not remint. Use finalize existing mint to complete the Oracle link.',
     },
     {
+        patterns: ['Vault mint recovery is not available', 'Public metadata must be published before mint recovery'],
+        message: 'Previous mint cannot be finalized from the current vault state.',
+        hint: 'Check the vault ID and transaction hash before trying recovery again.',
+    },
+    {
         patterns: ['Missing authorization', 'Cannot create vault for different wallet', 'JWT', 'Oracle token'],
         message: 'Vault access needs to be refreshed.',
         hint: 'Sign in with your Vaulted wallet again and retry the action.',
