@@ -415,11 +415,60 @@ impl XrplClient {
 
     /// Attempts to extract the minted NFTokenID from a validated transaction metadata response.
     pub async fn extract_minted_nftoken_id(&self, tx_hash: &str) -> Result<Option<String>> {
-        let response = self.tx(tx_hash).await?;
-        let result = response
-            .get("result")
-            .ok_or_else(|| ClientError::Xrpl("No result".to_string()))?;
-        Ok(extract_minted_nftoken_id_from_tx_result(result))
+        const MAX_ATTEMPTS: usize = 12;
+        const POLL_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            let response = match self.tx(tx_hash).await {
+                Ok(response) => response,
+                Err(e) => {
+                    tracing::warn!(
+                        tx_hash = %tx_hash,
+                        request_phase = "extract_nftoken_id",
+                        status = "tx_lookup_failed",
+                        "Failed to load XRPL transaction while extracting NFTokenID"
+                    );
+                    if attempt == MAX_ATTEMPTS {
+                        return Err(e);
+                    }
+                    tokio::time::sleep(POLL_DELAY).await;
+                    continue;
+                },
+            };
+            let result = response
+                .get("result")
+                .ok_or_else(|| ClientError::Xrpl("No result".to_string()))?;
+
+            if let Some(token_id) = extract_minted_nftoken_id_from_tx_result(result) {
+                tracing::info!(
+                    nft_token_id = %token_id,
+                    tx_hash = %tx_hash,
+                    request_phase = "extract_nftoken_id",
+                    status = "found",
+                    "Extracted minted NFTokenID from XRPL transaction metadata"
+                );
+                return Ok(Some(token_id));
+            }
+
+            tracing::debug!(
+                tx_hash = %tx_hash,
+                request_phase = "extract_nftoken_id",
+                status = "missing_nftoken_id",
+                "XRPL transaction metadata did not include minted NFTokenID yet"
+            );
+
+            if attempt < MAX_ATTEMPTS {
+                tokio::time::sleep(POLL_DELAY).await;
+            }
+        }
+
+        tracing::warn!(
+            tx_hash = %tx_hash,
+            request_phase = "extract_nftoken_id",
+            status = "missing_nftoken_id",
+            "Minted NFTokenID was unavailable after validated transaction polling"
+        );
+        Ok(None)
     }
 
     /// Получает текущий fee
@@ -615,7 +664,11 @@ fn extract_minted_nftoken_id_from_tx_result(result: &Value) -> Option<String> {
         .or_else(|| result.get("metaData"))
         .or_else(|| result.get("metadata"))?;
 
-    if let Some(id) = meta.get("nftoken_id").and_then(|v| v.as_str()) {
+    if let Some(id) = meta
+        .get("nftoken_id")
+        .or_else(|| meta.get("NFTokenID"))
+        .and_then(|v| v.as_str())
+    {
         return Some(id.to_string());
     }
 
@@ -732,6 +785,37 @@ mod tests {
         assert_eq!(
             extract_minted_nftoken_id_from_tx_result(&result),
             Some("00080000DIRECT".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_minted_nftoken_id_from_validated_tx_meta_field() {
+        let result = json!({
+            "validated": true,
+            "tx_json": {
+                "hash": "2E084681288AEC19132D70F2B970AE78089D6A66B27E25EC95683F5BF7ECBB7F"
+            },
+            "meta": {
+                "nftoken_id": "00080000DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4FAEB4C857010D42BC"
+            }
+        });
+        assert_eq!(
+            extract_minted_nftoken_id_from_tx_result(&result),
+            Some("00080000DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4FAEB4C857010D42BC".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_minted_nftoken_id_from_uppercase_meta_field() {
+        let result = json!({
+            "meta": {
+                "NFTokenID": "00080000UPPER",
+                "AffectedNodes": []
+            }
+        });
+        assert_eq!(
+            extract_minted_nftoken_id_from_tx_result(&result),
+            Some("00080000UPPER".to_string())
         );
     }
 

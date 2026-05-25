@@ -53,6 +53,7 @@ fn main() {
             mint_vaulted_nft_locally,
             submit_vaulted_xrpl_tx_blob,
             register_minted_vault_object,
+            finalize_pending_vault_mint,
             publish_vaulted_nft_metadata,
             generate_vaulted_nft_metadata_preview,
             start_vaulted_qr_login,

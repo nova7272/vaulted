@@ -24,6 +24,9 @@ interface VaultedSignedMintResponse {
   signed: { txBlob: string | null; txHash: string | null }
   submitted: VaultedSubmitResponse | null
 }
+interface VaultObjectResponse {
+  nft_token_id: string | null
+}
 interface XrplAccountStatus {
   status: string; address: string; exists: boolean; balanceXrp: string | null
   reserveRequirementXrp: string; network: string; canMint: boolean
@@ -83,6 +86,7 @@ export default function UploadScreen({ onNavigate }: { oracleConnected?: boolean
   const [progress, setProgress] = useState<ProgressEvent|null>(null)
   const [xrplStatus, setXrplStatus] = useState<XrplAccountStatus|null>(null)
   const [checkingXrpl, setCheckingXrpl] = useState(false)
+  const [finalizingMint, setFinalizingMint] = useState(false)
   const [addressCopied, setAddressCopied] = useState(false)
 
   const timerRef = useRef<ReturnType<typeof setInterval>|null>(null)
@@ -297,13 +301,43 @@ export default function UploadScreen({ onNavigate }: { oracleConnected?: boolean
     }
   }
 
+  const handlePendingMintFinalize = async () => {
+    if (!result || !mintResult?.accepted || !mintResult.txHash) return
+    setError(null)
+    setFinalizingMint(true)
+    setClaimState('minting')
+    try {
+      const preview = nftPreview || await generateNftPreview(result)
+      if (!nftPreview) setNftPreview(preview)
+
+      const linked = await invoke<VaultObjectResponse>('finalize_pending_vault_mint', {
+        vaultObjectId: result.vault_id,
+        manifestUri: preview.metadataUri,
+        manifestHash: result.manifest_hash,
+        txHash: mintResult.txHash,
+      })
+      const nftTokenId = linked.nft_token_id
+      if (!nftTokenId) {
+        throw new Error(`Missing NFTokenID after finalize retry. tx_hash=${mintResult.txHash}`)
+      }
+      setResult({ ...result, nft_token_id: nftTokenId })
+      setMintResult({ ...mintResult, nftTokenId })
+      setClaimState('claimed')
+    } catch (e) {
+      setClaimState('registered')
+      setError(formatError(e))
+    } finally {
+      setFinalizingMint(false)
+    }
+  }
+
   const resetAll = () => {
     abortedRef.current = true
     clearTimer()
     setFiles([]); setFileEntries([]); setCustomName(''); setTag('')
     setResult(null); setClaimPayload(null); setMintResult(null); setNftPreview(null); setXrplStatus(null)
     setClaimState('loading'); setTimeLeft(CLAIM_TIMEOUT_SEC)
-    setProgress(null); setError(null)
+    setProgress(null); setError(null); setFinalizingMint(false)
   }
 
   const isFolder = files.length === 1 && !files[0].includes('.')
@@ -526,11 +560,16 @@ export default function UploadScreen({ onNavigate }: { oracleConnected?: boolean
                       </div>
                     )}
                     <div style={{display:'flex',gap:10}}>
-                      <button className="v-btn v-btn-primary" style={{ flex:1,justifyContent:'center',height:44,fontSize:14 }} onClick={handleLocalMint} disabled={checkingXrpl || (xrplStatus ? !xrplStatus.canMint : false)}>
+                      <button className="v-btn v-btn-primary" style={{ flex:1,justifyContent:'center',height:44,fontSize:14 }} onClick={handleLocalMint} disabled={checkingXrpl || finalizingMint || (xrplStatus ? !xrplStatus.canMint : false)}>
                         {checkingXrpl ? 'Checking wallet…' : xrplStatus?.canMint ? 'Mint vault NFT' : 'Check wallet and mint'}
                       </button>
                       <button className="v-btn" style={{ flex:1,justifyContent:'center',height:44,fontSize:14 }} onClick={() => { resetAll(); onNavigate?.('files') }}>Skip for now</button>
                     </div>
+                    {mintResult?.accepted && mintResult.txHash && !mintResult.nftTokenId && (
+                      <button className="v-btn v-btn-primary" style={{ width:'100%',justifyContent:'center',height:44,fontSize:14,marginTop:10 }} onClick={handlePendingMintFinalize} disabled={finalizingMint}>
+                        {finalizingMint ? 'Finalizing…' : 'Finalize existing mint'}
+                      </button>
+                    )}
                   </div>
               )}
 
