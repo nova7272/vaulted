@@ -46,6 +46,8 @@ fn main() {
             has_vaulted_wallet,
             get_auth_lifecycle_status,
             get_vaulted_xrpl_wallet,
+            get_wallet_overview,
+            get_xrpl_transaction_history,
             check_xrpl_account_status,
             get_system_status,
             create_vaulted_nft_mint_qr_request,

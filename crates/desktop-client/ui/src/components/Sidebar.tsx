@@ -1,7 +1,7 @@
 interface UserInfo { walletAddress:string; publicKey:string; hasPreKeys:boolean; expiresAt:string }
 interface SidebarProps {
     currentScreen: string
-    onNavigate: (s:'files'|'upload'|'secure-notes'|'settings'|'activity') => void
+    onNavigate: (s:'files'|'upload'|'wallet'|'secure-notes'|'settings'|'activity') => void
     user: UserInfo|null
     onLogout: () => void
 }
@@ -41,6 +41,14 @@ const IcoActivity = () => (
     </svg>
 )
 
+const IcoWallet = () => (
+    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H19a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5.5A2.5 2.5 0 0 1 3 16.5v-9z"/>
+        <path d="M17 12h4"/>
+        <circle cx="16.5" cy="12" r="1"/>
+    </svg>
+)
+
 const IcoSettings = () => (
     <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
         <circle cx="12" cy="12" r="3"/>
@@ -53,6 +61,7 @@ export default function Sidebar({ currentScreen, onNavigate }: SidebarProps) {
         { id:'files'        as const, label:'Vault',          Icon:IcoVault },
         { id:'upload'       as const, label:'Upload',         Icon:IcoUpload },
         { id:'secure-notes' as const, label:'Secure Notes',   Icon:IcoSecureNotes },
+        { id:'wallet'       as const, label:'Wallet',         Icon:IcoWallet },
         { id:'activity'     as const, label:'Activity',       Icon:IcoActivity },
         { id:'settings'     as const, label:'Settings',       Icon:IcoSettings },
     ]
