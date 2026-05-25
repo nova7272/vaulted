@@ -16,6 +16,7 @@ cp .env.example .env
 DATABASE_URL=postgres://vaulted:vaulted@localhost:5432/vaulted
 REDIS_URL=redis://localhost:6379
 XRPL_NODE_URL=wss://s.altnet.rippletest.net:51233
+XRPL_RPC_URL=https://s.altnet.rippletest.net:51234
 ORACLE_URL=http://localhost:3000
 ```
 

@@ -8,7 +8,7 @@ use std::time::Instant;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use crate::config::Config;
+use crate::config::{Config, DEFAULT_XRPL_RPC_URL};
 use crate::xrpl::{XrplConfig, XrplService};
 
 /// Stored challenge with expiry
@@ -36,22 +36,27 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(config: Config, db: PgPool, signing_key: SigningKey) -> Self {
-        let xrpl = if let (Some(node_url), Some(wallet_seed)) =
-            (&config.xrpl_node_url, &config.xrpl_wallet_seed)
-        {
+        let xrpl_rpc_url = config
+            .xrpl_rpc_url
+            .as_deref()
+            .unwrap_or(DEFAULT_XRPL_RPC_URL);
+        tracing::info!(
+            xrpl_endpoint_scheme = xrpl_rpc_url.split(':').next().unwrap_or("unknown"),
+            request_phase = "oracle_startup",
+            status = "configured",
+            "Oracle XRPL JSON-RPC endpoint configured"
+        );
+
+        let xrpl = if let Some(wallet_seed) = &config.xrpl_wallet_seed {
             let xrpl_config = XrplConfig {
-                node_url: node_url.clone(),
+                node_url: xrpl_rpc_url.to_string(),
                 node_urls: vec![],
                 wallet_seed: Some(wallet_seed.clone()),
             };
             XrplService::with_wallet(xrpl_config)
                 .expect("Failed to create XRPL service with wallet")
         } else {
-            let node_url = config
-                .xrpl_node_url
-                .as_deref()
-                .unwrap_or("https://s.altnet.rippletest.net:51234");
-            XrplService::new(node_url)
+            XrplService::new(xrpl_rpc_url).expect("Failed to create XRPL service")
         };
 
         Self {

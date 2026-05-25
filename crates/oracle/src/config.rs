@@ -2,6 +2,8 @@
 
 use std::env;
 
+pub const DEFAULT_XRPL_RPC_URL: &str = "https://s.altnet.rippletest.net:51234/";
+
 /// Конфигурация приложения
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -13,8 +15,10 @@ pub struct Config {
     pub database_url: String,
     /// URL Redis (опционально)
     pub redis_url: Option<String>,
-    /// URL XRPL ноды (JSON-RPC)
+    /// XRPL node URL used by clients that need WebSocket access.
     pub xrpl_node_url: Option<String>,
+    /// XRPL HTTP JSON-RPC URL used by Oracle ledger verification.
+    pub xrpl_rpc_url: Option<String>,
     /// XRPL wallet seed для минтинга NFT (опционально)
     pub xrpl_wallet_seed: Option<String>,
     /// Секретный ключ для JWT
@@ -59,6 +63,12 @@ impl Config {
         let cors_origins: Vec<String> = env::var("CORS_ORIGINS")
             .map(|s| s.split(',').map(|s| s.trim().to_string()).collect())
             .unwrap_or_else(|_| Vec::new());
+        let xrpl_node_url = env::var("XRPL_NODE_URL").ok();
+        let xrpl_rpc_url = Self::resolve_xrpl_rpc_url(
+            env::var("XRPL_RPC_URL").ok(),
+            env::var("XRPL_HTTP_URL").ok(),
+            xrpl_node_url.as_deref(),
+        )?;
 
         Ok(Self {
             host: env::var("ORACLE_HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
@@ -69,7 +79,8 @@ impl Config {
             database_url: env::var("DATABASE_URL")
                 .map_err(|_| ConfigError::Missing("DATABASE_URL".to_string()))?,
             redis_url: env::var("REDIS_URL").ok(),
-            xrpl_node_url: env::var("XRPL_NODE_URL").ok(),
+            xrpl_node_url,
+            xrpl_rpc_url: Some(xrpl_rpc_url),
             // CRIT-03: Wallet seed loading with security priority:
             // 1. File (XRPL_WALLET_SEED_FILE) — preferred, checked for permissions
             // 2. Env var (XRPL_WALLET_SEED) — only in development
@@ -212,6 +223,51 @@ impl Config {
     pub fn is_production(&self) -> bool {
         self.environment == "production"
     }
+
+    pub(crate) fn resolve_xrpl_rpc_url(
+        xrpl_rpc_url: Option<String>,
+        xrpl_http_url: Option<String>,
+        xrpl_node_url: Option<&str>,
+    ) -> Result<String, ConfigError> {
+        let candidate = xrpl_rpc_url
+            .or(xrpl_http_url)
+            .or_else(|| xrpl_node_url.map(ToOwned::to_owned))
+            .unwrap_or_else(|| DEFAULT_XRPL_RPC_URL.to_string());
+
+        Self::normalize_xrpl_rpc_url(&candidate)
+    }
+
+    pub(crate) fn normalize_xrpl_rpc_url(value: &str) -> Result<String, ConfigError> {
+        let mut url = reqwest::Url::parse(value).map_err(|_| {
+            ConfigError::InvalidValue("XRPL JSON-RPC URL is not a valid URL".to_string())
+        })?;
+        match url.scheme() {
+            "http" | "https" => Ok(url.to_string()),
+            "ws" | "wss" => {
+                let next_scheme = if url.scheme() == "wss" {
+                    "https"
+                } else {
+                    "http"
+                };
+                url.set_scheme(next_scheme).map_err(|_| {
+                    ConfigError::InvalidValue(
+                        "XRPL JSON-RPC URL must use http or https".to_string(),
+                    )
+                })?;
+                if url.port() == Some(51233) {
+                    url.set_port(Some(51234)).map_err(|_| {
+                        ConfigError::InvalidValue(
+                            "XRPL JSON-RPC URL has an invalid port".to_string(),
+                        )
+                    })?;
+                }
+                Ok(url.to_string())
+            },
+            other => Err(ConfigError::InvalidValue(format!(
+                "XRPL JSON-RPC URL must use http or https (scheme: {other})"
+            ))),
+        }
+    }
 }
 
 /// Ошибки конфигурации
@@ -235,6 +291,7 @@ mod tests {
             database_url: "postgres://localhost/test".to_string(),
             redis_url: None,
             xrpl_node_url: None,
+            xrpl_rpc_url: Some(DEFAULT_XRPL_RPC_URL.to_string()),
             xrpl_wallet_seed: None,
             jwt_secret: "secret".to_string(),
             jwt_expiration_hours: 24,
@@ -252,5 +309,45 @@ mod tests {
             auth_rate_limit_rpm: 10,
         };
         assert_eq!(config.listen_addr(), "127.0.0.1:8080");
+    }
+
+    #[test]
+    fn xrpl_rpc_url_prefers_explicit_rpc_url() {
+        let resolved = Config::resolve_xrpl_rpc_url(
+            Some("https://rpc.example/".to_string()),
+            None,
+            Some("wss://s.altnet.rippletest.net:51233/"),
+        )
+        .unwrap();
+
+        assert_eq!(resolved, "https://rpc.example/");
+    }
+
+    #[test]
+    fn xrpl_rpc_url_converts_testnet_websocket_url() {
+        let resolved =
+            Config::resolve_xrpl_rpc_url(None, None, Some("wss://s.altnet.rippletest.net:51233/"))
+                .unwrap();
+
+        assert_eq!(resolved, "https://s.altnet.rippletest.net:51234/");
+    }
+
+    #[test]
+    fn xrpl_rpc_url_keeps_https_url() {
+        let resolved =
+            Config::resolve_xrpl_rpc_url(None, None, Some("https://rpc.example:51234/")).unwrap();
+
+        assert_eq!(resolved, "https://rpc.example:51234/");
+    }
+
+    #[test]
+    fn xrpl_rpc_url_rejects_unsupported_scheme_safely() {
+        let err = Config::resolve_xrpl_rpc_url(None, None, Some("ftp://user:pass@example/"))
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("scheme: ftp"));
+        assert!(!err.contains("user"));
+        assert!(!err.contains("pass"));
     }
 }

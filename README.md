@@ -92,7 +92,8 @@ npm run build
 | --- | --- | --- |
 | `DATABASE_URL` | PostgreSQL connection string | required for Oracle |
 | `REDIS_URL` | Redis connection string | optional/dev dependent |
-| `XRPL_NODE_URL` | XRPL WebSocket URL | `wss://s.altnet.rippletest.net:51233` |
+| `XRPL_NODE_URL` | XRPL WebSocket URL for desktop XRPL flows | `wss://s.altnet.rippletest.net:51233` |
+| `XRPL_RPC_URL` | XRPL HTTP JSON-RPC URL for Oracle ledger verification | `https://s.altnet.rippletest.net:51234` |
 | `ORACLE_SIGNING_KEY` | Ed25519 signing key for JWT/storage tokens | generated in dev |
 | `RUST_LOG` | Rust logging level | `info` |
 
