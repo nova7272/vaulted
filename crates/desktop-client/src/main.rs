@@ -44,6 +44,7 @@ fn main() {
             restore_vaulted_wallet,
             validate_vaulted_seed,
             has_vaulted_wallet,
+            get_auth_lifecycle_status,
             get_vaulted_xrpl_wallet,
             check_xrpl_account_status,
             get_system_status,

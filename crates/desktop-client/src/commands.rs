@@ -127,6 +127,38 @@ pub async fn has_vaulted_wallet(state: State<'_, Arc<AppState>>) -> Result<bool>
     Ok(state.has_vaulted_identity().await)
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthLifecycleStatus {
+    pub auth_state: String,
+    pub wallet_exists: bool,
+    pub identity_exists: bool,
+    pub session_exists: bool,
+    pub locked: bool,
+}
+
+#[tauri::command]
+pub async fn get_auth_lifecycle_status(
+    state: State<'_, Arc<AppState>>,
+) -> Result<AuthLifecycleStatus> {
+    build_auth_lifecycle_status(state.inner()).await
+}
+
+async fn build_auth_lifecycle_status(state: &Arc<AppState>) -> Result<AuthLifecycleStatus> {
+    let session_exists = state.has_active_session().await;
+    let identity_exists = state.has_vaulted_identity().await;
+    let wallet_exists = state.has_xrpl_wallet().await;
+    let unlocked = session_exists && identity_exists && wallet_exists;
+
+    Ok(AuthLifecycleStatus {
+        auth_state: if unlocked { "unlocked" } else { "locked" }.to_string(),
+        wallet_exists,
+        identity_exists,
+        session_exists,
+        locked: !unlocked,
+    })
+}
+
 async fn set_vaulted_session(state: &Arc<AppState>) -> Result<()> {
     let identity = state.get_vaulted_identity().await?;
     let wallet = state.get_xrpl_wallet().await?;
@@ -2552,9 +2584,11 @@ fn file_access_status_from_http_status(status: reqwest::StatusCode) -> Option<&'
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_recoverable_mint_status, file_access_status_from_http_status,
-        generate_create_wallet_mnemonic, validate_create_wallet_word_count,
+        build_auth_lifecycle_status, ensure_recoverable_mint_status,
+        file_access_status_from_http_status, generate_create_wallet_mnemonic, set_vaulted_session,
+        validate_create_wallet_word_count,
     };
+    use crate::state::{AppConfig, AppState};
     use xrpl_vault_crypto_core::{SeedManager, DEFAULT_MNEMONIC_WORDS};
 
     #[test]
@@ -2614,6 +2648,40 @@ mod tests {
         );
         assert!(validate_create_wallet_word_count(None).is_ok());
         assert!(validate_create_wallet_word_count(Some(24)).is_err());
+    }
+
+    #[tokio::test]
+    async fn auth_lifecycle_status_reports_locked_and_unlocked_without_secrets() {
+        let state = AppState::new(AppConfig::default()).unwrap();
+
+        let locked = build_auth_lifecycle_status(&state).await.unwrap();
+        assert_eq!(locked.auth_state, "locked");
+        assert!(locked.locked);
+        assert!(!locked.session_exists);
+        assert!(!locked.identity_exists);
+        assert!(!locked.wallet_exists);
+
+        let mnemonic = generate_create_wallet_mnemonic(None).unwrap();
+        state
+            .init_vaulted_identity_from_mnemonic(&mnemonic, None)
+            .await
+            .unwrap();
+        set_vaulted_session(&state).await.unwrap();
+
+        let unlocked = build_auth_lifecycle_status(&state).await.unwrap();
+        assert_eq!(unlocked.auth_state, "unlocked");
+        assert!(!unlocked.locked);
+        assert!(unlocked.session_exists);
+        assert!(unlocked.identity_exists);
+        assert!(unlocked.wallet_exists);
+
+        state.clear_session().await;
+        let relocked = build_auth_lifecycle_status(&state).await.unwrap();
+        assert_eq!(relocked.auth_state, "locked");
+        assert!(relocked.locked);
+        assert!(!relocked.session_exists);
+        assert!(!relocked.identity_exists);
+        assert!(!relocked.wallet_exists);
     }
 }
 

@@ -19,6 +19,7 @@ type Screen = 'auth'|'files'|'upload'|'settings'|'activity'|'secure-notes'
 interface UserInfo { walletAddress:string; publicKey:string; hasPreKeys:boolean; hasVaultedWallet?:boolean; vaultedIdentityId?:string|null; encryptionPublicKey?:string|null; signingPublicKey?:string|null; expiresAt:string }
 interface ServiceStatus { status:string; message?:string|null; nodes?:number|null; network?:string|null; address?:string|null }
 interface SystemStatus { oracle:ServiceStatus; storage:ServiceStatus; xrpl:ServiceStatus; wallet:ServiceStatus }
+interface AuthLifecycleStatus { authState:string; walletExists:boolean; identityExists:boolean; sessionExists:boolean; locked:boolean }
 
 const IcoLogout = () => (
     <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -68,6 +69,7 @@ function App() {
     const [walletCopied, setWalletCopied] = useState(false)
     const [systemStatus, setSystemStatus] = useState<SystemStatus|null>(null)
     const [statusCenterOpen, setStatusCenterOpen] = useState(false)
+    const [authLifecycle, setAuthLifecycle] = useState<AuthLifecycleStatus|null>(null)
 
     // Oracle auth state
     const [oracleAuthed, setOracleAuthed] = useState(false)
@@ -97,6 +99,8 @@ function App() {
 
     useEffect(()=>{ (async()=>{
         try {
+            const lifecycle = await invoke<AuthLifecycleStatus>('get_auth_lifecycle_status').catch(() => null)
+            if (lifecycle) setAuthLifecycle(lifecycle)
             const ok = await invoke<boolean>('is_authenticated')
             if(ok){
                 setUser(await invoke<UserInfo>('get_current_user'))
@@ -118,6 +122,13 @@ function App() {
         setUser(null)
         setAuthed(false)
         setOracleAuthed(false)
+        setAuthLifecycle({
+            authState: 'locked',
+            walletExists: false,
+            identityExists: false,
+            sessionExists: false,
+            locked: true,
+        })
         setScreen('auth')
     }, [])
 
@@ -181,7 +192,7 @@ function App() {
         </div>
     )
 
-    if(!authed) return <AuthScreen onLogin={handleLogin}/>
+    if(!authed) return <AuthScreen onLogin={handleLogin} lockedAfterRestart={authLifecycle?.locked ?? true}/>
 
     const showSearch = screen === 'files'
     const shortWallet = user?.walletAddress
@@ -276,7 +287,7 @@ function App() {
                             </div>
                         </div>
 
-                        <button className="v-iconbtn" onClick={handleLogout} title="Sign out">
+                        <button className="v-iconbtn" onClick={handleLogout} title="Sign out and lock this session">
                             <IcoLogout />
                         </button>
                     </header>

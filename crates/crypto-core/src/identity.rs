@@ -176,6 +176,7 @@ fn expand32(root: &Hkdf<Sha256>, info: &[u8]) -> Result<[u8; 32]> {
 mod tests {
     use super::*;
     use crate::seed::{SeedManager, DEFAULT_MNEMONIC_WORDS};
+    use crate::xrpl_wallet::VaultedXrplWallet;
 
     #[test]
     fn derivation_is_deterministic_and_domain_separated() {
@@ -184,6 +185,21 @@ mod tests {
         let b = VaultedIdentityKeys::from_mnemonic(&m, None).unwrap();
         assert_eq!(a.identity_id_hex(), b.identity_id_hex());
         assert_ne!(a.signing_public_key_hex(), a.encryption_public_key_hex());
+    }
+
+    #[test]
+    fn same_12_word_phrase_restores_same_identity_and_xrpl_wallet() {
+        let m = SeedManager::generate_mnemonic(DEFAULT_MNEMONIC_WORDS).unwrap();
+        let identity_a = VaultedIdentityKeys::from_mnemonic(&m, None).unwrap();
+        let identity_b = VaultedIdentityKeys::from_mnemonic(&m, None).unwrap();
+        let wallet_a = VaultedXrplWallet::from_mnemonic(&m, None).unwrap();
+        let wallet_b = VaultedXrplWallet::from_mnemonic(&m, None).unwrap();
+
+        assert_eq!(identity_a.identity_id_hex(), identity_b.identity_id_hex());
+        assert_eq!(
+            wallet_a.classic_address().unwrap(),
+            wallet_b.classic_address().unwrap()
+        );
     }
 
     #[test]
