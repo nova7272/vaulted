@@ -1160,6 +1160,7 @@ pub struct FinalizeVaultMintRequest {
     pub tx_hash: String,
     pub manifest_uri: String,
     pub manifest_hash: String,
+    pub owner_identity_id: String,
 }
 
 #[derive(Debug, Deserialize)]

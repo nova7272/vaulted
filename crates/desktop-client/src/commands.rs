@@ -606,6 +606,16 @@ pub async fn register_minted_vault_object(
     let identity = state.get_vaulted_identity().await?;
     let oracle = state.get_oracle_client_with_timeout(30).await?;
 
+    tracing::info!(
+        nft_token_id = %nft_token_id,
+        tx_hash = %tx_hash,
+        metadata_hash = %manifest_hash,
+        metadata_uri_len = manifest_uri.len(),
+        lookup_key_type = "nft_token_id",
+        status = "finalizing",
+        "Registering locally minted vault object"
+    );
+
     oracle
         .finalize_vault_mint(&FinalizeVaultMintRequest {
             vault_id: vault_object_id.clone(),
@@ -613,8 +623,18 @@ pub async fn register_minted_vault_object(
             tx_hash,
             manifest_uri: manifest_uri.clone(),
             manifest_hash: manifest_hash.clone(),
+            owner_identity_id: identity.identity_id_hex(),
         })
         .await?;
+
+    tracing::info!(
+        nft_token_id = %nft_token_id,
+        metadata_hash = %manifest_hash,
+        metadata_uri_len = manifest_uri.len(),
+        lookup_key_type = "nft_token_id",
+        status = "finalized",
+        "Oracle mint finalization completed"
+    );
 
     let request = RegisterVaultObjectRequest {
         id: vault_object_id,
@@ -626,7 +646,15 @@ pub async fn register_minted_vault_object(
         manifest: None,
     };
 
-    oracle.register_vault_object(&request).await
+    let response = oracle.register_vault_object(&request).await?;
+    tracing::info!(
+        nft_token_id = response.nft_token_id.as_deref().unwrap_or(""),
+        lookup_key_type = "nft_token_id",
+        status = %response.status,
+        "Vault object manifest link registered"
+    );
+
+    Ok(response)
 }
 
 #[derive(Debug, Clone)]

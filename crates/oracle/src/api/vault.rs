@@ -484,6 +484,7 @@ pub struct FinalizeVaultMintRequest {
     pub tx_hash: String,
     pub manifest_uri: String,
     pub manifest_hash: String,
+    pub owner_identity_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -513,6 +514,9 @@ pub async fn finalize_vault_mint(
             "manifest_uri and manifest_hash are required".into(),
         ));
     }
+    if req.owner_identity_id.trim().is_empty() {
+        return Err(ApiError::Validation("owner_identity_id is required".into()));
+    }
 
     let row = sqlx::query_as::<_, (String, uuid::Uuid, String)>(
         r#"
@@ -531,6 +535,18 @@ pub async fn finalize_vault_mint(
     if !auth.wallet_address.eq_ignore_ascii_case(&owner_wallet) {
         return Err(ApiError::Forbidden(
             "Only the vault owner can finalize mint".into(),
+        ));
+    }
+
+    let identity_exists = sqlx::query_scalar::<_, String>(
+        "SELECT id FROM vaulted_identities WHERE id = $1 AND status = 'active'",
+    )
+    .bind(&req.owner_identity_id)
+    .fetch_optional(&state.db)
+    .await?;
+    if identity_exists.is_none() {
+        return Err(ApiError::Validation(
+            "owner_identity_id is not an active Vaulted identity".into(),
         ));
     }
 
@@ -622,7 +638,26 @@ pub async fn finalize_vault_mint(
     .await
     .ok();
 
+    sqlx::query(finalize_vault_object_link_sql())
+        .bind(req.vault_id.to_string())
+        .bind(&req.owner_identity_id)
+        .bind(&req.manifest_uri)
+        .bind(&req.manifest_hash)
+        .bind(&req.nft_token_id)
+        .execute(&mut *tx)
+        .await?;
+
     tx.commit().await?;
+
+    tracing::info!(
+        nft_token_id = %req.nft_token_id,
+        tx_hash = %req.tx_hash,
+        metadata_hash = %req.manifest_hash,
+        metadata_uri_len = req.manifest_uri.len(),
+        lookup_key_type = "nft_token_id",
+        status = "active",
+        "Finalized Vaulted mint and linked vault object"
+    );
 
     state
         .audit_log(
@@ -645,6 +680,22 @@ pub async fn finalize_vault_mint(
         nft_token_id: req.nft_token_id,
         status: "active".to_string(),
     }))
+}
+
+fn finalize_vault_object_link_sql() -> &'static str {
+    r#"
+    INSERT INTO vault_objects
+        (id, owner_identity_id, manifest_uri, manifest_hash, nft_chain, nft_token_id, status)
+    VALUES ($1, $2, $3, $4, 'xrpl:testnet', $5, 'active')
+    ON CONFLICT (id) DO UPDATE SET
+        owner_identity_id = EXCLUDED.owner_identity_id,
+        manifest_uri = EXCLUDED.manifest_uri,
+        manifest_hash = EXCLUDED.manifest_hash,
+        nft_chain = EXCLUDED.nft_chain,
+        nft_token_id = EXCLUDED.nft_token_id,
+        status = 'active',
+        updated_at = now()
+    "#
 }
 
 /// Получает или создаёт пользователя
@@ -1266,5 +1317,16 @@ mod local_mint_metadata_tests {
         metadata["properties"]["plaintext_filename"] = serde_json::json!("secret.pdf");
 
         assert!(validate_public_metadata_safety(&metadata, manifest_hash, metadata_uri).is_err());
+    }
+
+    #[test]
+    fn finalize_vault_object_link_sql_updates_by_nft_lookup_key() {
+        let sql = finalize_vault_object_link_sql();
+
+        assert!(sql.contains("INSERT INTO vault_objects"));
+        assert!(sql.contains("nft_token_id"));
+        assert!(sql.contains("ON CONFLICT (id) DO UPDATE"));
+        assert!(sql.contains("nft_token_id = EXCLUDED.nft_token_id"));
+        assert!(sql.contains("status = 'active'"));
     }
 }
