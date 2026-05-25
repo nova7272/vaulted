@@ -44,6 +44,51 @@ impl Default for AppConfig {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xrpl_vault_crypto_core::{SeedManager, DEFAULT_MNEMONIC_WORDS};
+
+    #[tokio::test]
+    async fn app_state_starts_locked_and_unlocks_from_mnemonic() {
+        let state = AppState::new(AppConfig::default()).unwrap();
+
+        assert!(!state.has_active_session().await);
+        assert!(!state.has_vaulted_identity().await);
+        assert!(!state.has_xrpl_wallet().await);
+
+        let mnemonic = SeedManager::generate_mnemonic(DEFAULT_MNEMONIC_WORDS).unwrap();
+        state
+            .init_vaulted_identity_from_mnemonic(&mnemonic, None)
+            .await
+            .unwrap();
+
+        assert!(state.has_vaulted_identity().await);
+        assert!(state.has_xrpl_wallet().await);
+    }
+
+    #[tokio::test]
+    async fn clear_session_locks_memory_only_wallet_state() {
+        let state = AppState::new(AppConfig::default()).unwrap();
+        let fingerprint = state.device_fingerprint().to_string();
+        let mnemonic = SeedManager::generate_mnemonic(DEFAULT_MNEMONIC_WORDS).unwrap();
+        state
+            .init_vaulted_identity_from_mnemonic(&mnemonic, None)
+            .await
+            .unwrap();
+
+        assert!(state.has_vaulted_identity().await);
+        assert!(state.has_xrpl_wallet().await);
+
+        state.clear_session().await;
+
+        assert!(!state.has_active_session().await);
+        assert!(!state.has_vaulted_identity().await);
+        assert!(!state.has_xrpl_wallet().await);
+        assert_eq!(state.device_fingerprint(), fingerprint);
+    }
+}
+
 impl AppConfig {
     /// Загружает конфигурацию из переменных окружения
     pub fn from_env() -> Self {
@@ -214,6 +259,11 @@ impl AppState {
         session.as_ref().map(|s| !s.is_expired()).unwrap_or(false)
     }
 
+    /// Checks whether an active, non-expired session exists in memory.
+    pub async fn has_active_session(&self) -> bool {
+        self.is_authenticated().await
+    }
+
     /// Возвращает текущую сессию
     pub async fn get_session(&self) -> Result<Session> {
         let session = self.session.read().await;
@@ -335,6 +385,11 @@ impl AppState {
                     .to_string(),
             )
         })
+    }
+
+    /// Checks whether the Vaulted-owned XRPL wallet is loaded in memory.
+    pub async fn has_xrpl_wallet(&self) -> bool {
+        self.xrpl_wallet.read().await.is_some()
     }
 
     /// Проверяет есть ли keypair в памяти
@@ -669,8 +724,7 @@ impl AppState {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(format!("Refresh failed: HTTP {} — {}", status, body));
+            return Err(format!("Refresh failed: HTTP {}", status));
         }
 
         let data: serde_json::Value = response

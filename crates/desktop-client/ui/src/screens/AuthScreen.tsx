@@ -13,7 +13,7 @@ interface UserInfo {
     signingPublicKey?: string | null
     expiresAt: string
 }
-interface AuthScreenProps { onLogin: (u: UserInfo) => void }
+interface AuthScreenProps { onLogin: (u: UserInfo) => void; lockedAfterRestart?: boolean }
 interface VaultedIdentityResponse {
     vaultedIdentityId: string
     mnemonic?: string | null
@@ -43,7 +43,7 @@ const IcoTransfer = () => (
     </svg>
 )
 
-export default function AuthScreen({ onLogin }: AuthScreenProps) {
+export default function AuthScreen({ onLogin, lockedAfterRestart = true }: AuthScreenProps) {
     const [step, setStep] = useState<AuthStep>('initial')
     const [error, setError] = useState<string|null>(null)
     const [status, setStatus] = useState('')
@@ -112,7 +112,10 @@ export default function AuthScreen({ onLogin }: AuthScreenProps) {
             {step === 'initial' && (
                 <div className="v-login-card v-auth-card-wide">
                     <h3>Start with your Vaulted wallet</h3>
-                    <p className="v-auth-sub">One wallet unlocks encryption, Oracle access, and XRPL vault ownership.</p>
+                    <p className="v-auth-sub">
+                        One wallet unlocks encryption, Oracle access, and XRPL vault ownership.
+                        {lockedAfterRestart && ' After restart, Vaulted locks locally; restore with your 12-word phrase to unlock your existing wallet and files.'}
+                    </p>
 
                     <div className="v-auth-choice-grid">
                         <button className="v-auth-choice primary" onClick={createVaultedWallet}>
@@ -160,7 +163,7 @@ export default function AuthScreen({ onLogin }: AuthScreenProps) {
             {step === 'restore' && (
                 <div className="v-login-card v-auth-card-wide">
                     <h3>Restore Vaulted wallet</h3>
-                    <p className="v-auth-sub">Enter your recovery phrase locally. It is used to unlock your Vaulted identity and XRPL wallet.</p>
+                    <p className="v-auth-sub">Enter your recovery phrase locally to unlock your existing Vaulted identity and XRPL wallet.</p>
                     <textarea
                         className="v-restore-textarea"
                         value={restorePhrase}
