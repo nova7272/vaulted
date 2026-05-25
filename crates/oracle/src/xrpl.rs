@@ -71,8 +71,9 @@ pub struct XrplService {
 
 impl XrplService {
     /// Создаёт сервис без кошелька (только чтение)
-    pub fn new(node_url: &str) -> Self {
-        Self {
+    pub fn new(node_url: &str) -> Result<Self> {
+        validate_json_rpc_url(node_url)?;
+        Ok(Self {
             config: XrplConfig {
                 node_url: node_url.to_string(),
                 node_urls: vec![],
@@ -83,11 +84,12 @@ impl XrplService {
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
             wallet: None,
-        }
+        })
     }
 
     /// Создаёт сервис с кошельком
     pub fn with_wallet(config: XrplConfig) -> Result<Self> {
+        validate_json_rpc_url(&config.node_url)?;
         let wallet = if let Some(ref seed) = config.wallet_seed {
             let w = if seed.starts_with("sEd") {
                 Wallet::from_seed_encoded_with_algorithm(
@@ -159,7 +161,12 @@ impl XrplService {
             }))
             .send()
             .await
-            .map_err(|e| ApiError::Xrpl(format!("HTTP error: {}", e)))?;
+            .map_err(|_| {
+                ApiError::Xrpl(format!(
+                    "HTTP error while calling XRPL JSON-RPC endpoint (scheme: {})",
+                    json_rpc_url_scheme(&self.config.node_url)
+                ))
+            })?;
 
         let data: serde_json::Value = resp
             .json()
@@ -935,6 +942,21 @@ impl XrplService {
     }
 }
 
+fn validate_json_rpc_url(value: &str) -> Result<()> {
+    let url = reqwest::Url::parse(value)
+        .map_err(|_| ApiError::Xrpl("XRPL JSON-RPC URL is not a valid URL".to_string()))?;
+    match url.scheme() {
+        "http" | "https" => Ok(()),
+        scheme => Err(ApiError::Xrpl(format!(
+            "XRPL JSON-RPC URL must use http or https (scheme: {scheme})"
+        ))),
+    }
+}
+
+fn json_rpc_url_scheme(value: &str) -> &str {
+    value.split(':').next().unwrap_or("unknown")
+}
+
 fn decode_xrpl_uri(hex_uri: &str) -> Result<String> {
     let bytes =
         hex::decode(hex_uri).map_err(|_| ApiError::Xrpl("Invalid XRPL NFT URI hex".into()))?;
@@ -1016,4 +1038,27 @@ fn extract_offer_id_from_meta(meta: &serde_json::Value) -> Option<String> {
                 None
             }
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_rpc_url_validation_accepts_http_schemes() {
+        assert!(validate_json_rpc_url("https://rpc.example/").is_ok());
+        assert!(validate_json_rpc_url("http://rpc.example/").is_ok());
+    }
+
+    #[test]
+    fn json_rpc_url_validation_rejects_websocket_scheme_safely() {
+        let err = validate_json_rpc_url("wss://user:pass@example/")
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("scheme: wss"));
+        assert!(!err.contains("user"));
+        assert!(!err.contains("pass"));
+        assert!(!err.contains("example"));
+    }
 }
