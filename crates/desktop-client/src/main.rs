@@ -12,6 +12,69 @@ use xrpl_vault_desktop::{
     state::{AppConfig, AppState},
 };
 
+use tauri::Manager;
+
+fn safe_startup_error_message(message: &str) -> String {
+    const MAX_MESSAGE_LEN: usize = 180;
+    let mut safe = message
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect::<String>();
+
+    for forbidden in [
+        "seed",
+        "Seed",
+        "private key",
+        "private_key",
+        "jwt",
+        "JWT",
+        "aes key",
+        "aes_key",
+        "plaintext",
+        "recovery phrase",
+        "mnemonic entropy",
+        "tx_blob",
+        "signature",
+    ] {
+        safe = safe.replace(forbidden, "[redacted]");
+    }
+
+    if safe.len() > MAX_MESSAGE_LEN {
+        safe.truncate(MAX_MESSAGE_LEN);
+    }
+
+    safe
+}
+
+#[cfg(target_os = "linux")]
+fn configure_linux_display_backend() {
+    let display_present = std::env::var_os("DISPLAY").is_some();
+    let wayland_display_present = std::env::var_os("WAYLAND_DISPLAY").is_some();
+    let gdk_backend_present = std::env::var_os("GDK_BACKEND").is_some();
+    let should_force_x11 = display_present && wayland_display_present && !gdk_backend_present;
+
+    if should_force_x11 {
+        std::env::set_var("GDK_BACKEND", "x11");
+    }
+
+    tracing::info!(
+        phase = "display_backend",
+        status = if should_force_x11 {
+            "x11_forced"
+        } else {
+            "unchanged"
+        },
+        display_present,
+        wayland_display_present,
+        gdk_backend_present,
+        backend_forced = should_force_x11,
+        "tauri_display_backend_configured"
+    );
+}
+
+#[cfg(not(target_os = "linux"))]
+fn configure_linux_display_backend() {}
+
 fn main() {
     // Загружаем .env файл
     dotenvy::dotenv().ok();
@@ -25,6 +88,7 @@ fn main() {
         .init();
 
     tracing::info!("Starting XRPL Vault Desktop...");
+    configure_linux_display_backend();
 
     // Загружаем конфигурацию
     let config = AppConfig::from_env();
@@ -32,12 +96,100 @@ fn main() {
     // Создаём состояние приложения
     let state = AppState::new(config).expect("Failed to create app state");
 
+    tracing::info!(
+        phase = "tauri_builder_setup",
+        status = "started",
+        display_present = std::env::var_os("DISPLAY").is_some(),
+        wayland_display_present = std::env::var_os("WAYLAND_DISPLAY").is_some(),
+        "tauri_builder_setup_started"
+    );
+
     // Запускаем Tauri
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .manage(state)
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .setup(|app| {
+            tracing::info!(
+                phase = "setup",
+                status = "started",
+                display_present = std::env::var_os("DISPLAY").is_some(),
+                wayland_display_present = std::env::var_os("WAYLAND_DISPLAY").is_some(),
+                "tauri_setup_started"
+            );
+
+            let window_count = app.webview_windows().len();
+            let window_label = "main";
+
+            match app.get_webview_window(window_label) {
+                Some(window) => {
+                    tracing::info!(
+                        phase = "window_lookup",
+                        status = "found",
+                        window_label,
+                        window_count,
+                        result = true,
+                        "tauri_window_lookup"
+                    );
+
+                    match window.show() {
+                        Ok(()) => tracing::info!(
+                            phase = "window_show",
+                            status = "ok",
+                            window_label,
+                            result = true,
+                            "tauri_window_show"
+                        ),
+                        Err(error) => tracing::warn!(
+                            phase = "window_show",
+                            status = "failed",
+                            window_label,
+                            result = false,
+                            error_class = "window_show_failed",
+                            error_message = %safe_startup_error_message(&error.to_string()),
+                            "tauri_window_show"
+                        ),
+                    }
+
+                    match window.set_focus() {
+                        Ok(()) => tracing::info!(
+                            phase = "window_focus",
+                            status = "ok",
+                            window_label,
+                            result = true,
+                            "tauri_window_focus"
+                        ),
+                        Err(error) => tracing::warn!(
+                            phase = "window_focus",
+                            status = "failed",
+                            window_label,
+                            result = false,
+                            error_class = "window_focus_failed",
+                            error_message = %safe_startup_error_message(&error.to_string()),
+                            "tauri_window_focus"
+                        ),
+                    }
+                },
+                None => {
+                    tracing::warn!(
+                        phase = "window_lookup",
+                        status = "missing",
+                        window_label,
+                        window_count,
+                        result = false,
+                        "tauri_window_lookup"
+                    );
+                },
+            }
+
+            tracing::info!(
+                phase = "setup",
+                status = "completed",
+                "tauri_setup_completed"
+            );
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             // Vaulted seed-based identity
             create_vaulted_wallet,
@@ -130,6 +282,98 @@ fn main() {
             check_claim_status,
             cancel_secure_note_offer,
         ])
-        .run(tauri::generate_context!())
-        .expect("Error while running XRPL Vault");
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
+                tracing::info!(
+                    phase = "window_event",
+                    status = "close_requested",
+                    window_label = window.label(),
+                    "tauri_window_close_requested"
+                );
+            }
+        });
+
+    tracing::info!(
+        phase = "tauri_build",
+        status = "started",
+        "tauri_build_started"
+    );
+    let app = builder
+        .build(tauri::generate_context!())
+        .expect("Error while building XRPL Vault");
+    tracing::info!(
+        phase = "tauri_build",
+        status = "completed",
+        "tauri_build_completed"
+    );
+    tracing::info!(phase = "tauri_run", status = "started", "tauri_run_started");
+
+    app.run(|app_handle, event| {
+        if matches!(event, tauri::RunEvent::Ready) {
+            let window_label = "main";
+            let window_count = app_handle.webview_windows().len();
+            tracing::info!(
+                phase = "run_event_ready",
+                status = "started",
+                window_count,
+                "tauri_run_event_ready"
+            );
+            match app_handle.get_webview_window(window_label) {
+                Some(window) => {
+                    tracing::info!(
+                        phase = "ready_window_lookup",
+                        status = "found",
+                        window_label,
+                        window_count,
+                        result = true,
+                        "tauri_ready_window_lookup"
+                    );
+                    match window.show() {
+                        Ok(()) => tracing::info!(
+                            phase = "ready_window_show",
+                            status = "ok",
+                            window_label,
+                            result = true,
+                            "tauri_ready_window_show"
+                        ),
+                        Err(error) => tracing::warn!(
+                            phase = "ready_window_show",
+                            status = "failed",
+                            window_label,
+                            result = false,
+                            error_class = "window_show_failed",
+                            error_message = %safe_startup_error_message(&error.to_string()),
+                            "tauri_ready_window_show"
+                        ),
+                    }
+                    match window.set_focus() {
+                        Ok(()) => tracing::info!(
+                            phase = "ready_window_focus",
+                            status = "ok",
+                            window_label,
+                            result = true,
+                            "tauri_ready_window_focus"
+                        ),
+                        Err(error) => tracing::warn!(
+                            phase = "ready_window_focus",
+                            status = "failed",
+                            window_label,
+                            result = false,
+                            error_class = "window_focus_failed",
+                            error_message = %safe_startup_error_message(&error.to_string()),
+                            "tauri_ready_window_focus"
+                        ),
+                    }
+                },
+                None => tracing::warn!(
+                    phase = "ready_window_lookup",
+                    status = "missing",
+                    window_label,
+                    window_count,
+                    result = false,
+                    "tauri_ready_window_lookup"
+                ),
+            }
+        }
+    });
 }

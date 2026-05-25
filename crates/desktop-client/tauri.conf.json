@@ -12,13 +12,15 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "",
+        "label": "main",
+        "title": "Vaulted",
         "width": 1500,
         "height": 1400,
         "minWidth": 1000,
         "minHeight": 700,
         "resizable": true,
         "fullscreen": false,
+        "visible": true,
         "center": true,
         "theme": "Dark"
       }
