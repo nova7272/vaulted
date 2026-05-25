@@ -275,6 +275,21 @@ impl XrplClient {
         Ok(nfts)
     }
 
+    /// Returns recent validated transactions for an account.
+    pub async fn account_tx(&self, account: &str, limit: u32) -> Result<Value> {
+        self.request(
+            "account_tx",
+            json!({
+                "account": account,
+                "ledger_index_min": -1,
+                "ledger_index_max": -1,
+                "ledger_index": "validated",
+                "limit": limit.clamp(1, 50)
+            }),
+        )
+        .await
+    }
+
     /// Проверяет владельца NFT
     pub async fn verify_nft_owner(&self, nft_token_id: &str, expected_owner: &str) -> Result<bool> {
         // Получаем все NFT владельца

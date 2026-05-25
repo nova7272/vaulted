@@ -7,6 +7,7 @@ import FingerprintBg from './components/FingerprintBg'
 import AuthScreen from './screens/AuthScreen'
 import FilesScreen from './screens/FilesScreen'
 import UploadScreen from './screens/UploadScreen'
+import WalletScreen from './screens/WalletScreen'
 import SettingsScreen from './screens/SettingsScreen'
 import ActivityScreen from './screens/ActivityScreen'
 import { SecureNotesScreen } from './screens/SecureNotesScreen'
@@ -15,7 +16,7 @@ import { ActivityLogProvider } from './contexts/ActivityLogContext'
 import type { ToastData } from './components/Toast'
 import { ToastContainer, registerToastFn } from './components/Toast'
 
-type Screen = 'auth'|'files'|'upload'|'settings'|'activity'|'secure-notes'
+type Screen = 'auth'|'files'|'upload'|'wallet'|'settings'|'activity'|'secure-notes'
 interface UserInfo { walletAddress:string; publicKey:string; hasPreKeys:boolean; hasVaultedWallet?:boolean; vaultedIdentityId?:string|null; encryptionPublicKey?:string|null; signingPublicKey?:string|null; expiresAt:string }
 interface ServiceStatus { status:string; message?:string|null; nodes?:number|null; network?:string|null; address?:string|null }
 interface SystemStatus { oracle:ServiceStatus; storage:ServiceStatus; xrpl:ServiceStatus; wallet:ServiceStatus }
@@ -214,12 +215,13 @@ function App() {
                     <header className="v-topbar">
                         <div>
                             <span className="v-topbar-title">
-                                {screen === 'files' ? 'Files' : screen === 'upload' ? 'Upload' : screen === 'secure-notes' ? 'Secure Notes' : screen === 'activity' ? 'Activity' : 'Settings'}
+                                {screen === 'files' ? 'Files' : screen === 'upload' ? 'Upload' : screen === 'secure-notes' ? 'Secure Notes' : screen === 'wallet' ? 'Wallet' : screen === 'activity' ? 'Activity' : 'Settings'}
                             </span>
                             <span className="v-topbar-crumb">
                                 {screen === 'files' && `· ${searchQuery ? 'searching…' : 'encrypted items'}`}
                                 {screen === 'upload' && '· encrypt & mint'}
                                 {screen === 'secure-notes' && '· encrypted'}
+                                {screen === 'wallet' && '· receive & history'}
                                 {screen === 'activity' && '· last 30 days'}
                                 {screen === 'settings' && '· wallet & security'}
                             </span>
@@ -299,6 +301,7 @@ function App() {
                             <UploadScreen oracleConnected={oracleAuthed} onNavigate={setScreen} />
                         </div>
                         {screen==='secure-notes' && <SecureNotesScreen oracleConnected={oracleAuthed} />}
+                        {screen==='wallet' && <WalletScreen />}
                         {screen==='activity' && <ActivityScreen oracleConnected={oracleAuthed} />}
                         {screen==='settings' && <SettingsScreen user={user} />}
                     </main>

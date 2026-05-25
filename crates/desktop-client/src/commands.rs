@@ -2369,8 +2369,8 @@ pub async fn encrypt_bytes(
 
 #[tauri::command]
 pub async fn get_xrp_balance(state: State<'_, Arc<AppState>>) -> Result<String> {
-    let _session = state.get_session().await?;
-    Ok("0".to_string())
+    let overview = get_wallet_overview(state).await?;
+    Ok(overview.balance_xrp.unwrap_or_else(|| "0".to_string()))
 }
 
 /// Расшифровывает имя файла из encrypted_filename
@@ -2585,8 +2585,8 @@ fn file_access_status_from_http_status(status: reqwest::StatusCode) -> Option<&'
 mod tests {
     use super::{
         build_auth_lifecycle_status, ensure_recoverable_mint_status,
-        file_access_status_from_http_status, generate_create_wallet_mnemonic, set_vaulted_session,
-        validate_create_wallet_word_count,
+        file_access_status_from_http_status, generate_create_wallet_mnemonic,
+        parse_wallet_transaction_history, set_vaulted_session, validate_create_wallet_word_count,
     };
     use crate::state::{AppConfig, AppState};
     use xrpl_vault_crypto_core::{SeedManager, DEFAULT_MNEMONIC_WORDS};
@@ -2682,6 +2682,76 @@ mod tests {
         assert!(!relocked.session_exists);
         assert!(!relocked.identity_exists);
         assert!(!relocked.wallet_exists);
+    }
+
+    #[test]
+    fn wallet_history_parses_compact_payment_rows() {
+        let account = "rSender";
+        let data = serde_json::json!({
+            "result": {
+                "transactions": [
+                    {
+                        "tx_json": {
+                            "TransactionType": "Payment",
+                            "Account": "rSender",
+                            "Destination": "rReceiver",
+                            "Amount": "1250000",
+                            "hash": "ABC123",
+                            "date": 783839401
+                        },
+                        "meta": { "TransactionResult": "tesSUCCESS" },
+                        "ledger_index": 123
+                    },
+                    {
+                        "tx": {
+                            "TransactionType": "Payment",
+                            "Account": "rOther",
+                            "Destination": "rSender",
+                            "Amount": "2000000"
+                        },
+                        "hash": "DEF456",
+                        "metaData": { "TransactionResult": "tesSUCCESS" },
+                        "close_time_iso": "2026-05-25T00:00:00Z",
+                        "ledger_index": 124
+                    }
+                ]
+            }
+        });
+
+        let rows = parse_wallet_transaction_history(account, &data);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].tx_hash, "ABC123");
+        assert_eq!(rows[0].transaction_type, "Payment");
+        assert_eq!(rows[0].direction.as_deref(), Some("sent"));
+        assert_eq!(rows[0].amount_xrp.as_deref(), Some("1.25"));
+        assert_eq!(rows[0].counterparty.as_deref(), Some("rReceiver"));
+        assert_eq!(rows[0].ledger_index, Some(123));
+        assert_eq!(rows[0].status, "tesSUCCESS");
+
+        assert_eq!(rows[1].tx_hash, "DEF456");
+        assert_eq!(rows[1].direction.as_deref(), Some("received"));
+        assert_eq!(rows[1].amount_xrp.as_deref(), Some("2"));
+        assert_eq!(rows[1].counterparty.as_deref(), Some("rOther"));
+        assert_eq!(rows[1].date.as_deref(), Some("2026-05-25T00:00:00Z"));
+    }
+
+    #[test]
+    fn wallet_history_omits_unparseable_or_hashless_entries() {
+        let data = serde_json::json!({
+            "result": {
+                "transactions": [
+                    { "tx_json": { "TransactionType": "Payment", "Account": "rA" } },
+                    { "tx_json": { "TransactionType": "NFTokenMint", "hash": "NFT123" } }
+                ]
+            }
+        });
+
+        let rows = parse_wallet_transaction_history("rA", &data);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tx_hash, "NFT123");
+        assert_eq!(rows[0].transaction_type, "NFTokenMint");
+        assert!(rows[0].amount_xrp.is_none());
+        assert!(rows[0].direction.is_none());
     }
 }
 
@@ -4274,6 +4344,34 @@ pub struct XrplAccountStatus {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct WalletOverview {
+    pub classic_address: String,
+    pub network: String,
+    pub status: String,
+    pub connected: bool,
+    pub funded: bool,
+    pub balance_xrp: Option<String>,
+    pub reserve_requirement_xrp: String,
+    pub action_hint: String,
+    pub action_label: Option<String>,
+    pub action_url: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WalletTransactionHistoryItem {
+    pub tx_hash: String,
+    pub transaction_type: String,
+    pub direction: Option<String>,
+    pub amount_xrp: Option<String>,
+    pub counterparty: Option<String>,
+    pub ledger_index: Option<u32>,
+    pub date: Option<String>,
+    pub status: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ServiceStatus {
     pub status: String,
     pub message: Option<String>,
@@ -4324,6 +4422,162 @@ fn drops_to_xrp_string(drops: &str) -> String {
         },
         Err(_) => "0".to_string(),
     }
+}
+
+fn xrpl_datetime_to_iso(seconds_since_2000: u64) -> Option<String> {
+    let unix_seconds = seconds_since_2000.checked_add(946_684_800)?;
+    chrono::DateTime::from_timestamp(unix_seconds as i64, 0).map(|dt| dt.to_rfc3339())
+}
+
+fn extract_tx_object(entry: &serde_json::Value) -> Option<&serde_json::Value> {
+    entry
+        .get("tx_json")
+        .or_else(|| entry.get("tx"))
+        .or_else(|| entry.get("transaction"))
+}
+
+fn extract_tx_hash(entry: &serde_json::Value, tx: &serde_json::Value) -> String {
+    tx.get("hash")
+        .or_else(|| entry.get("hash"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+fn parse_payment_amount_xrp(tx: &serde_json::Value) -> Option<String> {
+    tx.get("Amount")
+        .and_then(|amount| amount.as_str())
+        .map(drops_to_xrp_string)
+}
+
+fn parse_wallet_history_item(
+    account: &str,
+    entry: &serde_json::Value,
+) -> Option<WalletTransactionHistoryItem> {
+    let tx = extract_tx_object(entry)?;
+    let transaction_type = tx.get("TransactionType")?.as_str()?.to_string();
+    let tx_hash = extract_tx_hash(entry, tx);
+    if tx_hash.is_empty() {
+        return None;
+    }
+
+    let account_field = tx.get("Account").and_then(|value| value.as_str());
+    let destination = tx.get("Destination").and_then(|value| value.as_str());
+    let is_payment = transaction_type == "Payment";
+    let direction = if is_payment {
+        if account_field == Some(account) {
+            Some("sent".to_string())
+        } else if destination == Some(account) {
+            Some("received".to_string())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let counterparty = match direction.as_deref() {
+        Some("sent") => destination.map(str::to_string),
+        Some("received") => account_field.map(str::to_string),
+        _ => None,
+    };
+
+    let ledger_index = entry
+        .get("ledger_index")
+        .or_else(|| tx.get("ledger_index"))
+        .and_then(|value| value.as_u64())
+        .map(|value| value as u32);
+    let date = entry
+        .get("close_time_iso")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .or_else(|| {
+            tx.get("date")
+                .and_then(|value| value.as_u64())
+                .and_then(xrpl_datetime_to_iso)
+        });
+
+    let status = entry
+        .get("meta")
+        .or_else(|| entry.get("metaData"))
+        .and_then(|meta| meta.get("TransactionResult"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    Some(WalletTransactionHistoryItem {
+        tx_hash,
+        transaction_type,
+        direction,
+        amount_xrp: if is_payment {
+            parse_payment_amount_xrp(tx)
+        } else {
+            None
+        },
+        counterparty,
+        ledger_index,
+        date,
+        status,
+    })
+}
+
+fn parse_wallet_transaction_history(
+    account: &str,
+    response: &serde_json::Value,
+) -> Vec<WalletTransactionHistoryItem> {
+    response
+        .get("result")
+        .and_then(|result| result.get("transactions"))
+        .and_then(|transactions| transactions.as_array())
+        .map(|transactions| {
+            transactions
+                .iter()
+                .filter_map(|entry| parse_wallet_history_item(account, entry))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+pub async fn get_wallet_overview(state: State<'_, Arc<AppState>>) -> Result<WalletOverview> {
+    let address = state.wallet_address().await?;
+    tracing::debug!(
+        command = "get_wallet_overview",
+        request_phase = "started",
+        network = %xrpl_network_label(&state.config.xrpl_node_url),
+        "Loading XRPL wallet overview"
+    );
+    let account = check_xrpl_account_status_inner(state.inner(), Some(address.clone())).await?;
+    Ok(WalletOverview {
+        classic_address: address,
+        network: account.network,
+        status: account.status.clone(),
+        connected: true,
+        funded: account.exists,
+        balance_xrp: account.balance_xrp,
+        reserve_requirement_xrp: account.reserve_requirement_xrp,
+        action_hint: account.action_hint,
+        action_label: account.action_label,
+        action_url: account.action_url,
+    })
+}
+
+#[tauri::command]
+pub async fn get_xrpl_transaction_history(
+    state: State<'_, Arc<AppState>>,
+    limit: Option<u32>,
+) -> Result<Vec<WalletTransactionHistoryItem>> {
+    let address = state.wallet_address().await?;
+    tracing::debug!(
+        command = "get_xrpl_transaction_history",
+        request_phase = "started",
+        network = %xrpl_network_label(&state.config.xrpl_node_url),
+        "Loading compact XRPL transaction history"
+    );
+
+    let mut client = XrplClient::new(&state.config.xrpl_node_url);
+    client.connect().await?;
+    let response = client.account_tx(&address, limit.unwrap_or(20)).await?;
+    Ok(parse_wallet_transaction_history(&address, &response))
 }
 
 #[tauri::command(rename_all = "camelCase")]
