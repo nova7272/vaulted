@@ -175,6 +175,11 @@ const ERROR_MAP: ErrorMapping[] = [
         hint: 'Check the wallet status shortly before retrying.',
     },
     {
+        patterns: ['could not extract the minted NFTokenID', 'Missing NFTokenID'],
+        message: 'XRPL mint succeeded, but Vaulted could not read the NFTokenID yet.',
+        hint: 'Do not remint. Use finalize existing mint to complete the Oracle link.',
+    },
+    {
         patterns: ['Missing authorization', 'Cannot create vault for different wallet', 'JWT', 'Oracle token'],
         message: 'Vault access needs to be refreshed.',
         hint: 'Sign in with your Vaulted wallet again and retry the action.',

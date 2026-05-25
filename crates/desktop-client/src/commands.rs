@@ -603,6 +603,69 @@ pub async fn register_minted_vault_object(
     nft_token_id: String,
     tx_hash: String,
 ) -> Result<VaultObjectResponse> {
+    register_minted_vault_object_inner(
+        state.inner(),
+        vault_object_id,
+        manifest_uri,
+        manifest_hash,
+        nft_token_id,
+        tx_hash,
+    )
+    .await
+}
+
+/// Finalizes a successful mint after the original submit path could not extract NFTokenID yet.
+///
+/// This does not submit or mint. It reads the validated XRPL transaction by hash,
+/// extracts the minted NFTokenID, then reuses the normal Oracle finalize/register path.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn finalize_pending_vault_mint(
+    state: State<'_, Arc<AppState>>,
+    vault_object_id: String,
+    manifest_uri: String,
+    manifest_hash: String,
+    tx_hash: String,
+) -> Result<VaultObjectResponse> {
+    let mut client = XrplClient::new(&state.config.xrpl_node_url);
+    client.connect().await?;
+    let nft_token_id = client
+        .extract_minted_nftoken_id(&tx_hash)
+        .await?
+        .ok_or_else(|| {
+            ClientError::Xrpl(format!(
+                "Missing NFTokenID after successful XRPL mint. tx_hash={tx_hash}"
+            ))
+        })?;
+
+    tracing::info!(
+        nft_token_id = %nft_token_id,
+        tx_hash = %tx_hash,
+        metadata_hash = %manifest_hash,
+        metadata_uri_len = manifest_uri.len(),
+        request_phase = "finalize_pending_mint",
+        status = "nftoken_id_extracted",
+        "Recovered NFTokenID for pending Vaulted mint finalization"
+    );
+
+    register_minted_vault_object_inner(
+        state.inner(),
+        vault_object_id,
+        manifest_uri,
+        manifest_hash,
+        nft_token_id,
+        tx_hash,
+    )
+    .await
+}
+
+async fn register_minted_vault_object_inner(
+    state: &Arc<AppState>,
+    vault_object_id: String,
+    manifest_uri: String,
+    manifest_hash: String,
+    nft_token_id: String,
+    tx_hash: String,
+) -> Result<VaultObjectResponse> {
     let identity = state.get_vaulted_identity().await?;
     let oracle = state.get_oracle_client_with_timeout(30).await?;
 
