@@ -458,13 +458,17 @@ async fn get_fragment(
 
     match fs::read(&path).await {
         Ok(data) => {
-            tracing::debug!("Serving fragment: {} ({} bytes)", key, data.len());
+            tracing::debug!(
+                storage_key_hash = %safe_storage_key_label(&key),
+                bytes = data.len(),
+                "Serving encrypted fragment"
+            );
             Ok(data)
         },
         Err(_) => Err((
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
-                error: format!("Fragment not found: {}", key),
+                error: "Fragment not found".to_string(),
             }),
         )),
     }
@@ -535,7 +539,11 @@ async fn put_fragment(
                 },
             );
 
-            tracing::info!("Stored fragment: {} ({} bytes)", key, size);
+            tracing::info!(
+                storage_key_hash = %safe_storage_key_label(&key),
+                bytes = size,
+                "Stored encrypted fragment"
+            );
 
             Ok(Json(UploadResponse {
                 key,
@@ -574,13 +582,16 @@ async fn delete_fragment(
             let mut fragments = state.fragments.write().await;
             fragments.remove(&key);
 
-            tracing::info!("Deleted fragment: {}", key);
+            tracing::info!(
+                storage_key_hash = %safe_storage_key_label(&key),
+                "Deleted encrypted fragment"
+            );
             Ok(StatusCode::NO_CONTENT)
         },
         Err(_) => Err((
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
-                error: format!("Fragment not found: {}", key),
+                error: "Fragment not found".to_string(),
             }),
         )),
     }
@@ -714,7 +725,10 @@ fn verify_token_for_operation(
     verifying_key
         .verify(payload_b64.as_bytes(), &signature)
         .map_err(|_| {
-            tracing::warn!("Invalid token signature for key: {}", storage_key);
+            tracing::warn!(
+                storage_key_hash = %safe_storage_key_label(storage_key),
+                "Invalid token signature for storage key"
+            );
             (
                 StatusCode::UNAUTHORIZED,
                 Json(ErrorResponse {
@@ -756,9 +770,9 @@ fn verify_token_for_operation(
     // Check storage key matches
     if token.storage_key != storage_key {
         tracing::warn!(
-            "Token storage key mismatch: expected {}, got {}",
-            storage_key,
-            token.storage_key
+            expected_storage_key_hash = %safe_storage_key_label(storage_key),
+            token_storage_key_hash = %safe_storage_key_label(&token.storage_key),
+            "Token storage key mismatch"
         );
         return Err((
             StatusCode::FORBIDDEN,
@@ -784,9 +798,9 @@ fn verify_token_for_operation(
     }
 
     tracing::debug!(
-        "Token verified for {} operation on {}",
         operation,
-        storage_key
+        storage_key_hash = %safe_storage_key_label(storage_key),
+        "Token verified for storage operation"
     );
     Ok(())
 }
@@ -795,6 +809,11 @@ fn verify_token_for_operation(
 fn sha256_hex(data: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(data))
+}
+
+fn safe_storage_key_label(storage_key: &str) -> String {
+    let digest = sha256_hex(storage_key.as_bytes());
+    format!("sha256:{}", &digest[..12])
 }
 
 /// Verifies declared hash before accepting upload. Supports sha256: and blake3:.
@@ -817,4 +836,27 @@ fn hex_decode(s: &str) -> Result<Vec<u8>, ()> {
         .step_by(2)
         .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|_| ()))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{fragment_hash_matches, safe_storage_key_label};
+
+    #[test]
+    fn safe_storage_key_label_does_not_include_raw_key() {
+        let storage_key = "file_secret_frag_0_r0";
+        let label = safe_storage_key_label(storage_key);
+
+        assert!(label.starts_with("sha256:"));
+        assert_eq!(label.len(), "sha256:".len() + 12);
+        assert!(!label.contains(storage_key));
+        assert!(!label.contains("secret"));
+    }
+
+    #[test]
+    fn fragment_hash_matches_sha256() {
+        let data = b"encrypted fragment bytes";
+        let declared = format!("sha256:{}", super::sha256_hex(data));
+        assert!(fragment_hash_matches(&declared, data));
+    }
 }
