@@ -917,6 +917,7 @@ pub async fn poll_vaulted_qr_login(
         ..Default::default()
     })?;
     let status = oracle.qr_login_status(&login_request_id).await?;
+    let has_local_identity = state.has_vaulted_identity().await;
     if status.status == "approved" || status.status == "consumed" {
         if let (Some(token), Some(identity_id)) =
             (status.access_token.clone(), status.identity_id.clone())
@@ -950,6 +951,9 @@ pub async fn poll_vaulted_qr_login(
         "status": status.status,
         "identityId": status.identity_id,
         "approved": status.access_token.is_some(),
+        "oracleSession": status.access_token.is_some(),
+        "localVaultedWallet": has_local_identity,
+        "localDecryptAvailable": has_local_identity,
     }))
 }
 

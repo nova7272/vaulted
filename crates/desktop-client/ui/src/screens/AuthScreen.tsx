@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import FingerprintBg from '../components/FingerprintBg'
 import { formatError } from '../utils/formatError'
+import { OracleLoginModal, type QrLoginPollResponse } from '../components/OracleLoginModal'
 
 interface UserInfo {
     walletAddress: string
@@ -52,10 +53,21 @@ export default function AuthScreen({ onLogin, lockedAfterRestart = true }: AuthS
     const [seedSaved, setSeedSaved] = useState(false)
     const [copyArmed, setCopyArmed] = useState(false)
     const [copied, setCopied] = useState(false)
+    const [showQrLogin, setShowQrLogin] = useState(false)
 
     const seedWords = useMemo(() => (createdIdentity?.mnemonic || '').split(' ').filter(Boolean), [createdIdentity])
 
     const finishLogin = async () => onLogin(await invoke<UserInfo>('get_current_user'))
+
+    const handleQrLoginSuccess = async (result: QrLoginPollResponse) => {
+        if (result.localDecryptAvailable || result.localVaultedWallet) {
+            setStatus('QR login approved.')
+            await finishLogin()
+            return
+        }
+        setShowQrLogin(false)
+        setStatus('Oracle session approved. Local file decrypt still requires restoring the 12-word phrase on this device.')
+    }
 
     const createVaultedWallet = async () => {
         try {
@@ -118,13 +130,17 @@ export default function AuthScreen({ onLogin, lockedAfterRestart = true }: AuthS
                     </p>
 
                     <div className="v-auth-choice-grid">
-                        <button className="v-auth-choice primary" onClick={createVaultedWallet}>
-                            <span className="v-auth-choice-title">Create wallet</span>
+                        <button className="v-auth-choice primary" onClick={() => setStep('restore')}>
+                            <span className="v-auth-choice-title">Sign in with seed phrase</span>
+                            <span className="v-auth-choice-sub">Unlock Vaulted with your existing 12-word phrase.</span>
+                        </button>
+                        <button className="v-auth-choice" onClick={createVaultedWallet}>
+                            <span className="v-auth-choice-title">Create new wallet</span>
                             <span className="v-auth-choice-sub">Generate a new seed phrase and back it up offline.</span>
                         </button>
-                        <button className="v-auth-choice" onClick={() => setStep('restore')}>
-                            <span className="v-auth-choice-title">Restore wallet</span>
-                            <span className="v-auth-choice-sub">Unlock Vaulted with your existing 12-word phrase.</span>
+                        <button className="v-auth-choice" onClick={() => setShowQrLogin(true)}>
+                            <span className="v-auth-choice-title">Sign in with QR code</span>
+                            <span className="v-auth-choice-sub">Approve Oracle login from an already-unlocked Vaulted session.</span>
                         </button>
                     </div>
 
@@ -176,6 +192,12 @@ export default function AuthScreen({ onLogin, lockedAfterRestart = true }: AuthS
                     {error && <div className="v-auth-error">{error}</div>}
                 </div>
             )}
+
+            <OracleLoginModal
+                isOpen={showQrLogin}
+                onClose={() => setShowQrLogin(false)}
+                onSuccess={handleQrLoginSuccess}
+            />
         </div>
     )
 }

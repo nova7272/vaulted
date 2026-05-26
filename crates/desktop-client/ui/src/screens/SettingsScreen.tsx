@@ -53,9 +53,17 @@ interface XrplSigningStatus {
   txJsonHash?: string | null;
   expectedXrplAccount?: string | null;
   approvedByDeviceId?: string | null;
-  approvalSignature?: string | null;
   approvedAt?: string | null;
   approved: boolean;
+}
+interface QrLoginApprovalPayload {
+  type: string;
+  loginRequestId: string;
+  challenge: string;
+  oracleUrl: string;
+  expiresAt: string;
+  desktopDeviceName?: string | null;
+  desktopDevicePublicKey?: string | null;
 }
 interface VaultedDevice {
   deviceId: string;
@@ -90,6 +98,11 @@ export default function SettingsScreen({ user }: Props) {
   const [xrplSigningStatus, setXrplSigningStatus] = useState<XrplSigningStatus | null>(null);
   const [xrplSigningLoading, setXrplSigningLoading] = useState(false);
   const [xrplSigningError, setXrplSigningError] = useState<string | null>(null);
+  const [qrLoginPayloadText, setQrLoginPayloadText] = useState('');
+  const [qrLoginPayload, setQrLoginPayload] = useState<QrLoginApprovalPayload | null>(null);
+  const [qrLoginApprovalLoading, setQrLoginApprovalLoading] = useState(false);
+  const [qrLoginApprovalStatus, setQrLoginApprovalStatus] = useState<string | null>(null);
+  const [qrLoginApprovalError, setQrLoginApprovalError] = useState<string | null>(null);
 
   useEffect(() => {
     fetchOracle();
@@ -241,6 +254,68 @@ export default function SettingsScreen({ user }: Props) {
     setXrplSigningError(null);
   };
 
+  const parseQrLoginPayload = (text: string): QrLoginApprovalPayload => {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      throw new Error("QR login payload is not valid JSON");
+    }
+    if (!parsed || typeof parsed !== "object") {
+      throw new Error("QR login payload must be an object");
+    }
+    const value = parsed as Record<string, unknown>;
+    const payload = value.canonicalPayload && typeof value.canonicalPayload === "object"
+      ? { ...value, ...(value.canonicalPayload as Record<string, unknown>) }
+      : value;
+    const loginRequestId = typeof payload.loginRequestId === "string" ? payload.loginRequestId : "";
+    const challenge = typeof payload.challenge === "string" ? payload.challenge : "";
+    const oracleUrl = typeof payload.oracleUrl === "string" ? payload.oracleUrl : "";
+    const expiresAt = typeof payload.expiresAt === "string" ? payload.expiresAt : "";
+    const type = typeof payload.type === "string" ? payload.type : "";
+    if (type !== "vaulted-login-v1") throw new Error("Payload is not a Vaulted QR login request");
+    if (!loginRequestId || !challenge || !oracleUrl || !expiresAt) {
+      throw new Error("QR login payload is missing required fields");
+    }
+    return {
+      type,
+      loginRequestId,
+      challenge,
+      oracleUrl,
+      expiresAt,
+      desktopDeviceName: typeof payload.desktopDeviceName === "string" ? payload.desktopDeviceName : null,
+      desktopDevicePublicKey: typeof payload.desktopDevicePublicKey === "string" ? payload.desktopDevicePublicKey : null,
+    };
+  };
+
+  const reviewQrLoginPayload = () => {
+    try {
+      setQrLoginApprovalError(null);
+      setQrLoginApprovalStatus(null);
+      setQrLoginPayload(parseQrLoginPayload(qrLoginPayloadText.trim()));
+    } catch (e) {
+      setQrLoginPayload(null);
+      setQrLoginApprovalError(String(e));
+    }
+  };
+
+  const approveQrLogin = async () => {
+    if (!qrLoginPayload) return;
+    try {
+      setQrLoginApprovalLoading(true);
+      setQrLoginApprovalError(null);
+      const approved = await invoke<boolean>("confirm_vaulted_qr_login", {
+        loginRequestId: qrLoginPayload.loginRequestId,
+        challenge: qrLoginPayload.challenge,
+      });
+      setQrLoginApprovalStatus(approved ? "QR login approved" : "QR login was not approved");
+    } catch (e) {
+      setQrLoginApprovalError(String(e));
+    } finally {
+      setQrLoginApprovalLoading(false);
+    }
+  };
+
   const fillSampleXrplTx = () => {
     const account = user?.walletAddress || "rEXAMPLE_ACCOUNT";
     setXrplExpectedAccount(account);
@@ -308,6 +383,10 @@ export default function SettingsScreen({ user }: Props) {
         ? "EXPIRED"
         : "PENDING"
       : "NOT STARTED";
+
+  const qrLoginPayloadExpired = qrLoginPayload
+    ? new Date(qrLoginPayload.expiresAt).getTime() <= Date.now()
+    : false;
 
   const fmtExpiry = (iso: string | null) => {
     if (!iso) return "N/A";
@@ -609,6 +688,99 @@ export default function SettingsScreen({ user }: Props) {
               : undefined
           }
         />
+      </Section>
+
+      <Section title="Approve QR Login">
+        <div
+          style={{
+            border: "1px solid var(--line)",
+            borderRadius: 12,
+            padding: "14px 16px",
+            background: "#1f2430",
+          }}
+        >
+          <div style={{ color: "var(--fg-0)", fontSize: 13, fontWeight: 700, marginBottom: 4 }}>
+            Trusted-device approval
+          </div>
+          <div style={{ color: "var(--fg-2)", fontSize: 12, lineHeight: 1.5, marginBottom: 12 }}>
+            Paste a Vaulted QR login payload from another desktop session, review the request, then approve it with this unlocked Vaulted identity.
+          </div>
+          <textarea
+            value={qrLoginPayloadText}
+            onChange={(e) => {
+              setQrLoginPayloadText(e.target.value);
+              setQrLoginPayload(null);
+              setQrLoginApprovalStatus(null);
+              setQrLoginApprovalError(null);
+            }}
+            placeholder='{"type":"vaulted-login-v1","loginRequestId":"...","challenge":"..."}'
+            rows={6}
+            style={{
+              width: "100%",
+              background: "var(--bg-1)",
+              border: "1px solid var(--line)",
+              borderRadius: 10,
+              color: "var(--fg-0)",
+              padding: "10px 12px",
+              fontFamily: "var(--font-mono)",
+              fontSize: 12,
+              resize: "vertical",
+            }}
+          />
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+            <button
+              className="btn-secondary"
+              style={{ padding: "8px 12px", fontSize: 12 }}
+              onClick={reviewQrLoginPayload}
+              disabled={!qrLoginPayloadText.trim()}
+            >
+              Review request
+            </button>
+            <button
+              className="btn-secondary"
+              style={{ padding: "8px 12px", fontSize: 12 }}
+              onClick={approveQrLogin}
+              disabled={!qrLoginPayload || qrLoginPayloadExpired || qrLoginApprovalLoading || !user?.hasVaultedWallet}
+            >
+              {qrLoginApprovalLoading ? "Approving..." : "Approve login"}
+            </button>
+          </div>
+          {qrLoginPayload && (
+            <div style={{ marginTop: 12 }}>
+              <Row label="Request id" value={qrLoginPayload.loginRequestId} mono />
+              <Row label="Oracle" value={qrLoginPayload.oracleUrl} mono />
+              <Row label="Expires" value={fmtDate(qrLoginPayload.expiresAt)} />
+              <Row label="Desktop device" value={qrLoginPayload.desktopDeviceName || "Vaulted desktop"} />
+              {qrLoginPayload.desktopDevicePublicKey && (
+                <Row
+                  label="Device fingerprint"
+                  value={qrLoginPayload.desktopDevicePublicKey.slice(0, 32) + "..."}
+                  mono
+                />
+              )}
+              {qrLoginPayloadExpired && (
+                <div style={{ color: "#e07a6a", fontSize: 12, lineHeight: 1.5, marginTop: 8 }}>
+                  This QR login request is expired. Create a new request before approving.
+                </div>
+              )}
+            </div>
+          )}
+          {!user?.hasVaultedWallet && (
+            <div style={{ color: "#e6b35a", fontSize: 12, lineHeight: 1.5, marginTop: 10 }}>
+              Approval requires a local Vaulted seed identity on this device.
+            </div>
+          )}
+          {qrLoginApprovalStatus && (
+            <div style={{ color: "#6ac79a", fontSize: 12, lineHeight: 1.5, marginTop: 10 }}>
+              {qrLoginApprovalStatus}
+            </div>
+          )}
+          {qrLoginApprovalError && (
+            <div style={{ color: "#e07a6a", fontSize: 12, lineHeight: 1.5, marginTop: 10 }}>
+              {qrLoginApprovalError}
+            </div>
+          )}
+        </div>
       </Section>
 
       <Section title="Devices">
@@ -1115,9 +1287,6 @@ export default function SettingsScreen({ user }: Props) {
                 )}
                 {xrplSigningStatus?.approvedAt && (
                   <Row label="Approved at" value={fmtDate(xrplSigningStatus.approvedAt)} />
-                )}
-                {xrplSigningStatus?.approvalSignature && (
-                  <Row label="Approval signature" value={xrplSigningStatus.approvalSignature.slice(0, 32) + "..."} mono onCopy={() => copy(xrplSigningStatus.approvalSignature || "", "XRPL approval signature")} />
                 )}
                 <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
                   <button
