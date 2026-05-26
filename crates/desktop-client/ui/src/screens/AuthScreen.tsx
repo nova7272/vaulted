@@ -195,6 +195,7 @@ export default function AuthScreen({ onLogin, lockedAfterRestart = true }: AuthS
 
             <OracleLoginModal
                 isOpen={showQrLogin}
+                startOnOpen
                 onClose={() => setShowQrLogin(false)}
                 onSuccess={handleQrLoginSuccess}
             />
