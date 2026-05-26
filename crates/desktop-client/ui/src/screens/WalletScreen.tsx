@@ -27,6 +27,12 @@ interface WalletHistoryItem {
     status: string
 }
 
+interface SendXrpPaymentResponse {
+    engineResult: string
+    engineResultMessage: string
+    txHash: string
+}
+
 function shortHash(value: string) {
     if (value.length <= 16) return value
     return `${value.slice(0, 8)}…${value.slice(-8)}`
@@ -45,6 +51,31 @@ function formatDate(value: string | null) {
     return date.toLocaleString()
 }
 
+function validateAmount(value: string) {
+    const trimmed = value.trim()
+    if (!trimmed) return 'Amount is required.'
+    if (!/^\d+(\.\d{1,6})?$/.test(trimmed)) return 'Enter a positive XRP amount with at most 6 decimals.'
+    const numeric = Number(trimmed)
+    if (!Number.isFinite(numeric) || numeric <= 0) return 'Amount must be greater than 0 XRP.'
+    return null
+}
+
+function validateDestination(value: string) {
+    const trimmed = value.trim()
+    if (!trimmed) return 'Destination is required.'
+    if (!/^r[1-9A-HJ-NP-Za-km-z]{24,34}$/.test(trimmed)) return 'Enter a valid XRPL classic address.'
+    return null
+}
+
+function validateDestinationTag(value: string) {
+    const trimmed = value.trim()
+    if (!trimmed) return null
+    if (!/^\d+$/.test(trimmed)) return 'Destination tag must be a non-negative integer.'
+    const numeric = Number(trimmed)
+    if (!Number.isSafeInteger(numeric) || numeric > 4294967295) return 'Destination tag must be 4294967295 or less.'
+    return null
+}
+
 export default function WalletScreen() {
     const [overview, setOverview] = useState<WalletOverview | null>(null)
     const [history, setHistory] = useState<WalletHistoryItem[]>([])
@@ -52,6 +83,13 @@ export default function WalletScreen() {
     const [historyLoading, setHistoryLoading] = useState(false)
     const [error, setError] = useState<string | null>(null)
     const [copied, setCopied] = useState(false)
+    const [sendDestination, setSendDestination] = useState('')
+    const [sendAmount, setSendAmount] = useState('')
+    const [sendDestinationTag, setSendDestinationTag] = useState('')
+    const [sendError, setSendError] = useState<string | null>(null)
+    const [sendResult, setSendResult] = useState<SendXrpPaymentResponse | null>(null)
+    const [confirmingSend, setConfirmingSend] = useState(false)
+    const [sending, setSending] = useState(false)
 
     const refreshOverview = useCallback(async () => {
         try {
@@ -87,6 +125,52 @@ export default function WalletScreen() {
         await navigator.clipboard.writeText(overview.classicAddress)
         setCopied(true)
         window.setTimeout(() => setCopied(false), 1800)
+    }
+
+    const validateSendForm = () => {
+        return validateDestination(sendDestination)
+            || validateAmount(sendAmount)
+            || validateDestinationTag(sendDestinationTag)
+            || (!overview?.funded ? 'Wallet must be funded before sending XRP.' : null)
+    }
+
+    const requestSendConfirmation = () => {
+        const validation = validateSendForm()
+        setSendResult(null)
+        setSendError(validation)
+        setConfirmingSend(!validation)
+    }
+
+    const submitSend = async () => {
+        const validation = validateSendForm()
+        if (validation) {
+            setSendError(validation)
+            setConfirmingSend(false)
+            return
+        }
+        try {
+            setSending(true)
+            setSendError(null)
+            const result = await invoke<SendXrpPaymentResponse>('send_xrp_payment', {
+                request: {
+                    destination: sendDestination.trim(),
+                    amountXrp: sendAmount.trim(),
+                    destinationTag: sendDestinationTag.trim() || null,
+                },
+            })
+            setSendResult(result)
+            setConfirmingSend(false)
+            if (result.engineResult.startsWith('tes')) {
+                setSendDestination('')
+                setSendAmount('')
+                setSendDestinationTag('')
+                await Promise.all([refreshOverview(), refreshHistory()])
+            }
+        } catch (e) {
+            setSendError(formatError(e))
+        } finally {
+            setSending(false)
+        }
     }
 
     const statusClass = overview?.funded ? 'ok' : overview?.connected ? 'warn' : 'syncing'
@@ -148,6 +232,84 @@ export default function WalletScreen() {
                             )}
                         </div>
                     )}
+                </section>
+
+                <section className="wallet-panel wallet-send">
+                    <div className="wallet-panel-head">
+                        <div>
+                            <h2>Send XRP</h2>
+                            <p>Send testnet XRP from your local Vaulted wallet.</p>
+                        </div>
+                    </div>
+
+                    <div className="wallet-send-form">
+                        <label>
+                            <span>Destination</span>
+                            <input
+                                value={sendDestination}
+                                onChange={event => setSendDestination(event.target.value)}
+                                placeholder="r..."
+                                disabled={sending}
+                                autoComplete="off"
+                            />
+                        </label>
+                        <div className="wallet-send-row">
+                            <label>
+                                <span>Amount XRP</span>
+                                <input
+                                    value={sendAmount}
+                                    onChange={event => setSendAmount(event.target.value)}
+                                    placeholder="0.000001"
+                                    inputMode="decimal"
+                                    disabled={sending}
+                                    autoComplete="off"
+                                />
+                            </label>
+                            <label>
+                                <span>Destination tag</span>
+                                <input
+                                    value={sendDestinationTag}
+                                    onChange={event => setSendDestinationTag(event.target.value)}
+                                    placeholder="Optional"
+                                    inputMode="numeric"
+                                    disabled={sending}
+                                    autoComplete="off"
+                                />
+                            </label>
+                        </div>
+
+                        {sendError && <div className="wallet-error">{sendError}</div>}
+
+                        {confirmingSend && (
+                            <div className="wallet-confirm">
+                                <strong>Confirm testnet XRP send</strong>
+                                <span>Destination: <code>{shortAddress(sendDestination.trim())}</code></span>
+                                <span>Amount: {sendAmount.trim()} XRP</span>
+                                {sendDestinationTag.trim() && <span>Destination tag: {sendDestinationTag.trim()}</span>}
+                                <span>Reserve kept: {overview?.reserveRequirementXrp ?? '10'} XRP plus network fee.</span>
+                                <div className="wallet-send-actions">
+                                    <button className="v-btn-secondary" onClick={() => setConfirmingSend(false)} disabled={sending}>Cancel</button>
+                                    <button className="v-btn-vaulted" onClick={submitSend} disabled={sending}>
+                                        {sending ? 'Submitting…' : 'Confirm send'}
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+
+                        {sendResult && (
+                            <div className="wallet-send-result">
+                                <span>{sendResult.engineResult}</span>
+                                <p>{sendResult.engineResultMessage || 'XRPL submit completed.'}</p>
+                                <code>{sendResult.txHash || 'No transaction hash returned'}</code>
+                            </div>
+                        )}
+
+                        {!confirmingSend && (
+                            <button className="v-btn-vaulted wallet-send-submit" onClick={requestSendConfirmation} disabled={sending || !overview?.funded}>
+                                {sending ? 'Submitting…' : 'Review send'}
+                            </button>
+                        )}
+                    </div>
                 </section>
 
                 <section className="wallet-panel wallet-receive">
