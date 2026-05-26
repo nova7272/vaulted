@@ -2705,8 +2705,9 @@ mod tests {
     use super::{
         build_auth_lifecycle_status, ensure_recoverable_mint_status,
         file_access_status_from_http_status, generate_create_wallet_mnemonic,
-        parse_destination_tag, parse_wallet_transaction_history, parse_xrp_amount_to_drops,
-        set_vaulted_session, validate_create_wallet_word_count, validate_spendable_balance,
+        owner_download_error_for_status, parse_destination_tag, parse_wallet_transaction_history,
+        parse_xrp_amount_to_drops, set_vaulted_session, validate_create_wallet_word_count,
+        validate_spendable_balance,
     };
     use crate::state::{AppConfig, AppState};
     use xrpl_vault_crypto_core::{SeedManager, DEFAULT_MNEMONIC_WORDS};
@@ -2737,6 +2738,40 @@ mod tests {
             file_access_status_from_http_status(reqwest::StatusCode::NOT_FOUND),
             Some("deleted")
         );
+    }
+
+    #[test]
+    fn owner_download_status_errors_are_safe_and_actionable() {
+        assert!(
+            owner_download_error_for_status(reqwest::StatusCode::UNAUTHORIZED)
+                .contains("Authorization")
+        );
+        assert!(
+            owner_download_error_for_status(reqwest::StatusCode::FORBIDDEN)
+                .contains("Authorization")
+        );
+        assert!(
+            owner_download_error_for_status(reqwest::StatusCode::NOT_FOUND).contains("metadata")
+        );
+        assert!(
+            owner_download_error_for_status(reqwest::StatusCode::SERVICE_UNAVAILABLE)
+                .contains("storage")
+        );
+    }
+
+    #[test]
+    fn owner_download_status_errors_do_not_include_secret_terms() {
+        for status in [
+            reqwest::StatusCode::UNAUTHORIZED,
+            reqwest::StatusCode::FORBIDDEN,
+            reqwest::StatusCode::NOT_FOUND,
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+        ] {
+            let message = owner_download_error_for_status(status);
+            assert!(!message.contains("token"));
+            assert!(!message.contains("key"));
+            assert!(!message.contains("url"));
+        }
     }
 
     #[test]
@@ -2951,7 +2986,12 @@ pub async fn download_file(
     output_path: String,
 ) -> Result<String> {
     let _session = state.get_session().await?;
-    tracing::info!("Downloading file for NFT: {}", nft_token_id);
+    tracing::info!(
+        command = "download_file",
+        phase = "begin",
+        nft_token_id = %nft_token_id,
+        "owner_download"
+    );
 
     // Инициализируем прогресс
     let mut progress = ProgressEvent::new(&nft_token_id, "download");
@@ -2970,9 +3010,29 @@ pub async fn download_file(
     progress.total_progress = 5;
     progress.emit(&app);
 
-    let file_info: serde_json::Value = client.get(&oracle_url).send().await?.json().await?;
+    let access_response = client.get(&oracle_url).send().await?;
+    if !access_response.status().is_success() {
+        let status = access_response.status();
+        tracing::warn!(
+            command = "download_file",
+            phase = "access_metadata_error",
+            nft_token_id = %nft_token_id,
+            endpoint_status = status.as_u16(),
+            "owner_download"
+        );
+        return Err(ClientError::Oracle(
+            owner_download_error_for_status(status).to_string(),
+        ));
+    }
 
-    tracing::debug!("Received encrypted file access metadata");
+    let file_info: serde_json::Value = access_response.json().await?;
+
+    tracing::debug!(
+        command = "download_file",
+        phase = "access_metadata_ok",
+        nft_token_id = %nft_token_id,
+        "owner_download"
+    );
 
     let encrypted_aes_key = file_info["encrypted_aes_key"]
         .as_str()
@@ -2981,31 +3041,17 @@ pub async fn download_file(
     // Проверяем был ли ключ перешифрован (после transfer)
     let is_re_encrypted = file_info["is_re_encrypted"].as_bool().unwrap_or(false);
 
-    // Расшифровываем имя файла
-    let encrypted_filename = file_info["manifest"]["encrypted_filename"]
-        .as_str()
-        .unwrap_or("");
-    let original_filename = if !encrypted_filename.is_empty() {
-        decrypt_filename(
-            &state,
-            encrypted_aes_key,
-            encrypted_filename,
-            is_re_encrypted,
-        )
-        .await
-        .unwrap_or_else(|_| "downloaded_file".to_string())
-    } else {
-        "downloaded_file".to_string()
-    };
-
     let original_size = file_info["manifest"]["original_size"].as_u64().unwrap_or(0);
 
     progress.bytes_total = original_size;
 
     tracing::info!(
-        "Downloading file: {}, is_re_encrypted: {}",
-        original_filename,
-        is_re_encrypted
+        command = "download_file",
+        phase = "access_ready",
+        nft_token_id = %nft_token_id,
+        is_re_encrypted,
+        bytes_total = original_size,
+        "owner_download"
     );
 
     // Этап: Скачивание через Oracle proxy (10-70%)
@@ -3020,17 +3066,27 @@ pub async fn download_file(
         state.config.oracle_url, nft_token_id
     );
 
-    tracing::debug!("Downloading from Oracle proxy: {}", download_url);
+    tracing::debug!(
+        command = "download_file",
+        phase = "proxy_request",
+        nft_token_id = %nft_token_id,
+        "owner_download"
+    );
 
     let response = client.get(&download_url).send().await?;
 
     if !response.status().is_success() {
         let status = response.status();
-        let error_text = response.text().await.unwrap_or_default();
-        return Err(ClientError::Oracle(format!(
-            "Failed to download file: {} - {}",
-            status, error_text
-        )));
+        tracing::warn!(
+            command = "download_file",
+            phase = "proxy_download_error",
+            nft_token_id = %nft_token_id,
+            endpoint_status = status.as_u16(),
+            "owner_download"
+        );
+        return Err(ClientError::Oracle(
+            owner_download_error_for_status(status).to_string(),
+        ));
     }
 
     let encrypted_data = response.bytes().await?.to_vec();
@@ -3041,8 +3097,11 @@ pub async fn download_file(
     progress.emit(&app);
 
     tracing::info!(
-        "Downloaded {} bytes of encrypted data",
-        encrypted_data.len()
+        command = "download_file",
+        phase = "proxy_download_ok",
+        nft_token_id = %nft_token_id,
+        bytes_processed = encrypted_data.len(),
+        "owner_download"
     );
 
     // Этап: Расшифровка (70-95%)
@@ -3057,7 +3116,12 @@ pub async fn download_file(
     // Расшифровываем AES ключ в зависимости от типа данных
     let aes_key_bytes = if is_re_encrypted {
         // После transfer - ключ в формате ReEncryptedData
-        tracing::info!("Unwrapping transferred content key");
+        tracing::info!(
+            command = "download_file",
+            phase = "unwrap_transferred_key",
+            nft_token_id = %nft_token_id,
+            "owner_download"
+        );
         progress.message = "Decrypting transferred key...".to_string();
         progress.emit(&app);
 
@@ -3069,7 +3133,12 @@ pub async fn download_file(
             .decrypt_reencrypted_data(&keypair, &re_encrypted_data)?
     } else {
         // Оригинальный владелец - ключ в формате EncryptedPreData
-        tracing::info!("Unwrapping owner content key");
+        tracing::info!(
+            command = "download_file",
+            phase = "unwrap_owner_key",
+            nft_token_id = %nft_token_id,
+            "owner_download"
+        );
         let encrypted_pre_data =
             xrpl_vault_crypto_core::EncryptedPreData::from_base64(encrypted_aes_key)
                 .map_err(|e| ClientError::Crypto(e))?;
@@ -3078,7 +3147,12 @@ pub async fn download_file(
 
     let aes_key = xrpl_vault_crypto_core::AesKey::from_bytes(&aes_key_bytes)?;
 
-    tracing::info!("Content key unwrap succeeded");
+    tracing::info!(
+        command = "download_file",
+        phase = "content_key_unwrapped",
+        nft_token_id = %nft_token_id,
+        "owner_download"
+    );
 
     progress.message = "Decrypting file content...".to_string();
     progress.total_progress = 85;
@@ -3087,7 +3161,13 @@ pub async fn download_file(
     let encrypted_fragment = xrpl_vault_crypto_core::EncryptedData::from_bytes(&encrypted_data)?;
     let decrypted_data = aes_key.decrypt(&encrypted_fragment)?;
 
-    tracing::info!("Encrypted file payload decrypted");
+    tracing::info!(
+        command = "download_file",
+        phase = "payload_decrypted",
+        nft_token_id = %nft_token_id,
+        bytes_processed = decrypted_data.len(),
+        "owner_download"
+    );
 
     // Этап: Сохранение (95-100%)
     progress.stage = "saving".to_string();
@@ -3106,9 +3186,33 @@ pub async fn download_file(
     progress.bytes_processed = decrypted_data.len() as u64;
     progress.emit(&app);
 
-    tracing::info!("Decrypted file saved to selected output path");
+    tracing::info!(
+        command = "download_file",
+        phase = "complete",
+        nft_token_id = %nft_token_id,
+        bytes_processed = decrypted_data.len(),
+        "owner_download"
+    );
 
     Ok(output_path)
+}
+
+fn owner_download_error_for_status(status: reqwest::StatusCode) -> &'static str {
+    match status {
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => {
+            "Authorization or session problem while downloading this file. Sign in and verify ownership, then try again."
+        },
+        reqwest::StatusCode::NOT_FOUND => {
+            "File or storage metadata is unavailable for this NFT. Confirm the vault object is active and try again."
+        },
+        reqwest::StatusCode::BAD_GATEWAY
+        | reqwest::StatusCode::SERVICE_UNAVAILABLE
+        | reqwest::StatusCode::GATEWAY_TIMEOUT
+        | reqwest::StatusCode::INTERNAL_SERVER_ERROR => {
+            "Encrypted storage is temporarily unavailable. Try downloading again later."
+        },
+        _ => "File download failed. Check the vault status and try again.",
+    }
 }
 
 #[tauri::command]

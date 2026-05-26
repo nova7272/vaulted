@@ -140,7 +140,11 @@ pub async fn upload_file(
             )
         };
 
-        tracing::debug!("Uploading to node {}: {}", node.id, upload_url);
+        tracing::debug!(
+            storage_node_id = %node.id,
+            nft_token_id = %params.nft_token_id,
+            "Uploading encrypted file fragment to storage node"
+        );
 
         let upload_result = client.put(&upload_url).body(body.clone()).send().await;
 
@@ -405,7 +409,11 @@ pub async fn download_file(
                 endpoint_url, storage_key, signed
             )
         };
-        tracing::debug!("Trying node {}: {}", node_id, url);
+        tracing::debug!(
+            storage_node_id = %node_id,
+            nft_token_id = %nft_token_id,
+            "Trying storage node for encrypted file download"
+        );
 
         match client.get(&url).send().await {
             Ok(resp) if resp.status().is_success() => {
@@ -430,13 +438,18 @@ pub async fn download_file(
             },
             Ok(resp) => {
                 let status = resp.status();
-                tracing::warn!("Node {} returned: {}", node_id, status);
+                tracing::warn!(
+                    storage_node_id = %node_id,
+                    nft_token_id = %nft_token_id,
+                    endpoint_status = status.as_u16(),
+                    "Storage node returned non-success for encrypted file download"
+                );
                 // If storage node says fragment not found, mark replica as missing
                 if status == StatusCode::NOT_FOUND {
                     tracing::warn!(
-                        "Fragment {} missing from node {}, marking replica as stale",
-                        storage_key,
-                        node_id
+                        storage_node_id = %node_id,
+                        nft_token_id = %nft_token_id,
+                        "Encrypted file fragment missing from storage node, marking replica as stale"
                     );
                     sqlx::query(
                         "UPDATE file_replicas SET status = 'missing' WHERE nft_token_id = $1 AND storage_node_id = $2"
@@ -449,7 +462,12 @@ pub async fn download_file(
                 }
             },
             Err(e) => {
-                tracing::warn!("Failed to fetch from {}: {}", node_id, e);
+                tracing::warn!(
+                    storage_node_id = %node_id,
+                    nft_token_id = %nft_token_id,
+                    error = %e,
+                    "Failed to fetch encrypted file fragment from storage node"
+                );
             },
         }
     }
@@ -539,7 +557,11 @@ pub async fn delete_file_storage(
         match client.delete(&url).send().await {
             Ok(resp) if resp.status().is_success() || resp.status() == StatusCode::NOT_FOUND => {
                 deleted_count += 1;
-                tracing::debug!("Deleted from node {}: {}", node_id, storage_key);
+                tracing::debug!(
+                    storage_node_id = %node_id,
+                    nft_token_id = %nft_token_id,
+                    "Deleted encrypted file fragment from storage node"
+                );
             },
             Ok(resp) => {
                 tracing::warn!("Delete from {} returned: {}", node_id, resp.status());
