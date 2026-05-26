@@ -1,144 +1,98 @@
-# Plan: Complete Demo-Safe QR Login Flow
+# Plan: Diagnose QR Login Frontend-To-Tauri Invocation
 Created: 2026-05-26
 Mode: fast
 Branch: current branch, no branch changes planned
 
 ## Settings
-- **Testing:** yes, include focused Oracle/desktop QR login tests and UI lint/type/build checks.
-- **Logging:** standard safe diagnostics only: command name, request phase, QR request id, status enum, identity id, device id, expiration status, and endpoint status. Do not log QR approval signatures or tokens.
-- **Docs:** no docs changes unless implementation discovers existing QR login docs are directly wrong.
-- **Security:** never log or display seed phrase, mnemonic entropy, private keys, derived keys, AES keys, JWTs, `tx_blob`, signatures, plaintext files, decrypted content, recovery phrase, or raw restore input outside the existing seed backup ceremony.
+- **Testing:** yes, include focused Rust/UI compile checks; add unit tests only if implementation adds a pure error-classification helper.
+- **Logging:** add temporary or durable safe command-boundary diagnostics only: command name, request phase, QR request id when available, status enum, endpoint status/error class, and UI step. Do not log QR payload contents, approval signatures, tokens, seed phrases, private keys, JWTs, AES keys, `tx_blob`, plaintext, decrypted content, or recovery phrase.
+- **Docs:** no docs changes.
+- **Scope:** diagnosis and minimal fix only. Do not change QR approval crypto semantics, Oracle QR endpoints unless a route mismatch is proven, XRPL/Wallet/Send XRP, seed policy, auth lifecycle, encryption/decryption, or transfer/re-encryption.
 
-## Next Roadmap Item
-- **Next item:** QR login works or has a clearly implemented demo-safe QR flow.
-- **Source:** `.ai-factory/VAULTED_AGENT_INSTRUCTIONS.md` section 10, and the XRPL Grants MVP checklist item: `QR login works or demo-safe QR flow is clearly implemented`.
-- **Why this is next:** The Wallet tab requirements are now satisfied through balance, receive QR, history, and runtime-tested Send XRP. The remaining checklist still requires QR login before moving deeper into the full file-vault transfer/re-encryption flow. Current code has backend/desktop QR login primitives, but the locked Auth screen only exposes Create and Restore, and the existing Oracle login modal displays raw JSON rather than a user-ready QR/login flow.
+## Current Findings
+- `OracleLoginModal.tsx` invokes `start_vaulted_qr_login` and `poll_vaulted_qr_login`, matching registered Tauri command names in `crates/desktop-client/src/main.rs`.
+- `start_vaulted_qr_login` takes only Tauri `State`, so the UI no-arg invoke is structurally valid.
+- `poll_vaulted_qr_login` expects `login_request_id`, exposed as `loginRequestId` by `#[tauri::command(rename_all = "camelCase")]`; the UI argument shape is structurally valid.
+- `QrCode` rendering happens only after `start_vaulted_qr_login` returns a payload, so QR rendering cannot be the cause of a failure before Oracle `/auth/qr/start`.
+- The locked Auth screen action currently opens the modal; it does not itself invoke Tauri. The actual invoke is bound to the modal’s inner `Sign in with QR code` button.
+- The visible message `Cannot connect to the vault server` can be produced by `formatError` for `Oracle API error`, `HTTP error`, `error sending request`, or `localhost:3000`. It may hide whether the failure was a Tauri invoke error, a desktop-to-Oracle HTTP error, or an endpoint URL/config issue.
+- The Rust QR commands currently have no explicit command-boundary logs, so “no desktop logs” is not yet proof that Tauri was not invoked.
 
-## Scope
-- Add QR login as the third primary Auth screen action alongside Restore and Create.
-- Reuse existing `start_vaulted_qr_login`, `poll_vaulted_qr_login`, and `confirm_vaulted_qr_login` primitives where possible.
-- Make the QR login UI demo-safe:
-  - show a scannable QR payload instead of only raw JSON;
-  - show expiration state/timer;
-  - provide retry and cancel;
-  - provide copy payload for demos where scanning is unavailable;
-  - surface clear safe errors.
-- Add an unlocked trusted-device approval UI that can paste/parse a QR login payload and call the local approval command, so the demo can complete without a separate mobile app.
-- Make Oracle QR login replay and expiry behavior explicit in tests.
-- Keep seed-based restore as the only way to unlock local encrypted file access on the same desktop after restart unless a trusted unlocked device approves QR login.
-
-## Important Constraint
-QR login must not imply that Oracle can reconstruct local encryption identity or file keys. If the approved QR login only establishes an Oracle session and the local Vaulted seed identity is not present, the UI must clearly keep local vault/decrypt actions locked or label the flow as trusted-device Oracle login. Do not create a fake seedless local decrypt path.
-
-## Current Integration Points
-- Auth entry screen:
-  - [crates/desktop-client/ui/src/screens/AuthScreen.tsx](/home/riggle/vaulted/crates/desktop-client/ui/src/screens/AuthScreen.tsx)
-- Existing QR login modal:
-  - [crates/desktop-client/ui/src/components/OracleLoginModal.tsx](/home/riggle/vaulted/crates/desktop-client/ui/src/components/OracleLoginModal.tsx)
-- Existing QR code component:
-  - [crates/desktop-client/ui/src/components/QrCode.tsx](/home/riggle/vaulted/crates/desktop-client/ui/src/components/QrCode.tsx)
-- Desktop QR commands:
-  - [crates/desktop-client/src/commands.rs](/home/riggle/vaulted/crates/desktop-client/src/commands.rs)
-- Tauri command registration:
-  - [crates/desktop-client/src/main.rs](/home/riggle/vaulted/crates/desktop-client/src/main.rs)
-- Oracle QR endpoints and tests:
-  - [crates/oracle/src/api/qr_auth.rs](/home/riggle/vaulted/crates/oracle/src/api/qr_auth.rs)
-- QR login schema:
-  - [migrations/011_qr_login_and_vaulted_wallet.sql](/home/riggle/vaulted/migrations/011_qr_login_and_vaulted_wallet.sql)
+## Likely Failure Classes To Distinguish
+- **UX/event path:** user clicks the Auth screen QR action but not the modal’s inner start button; no Tauri command should run in that case.
+- **Frontend invoke path:** the modal calls the wrong command or Tauri cannot dispatch it; expected error would be command-not-found/IPC-related, not an Oracle route hit.
+- **Desktop command path:** Tauri command runs, but `OracleClient` fails before Oracle receives `/api/v1/auth/qr/start` due URL/config/transport.
+- **Error masking:** `formatError` maps the raw error into generic vault-server copy, hiding the actionable failure class.
 
 ## Tasks
 
-- [x] 1. Confirm QR login behavior boundary and response shape
-  - Files likely to inspect/change:
-    - [crates/desktop-client/src/commands.rs](/home/riggle/vaulted/crates/desktop-client/src/commands.rs)
-    - [crates/desktop-client/src/auth/session.rs](/home/riggle/vaulted/crates/desktop-client/src/auth/session.rs)
-    - [crates/oracle/src/api/qr_auth.rs](/home/riggle/vaulted/crates/oracle/src/api/qr_auth.rs)
-  - Deliverable: define the exact QR-login result semantics for the desktop UI: approved Oracle session, identity id, status, expiration, and whether local Vaulted identity is present.
-  - Expected behavior: no UI or command should claim local decrypt/unlock if the in-memory seed identity is absent.
-  - Logging requirements: log only request phase, login request id, status enum, identity id, and expiration status.
-  - Dependency notes: do not alter auth restart/logout lifecycle or seed persistence policy.
+- [x] 1. Add safe frontend step diagnostics around QR login start/poll
+  - Files likely to change:
+    - [crates/desktop-client/ui/src/components/OracleLoginModal.tsx](/home/riggle/vaulted/crates/desktop-client/ui/src/components/OracleLoginModal.tsx)
+  - Deliverable: make the UI prove whether the modal start button was clicked and whether it reached the `invoke()` call, without logging payload contents.
+  - Expected behavior: visible safe status or sanitized `console.debug`/`console.warn` entries show `ui_step=start_clicked`, `ui_step=invoke_start_begin`, `ui_step=invoke_start_ok|invoke_start_error`, and for poll `ui_step=poll_begin|poll_result|poll_error` with only request id/status/error class.
+  - Logging requirements: no QR payload JSON, no challenge, no tokens, no signatures. If console logging is used, log only command name, phase, request id after start succeeds, status enum, and sanitized error class/message.
+  - Dependency notes: keep the existing modal UX intact unless Task 2 changes the start behavior.
 
-- [x] 2. Add QR login entry point to Auth screen
+- [x] 2. Decide whether Auth QR action should start immediately or only open the modal
   - Files likely to change:
     - [crates/desktop-client/ui/src/screens/AuthScreen.tsx](/home/riggle/vaulted/crates/desktop-client/ui/src/screens/AuthScreen.tsx)
     - [crates/desktop-client/ui/src/components/OracleLoginModal.tsx](/home/riggle/vaulted/crates/desktop-client/ui/src/components/OracleLoginModal.tsx)
-    - [crates/desktop-client/ui/src/App.tsx](/home/riggle/vaulted/crates/desktop-client/ui/src/App.tsx) if the modal must be owned above `AuthScreen`
-    - [crates/desktop-client/ui/src/index.css](/home/riggle/vaulted/crates/desktop-client/ui/src/index.css)
-  - Deliverable: Auth screen shows three primary actions: Sign in with seed phrase, Sign in with QR code, Create new wallet.
-  - Expected behavior: QR login starts from the locked screen, shows QR payload, expiration timer, retry, cancel, and safe result/error states.
-  - Logging requirements: no `console.log`/`console.error` for QR payloads, errors, tokens, or signatures.
-  - Dependency notes: preserve the existing seed backup ceremony and restore validation.
+  - Deliverable: remove ambiguity from the locked Auth flow.
+  - Expected behavior: either the Auth screen action remains “open modal” but copy clearly indicates the second click is required, or the modal gets a minimal `startOnOpen` prop so the Auth screen action starts `start_vaulted_qr_login` immediately after opening.
+  - Logging requirements: if `startOnOpen` is added, log safe `ui_step=modal_open_autostart` only; do not log payload contents.
+  - Dependency notes: do not alter the unlocked App-level Oracle login modal behavior unless the same prop can remain backward-compatible.
 
-- [x] 3. Replace raw QR payload display with scannable and copyable demo-safe UI
+- [x] 3. Add safe Rust command-boundary logs for QR login commands
   - Files likely to change:
+    - [crates/desktop-client/src/commands.rs](/home/riggle/vaulted/crates/desktop-client/src/commands.rs)
+  - Deliverable: prove whether `start_vaulted_qr_login`, `poll_vaulted_qr_login`, and `confirm_vaulted_qr_login` are invoked and where they fail.
+  - Expected behavior:
+    - `start_vaulted_qr_login` logs `command=start_vaulted_qr_login`, `phase=begin`, `phase=oracle_request`, then `phase=success` with QR request id only after Oracle returns.
+    - `poll_vaulted_qr_login` logs command, phase, QR request id, and returned status enum.
+    - `confirm_vaulted_qr_login` logs command, phase, QR request id, and approved/status boolean only; no signature.
+    - On failure, logs safe error class/status, not request payloads or tokens.
+  - Logging requirements: no QR payload, no challenge, no approval signature, no tokens, no seed/private material.
+  - Dependency notes: use existing `tracing` patterns; no new dependencies.
+
+- [x] 4. Preserve or expose actionable QR login error detail without leaking secrets
+  - Files likely to change:
+    - [crates/desktop-client/ui/src/components/OracleLoginModal.tsx](</home/riggle/vaulted/crates/desktop-client/ui/src/components/OracleLoginModal.tsx>)
+    - [crates/desktop-client/ui/src/utils/formatError.ts](/home/riggle/vaulted/crates/desktop-client/ui/src/utils/formatError.ts) only if a shared helper is cleaner
+  - Deliverable: prevent `Cannot connect to the vault server` from hiding command-dispatch or QR-specific failures.
+  - Expected behavior: QR login errors distinguish at least `Tauri command failed`, `Oracle request failed`, `request timed out`, `expired`, and `replay/consumed` when the raw error makes that possible.
+  - Logging requirements: show only sanitized user-facing text and safe error class/status; do not display raw payloads, tokens, signatures, or challenges.
+  - Dependency notes: keep global `formatError` mappings unchanged unless needed; prefer a local QR-login formatter to avoid changing unrelated flows.
+
+- [x] 5. Verify command registration and invocation wiring remains exact
+  - Files likely to inspect/change:
+    - [crates/desktop-client/src/main.rs](/home/riggle/vaulted/crates/desktop-client/src/main.rs)
+    - [crates/desktop-client/src/commands.rs](/home/riggle/vaulted/crates/desktop-client/src/commands.rs)
     - [crates/desktop-client/ui/src/components/OracleLoginModal.tsx](/home/riggle/vaulted/crates/desktop-client/ui/src/components/OracleLoginModal.tsx)
-    - [crates/desktop-client/ui/src/components/QrCode.tsx](/home/riggle/vaulted/crates/desktop-client/ui/src/components/QrCode.tsx)
-    - [crates/desktop-client/ui/src/index.css](/home/riggle/vaulted/crates/desktop-client/ui/src/index.css)
-  - Deliverable: render a QR code for the compact login payload and keep copy payload as an explicit fallback.
-  - Expected behavior: user can scan or copy the payload; UI avoids showing tokens, signatures, or seed material; expiration is visible.
-  - Logging requirements: no frontend logging of payload contents.
-  - Dependency notes: do not introduce network dependencies or new QR libraries unless existing `QrCode` cannot encode the payload.
+  - Deliverable: confirm no command rename, case mismatch, or argument mismatch exists after changes.
+  - Expected behavior: no changes to Tauri registration unless a mismatch is found; if unchanged, document that `start_vaulted_qr_login` is no-arg and `poll_vaulted_qr_login` uses `{ loginRequestId }`.
+  - Logging requirements: none beyond Task 3.
+  - Dependency notes: do not touch Oracle route definitions unless runtime logs prove desktop reaches Oracle with a mismatched path.
 
-- [x] 4. Add trusted-device approval UI for demos
+- [x] 6. Run focused checks and runtime proof
   - Files likely to change:
-    - [crates/desktop-client/ui/src/screens/SettingsScreen.tsx](/home/riggle/vaulted/crates/desktop-client/ui/src/screens/SettingsScreen.tsx)
-    - [crates/desktop-client/src/commands.rs](/home/riggle/vaulted/crates/desktop-client/src/commands.rs) if a payload-parsing approval helper is needed
-    - [crates/desktop-client/src/main.rs](/home/riggle/vaulted/crates/desktop-client/src/main.rs) only if adding a new Tauri command
-  - Deliverable: an unlocked Vaulted device can paste a QR login payload, review safe request details, and approve it with local Vaulted identity signing.
-  - Expected behavior: approval uses `confirm_vaulted_qr_login`; signatures stay local and are not displayed; malformed, expired, or wrong-shape payloads show safe errors.
-  - Logging requirements: command name, request phase, login request id, validation status, identity id, device id, status enum only.
-  - Dependency notes: keep this as a demo-safe bridge, not a mobile app implementation.
-
-- [x] 5. Add focused QR login tests
-  - Files likely to change:
-    - [crates/oracle/src/api/qr_auth.rs](/home/riggle/vaulted/crates/oracle/src/api/qr_auth.rs)
-    - [crates/desktop-client/src/commands.rs](/home/riggle/vaulted/crates/desktop-client/src/commands.rs) if new parsing helpers are added
-  - Deliverable: tests for expired QR rejected, replay/consumed QR rejected, invalid signature rejected, and payload parsing validation if added.
-  - Expected behavior: existing QR/device-pairing tests continue passing; new tests do not log or snapshot tokens/signatures.
-  - Logging requirements: none in tests beyond default test output.
-  - Dependency notes: avoid live Oracle/XRPL network in unit tests.
-
-- [ ] 6. Run verification and runtime QR login checklist
-  - Files likely to change:
-    - none beyond implementation files above
-  - Deliverable: local checks plus a manual runtime QR login demo using one locked desktop flow and one unlocked trusted-device approval flow.
-  - Expected behavior: QR login reaches approved/consumed state once, retry works after expiration, replay is rejected, and no forbidden values appear in logs/UI.
-  - Logging requirements: inspect logs for tokens, signatures, seed phrase, private keys, AES keys, and plaintext.
-  - Dependency notes: do not reset runtime state, log out, clear wallets, modify `.env`, or change seed policy.
-
-## Tests To Add Or Update
-- Oracle QR login tests:
-  - expired login request cannot be approved;
-  - consumed/approved login request cannot be replayed;
-  - invalid signature is rejected;
-  - status polling consumes an approved request exactly once.
-- Desktop command tests, only if adding pure parsing helpers:
-  - valid QR login payload parses to request id/challenge/oracle URL;
-  - malformed payloads are rejected safely;
-  - missing challenge/request id is rejected.
-- UI verification:
-  - `npm run lint`;
-  - `npx tsc --noEmit --project tsconfig.json`;
-  - `npm run build`.
+    - none beyond the files above
+  - Deliverable: automated checks plus a runtime QR login trace that identifies the exact failing boundary.
+  - Expected behavior: after clicking through the intended QR login path, either Oracle logs show `/api/v1/auth/qr/start` or desktop logs show the command failed before/while making that request with a safe error class.
+  - Logging requirements: inspect logs for forbidden values before committing.
+  - Dependency notes: do not reset runtime state, log out, clear wallets, or modify `.env`.
 
 ## Verification Commands
 
-Run Rust checks:
+Run Rust checks if `commands.rs` changes:
 
 ```bash
 cargo fmt --all --check
-cargo check --workspace
-cargo test --workspace
+cargo check -p xrpl-vault-desktop
+cargo test -p xrpl-vault-desktop
 ```
 
-Run targeted checks while iterating:
-
-```bash
-cargo test -p xrpl-vault-oracle qr
-cargo test -p xrpl-vault-desktop qr
-```
-
-Run UI checks:
+Run UI checks if frontend changes:
 
 ```bash
 cd crates/desktop-client/ui
@@ -155,35 +109,24 @@ Run security/diff checks:
 git diff --check
 ```
 
-## Runtime Checks
-- Start Postgres/Redis, Oracle, storage-node, and desktop using the existing project commands.
-- On a locked desktop Auth screen, select Sign in with QR code.
-- Confirm a QR code renders, expiration is visible, and retry/cancel work.
-- On an unlocked trusted Vaulted device/session, paste or scan the QR login payload and approve.
-- Confirm the locked desktop observes `approved` then `consumed` and enters the intended authenticated state.
-- Poll or reuse the same QR login id again and confirm replay is rejected or remains consumed.
-- Let a QR request expire and confirm UI shows expired with retry.
-- Review logs and UI for forbidden values: no seed phrase, mnemonic entropy, private keys, derived keys, AES keys, JWTs, `tx_blob`, signatures, plaintext files, decrypted content, recovery phrase, or raw restore input.
+## Runtime Verification Steps
+- Start Oracle and desktop exactly as in the existing dev workflow; do not reset or log out unless explicitly authorized.
+- On the locked Auth screen, click `Sign in with QR code`.
+- If Task 2 keeps the two-step flow, click the modal’s inner `Sign in with QR code` button; if `startOnOpen` is implemented, confirm the command starts when the modal opens.
+- Watch desktop logs for:
+  - `command=start_vaulted_qr_login phase=begin`
+  - `phase=oracle_request`
+  - either `phase=success qr_request_id=<id>` or a safe error class/status.
+- Watch Oracle logs for `/api/v1/auth/qr/start`.
+- If Oracle sees no request but desktop logs show `oracle_request`, inspect the configured Oracle base URL and transport error class without logging tokens or payloads.
+- If desktop logs show no command begin, inspect modal event binding and Tauri WebView console for a frontend click/invoke failure.
+- After a successful start, confirm QR renders and `poll_vaulted_qr_login` logs request id and status enum only.
 
 ## Out Of Scope
-- XRPL mint signing/serialization.
-- Oracle post-mint linking/finalization.
-- Pending mint recovery.
-- Oracle XRPL HTTP RPC config.
-- 12-word seed policy.
-- Auth restart/logout lifecycle.
-- Desktop launch/window fallback.
-- Read-only Wallet tab.
-- Send XRP / Payment command.
-- File upload/mint flow changes.
-- Owner download/decrypt changes.
-- NFT transfer/re-encryption and recipient decrypt.
-- Mobile app implementation.
-- Runtime reset/logout or clearing local data.
-- README/demo script updates unless the QR flow directly needs a short command note.
-
-## Expected Successful State
-- The Auth screen exposes the required three actions.
-- QR login is demonstrably usable in a demo-safe flow with an unlocked trusted Vaulted device approving a locked desktop login request.
-- QR login has explicit expiration, retry, cancel, and replay protections.
-- No secret-bearing material is logged, returned, or displayed.
+- QR approval crypto semantics.
+- Oracle QR endpoint behavior unless a route mismatch is proven by runtime logs.
+- XRPL mint/signing/serialization.
+- Wallet tab and Send XRP command.
+- Seed policy and auth restart/logout lifecycle.
+- File encryption/decryption and transfer/re-encryption.
+- Runtime reset/logout, clearing local data, or `.env` changes.

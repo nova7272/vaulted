@@ -883,19 +883,48 @@ async fn fetch_xrpl_signing_fields(
 pub async fn start_vaulted_qr_login(
     state: State<'_, Arc<AppState>>,
 ) -> Result<QrLoginStartResponse> {
-    let oracle = OracleClient::new(OracleConfig {
+    tracing::info!(
+        command = "start_vaulted_qr_login",
+        phase = "begin",
+        "qr_login_command_boundary"
+    );
+    let oracle = match OracleClient::new(OracleConfig {
         base_url: state.config.oracle_url.clone(),
         timeout_secs: 30,
         ..Default::default()
-    })?;
-    let response = oracle
+    }) {
+        Ok(client) => client,
+        Err(e) => {
+            log_qr_login_error("start_vaulted_qr_login", "client_init_error", &e);
+            return Err(e);
+        },
+    };
+    tracing::info!(
+        command = "start_vaulted_qr_login",
+        phase = "oracle_request",
+        "qr_login_command_boundary"
+    );
+    let response = match oracle
         .start_qr_login(&crate::oracle::api::QrLoginStartRequest {
             desktop_device_name: hostname::get()
                 .ok()
                 .map(|h| h.to_string_lossy().to_string()),
             desktop_device_public_key: Some(state.device_fingerprint().to_string()),
         })
-        .await?;
+        .await
+    {
+        Ok(response) => response,
+        Err(e) => {
+            log_qr_login_error("start_vaulted_qr_login", "oracle_request_error", &e);
+            return Err(e);
+        },
+    };
+    tracing::info!(
+        command = "start_vaulted_qr_login",
+        phase = "success",
+        qr_request_id = %response.login_request_id,
+        "qr_login_command_boundary"
+    );
     Ok(QrLoginStartResponse {
         login_request_id: response.login_request_id,
         challenge: response.challenge,
@@ -911,12 +940,37 @@ pub async fn poll_vaulted_qr_login(
     state: State<'_, Arc<AppState>>,
     login_request_id: String,
 ) -> Result<serde_json::Value> {
-    let oracle = OracleClient::new(OracleConfig {
+    tracing::info!(
+        command = "poll_vaulted_qr_login",
+        phase = "begin",
+        qr_request_id = %login_request_id,
+        "qr_login_command_boundary"
+    );
+    let oracle = match OracleClient::new(OracleConfig {
         base_url: state.config.oracle_url.clone(),
         timeout_secs: 30,
         ..Default::default()
-    })?;
-    let status = oracle.qr_login_status(&login_request_id).await?;
+    }) {
+        Ok(client) => client,
+        Err(e) => {
+            log_qr_login_error("poll_vaulted_qr_login", "client_init_error", &e);
+            return Err(e);
+        },
+    };
+    let status = match oracle.qr_login_status(&login_request_id).await {
+        Ok(status) => status,
+        Err(e) => {
+            log_qr_login_error("poll_vaulted_qr_login", "status_request_error", &e);
+            return Err(e);
+        },
+    };
+    tracing::info!(
+        command = "poll_vaulted_qr_login",
+        phase = "status_result",
+        qr_request_id = %login_request_id,
+        status = %status.status,
+        "qr_login_command_boundary"
+    );
     let has_local_identity = state.has_vaulted_identity().await;
     if status.status == "approved" || status.status == "consumed" {
         if let (Some(token), Some(identity_id)) =
@@ -964,7 +1018,20 @@ pub async fn confirm_vaulted_qr_login(
     login_request_id: String,
     challenge: String,
 ) -> Result<bool> {
-    let identity = state.get_vaulted_identity().await?;
+    let qr_request_id = login_request_id.clone();
+    tracing::info!(
+        command = "confirm_vaulted_qr_login",
+        phase = "begin",
+        qr_request_id = %qr_request_id,
+        "qr_login_command_boundary"
+    );
+    let identity = match state.get_vaulted_identity().await {
+        Ok(identity) => identity,
+        Err(e) => {
+            log_qr_login_error("confirm_vaulted_qr_login", "identity_error", &e);
+            return Err(e);
+        },
+    };
     let message = format!(
         "Vaulted QR Login v1\nlogin_request_id:{}\nchallenge:{}\noracle_url:{}\ndevice_id:{}",
         login_request_id,
@@ -975,12 +1042,18 @@ pub async fn confirm_vaulted_qr_login(
     use ed25519_dalek::Signer;
     let signature = identity.signing_key().sign(message.as_bytes());
 
-    let oracle = OracleClient::new(OracleConfig {
+    let oracle = match OracleClient::new(OracleConfig {
         base_url: state.config.oracle_url.clone(),
         timeout_secs: 30,
         ..Default::default()
-    })?;
-    let result = oracle
+    }) {
+        Ok(client) => client,
+        Err(e) => {
+            log_qr_login_error("confirm_vaulted_qr_login", "client_init_error", &e);
+            return Err(e);
+        },
+    };
+    let result = match oracle
         .confirm_qr_login(&crate::oracle::api::QrLoginConfirmRequest {
             login_request_id,
             identity_id: identity.identity_id_hex(),
@@ -988,8 +1061,50 @@ pub async fn confirm_vaulted_qr_login(
             signing_public_key: identity.signing_public_key_hex(),
             signature: hex::encode(signature.to_bytes()),
         })
-        .await?;
+        .await
+    {
+        Ok(result) => result,
+        Err(e) => {
+            log_qr_login_error("confirm_vaulted_qr_login", "confirm_request_error", &e);
+            return Err(e);
+        },
+    };
+    tracing::info!(
+        command = "confirm_vaulted_qr_login",
+        phase = "result",
+        qr_request_id = %qr_request_id,
+        approved = result.approved,
+        status = %result.status,
+        "qr_login_command_boundary"
+    );
     Ok(result.approved)
+}
+
+fn log_qr_login_error(command: &'static str, phase: &'static str, error: &ClientError) {
+    let (error_class, endpoint_status) = qr_login_error_diagnostics(error);
+    tracing::warn!(
+        command,
+        phase,
+        error_class,
+        endpoint_status,
+        "qr_login_command_boundary_error"
+    );
+}
+
+fn qr_login_error_diagnostics(error: &ClientError) -> (&'static str, u16) {
+    match error {
+        ClientError::Http(e) => (
+            "http_error",
+            e.status().map(|status| status.as_u16()).unwrap_or(0),
+        ),
+        ClientError::Oracle(_) => ("oracle_api_error", 0),
+        ClientError::Config(_) => ("config_error", 0),
+        ClientError::Auth(_) => ("auth_error", 0),
+        ClientError::Validation(_) => ("validation_error", 0),
+        ClientError::NoSession => ("no_session", 0),
+        ClientError::SessionExpired => ("session_expired", 0),
+        _ => ("client_error", 0),
+    }
 }
 
 /// Starts Scan-to-Pair-Device. The returned QR payload is scanned by a trusted device.
