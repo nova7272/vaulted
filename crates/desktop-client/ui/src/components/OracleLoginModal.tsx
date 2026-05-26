@@ -28,6 +28,7 @@ interface OracleLoginModalProps {
 }
 
 type LoginState = 'idle' | 'loading' | 'waiting' | 'success' | 'error'
+type StartLoginReason = 'manual' | 'autostart' | 'retry'
 
 const QR_POLL_INTERVAL_MS = 7000
 const QR_POLL_GRACE_MS = 5000
@@ -36,6 +37,12 @@ const QR_CANCEL_CHECK_MS = 250
 
 const secondsRemaining = (iso: string) =>
     Math.max(0, Math.ceil((new Date(iso).getTime() - Date.now()) / 1000))
+
+const isExpired = (iso?: string | null) => {
+    if (!iso) return false
+    const expiresAtMs = new Date(iso).getTime()
+    return Number.isFinite(expiresAtMs) && Date.now() > expiresAtMs
+}
 
 const qrLoginCommand = 'start_vaulted_qr_login'
 const qrPollCommand = 'poll_vaulted_qr_login'
@@ -119,6 +126,11 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess, startOnOpen = fal
     const pollToken = useRef(0)
     const onCloseRef = useRef(onClose)
     const onSuccessRef = useRef(onSuccess)
+    const isOpenRef = useRef(false)
+    const wasOpenRef = useRef(false)
+    const modalSessionIdRef = useRef(0)
+    const startLoginRef = useRef<(reason?: StartLoginReason) => void>(() => undefined)
+    const payloadRef = useRef<QrLoginStartResponse | null>(null)
 
     const qrValue = useMemo(
         () => (payload ? JSON.stringify(payload.qrPayload) : ''),
@@ -130,10 +142,25 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess, startOnOpen = fal
         onSuccessRef.current = onSuccess
     }, [onClose, onSuccess])
 
-    const waitForPollDelay = useCallback(async (delayMs: number, token: number) => {
+    useEffect(() => {
+        payloadRef.current = payload
+    }, [payload])
+
+    const waitForPollDelay = useCallback(async (delayMs: number, token: number, loginRequestId: string, expiresAt: string) => {
         const deadline = Date.now() + delayMs
         while (Date.now() < deadline) {
-            if (pollToken.current !== token) return false
+            if (pollToken.current !== token) {
+                qrDebug({
+                    ui_step: 'poll_wait_cancelled',
+                    qr_request_id: loginRequestId,
+                    token_id: token,
+                    current_token_id: pollToken.current,
+                    is_open: isOpenRef.current,
+                    is_expired: isExpired(expiresAt),
+                    cancellation_reason: 'token_changed',
+                })
+                return false
+            }
             await new Promise(resolve => window.setTimeout(resolve, Math.min(QR_CANCEL_CHECK_MS, deadline - Date.now())))
         }
         return pollToken.current === token
@@ -144,21 +171,51 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess, startOnOpen = fal
         const expiresAtMs = Number.isFinite(parsedExpiresAt) ? parsedExpiresAt : Date.now() + 120_000
         while (Date.now() <= expiresAtMs + QR_POLL_GRACE_MS) {
             try {
-                if (pollToken.current !== token) return
+                if (pollToken.current !== token) {
+                    qrDebug({
+                        ui_step: 'poll_cancelled',
+                        qr_request_id: loginRequestId,
+                        token_id: token,
+                        current_token_id: pollToken.current,
+                        is_open: isOpenRef.current,
+                        is_expired: isExpired(expiresAt),
+                        cancellation_reason: 'token_changed_before_poll',
+                    })
+                    return
+                }
                 qrDebug({
                     ui_step: 'poll_begin',
                     command: qrPollCommand,
                     qr_request_id: loginRequestId,
+                    token_id: token,
+                    current_token_id: pollToken.current,
+                    is_open: isOpenRef.current,
+                    is_expired: isExpired(expiresAt),
                 })
                 const result = await invoke<QrLoginPollResponse>('poll_vaulted_qr_login', { loginRequestId })
-                if (pollToken.current !== token) return
+                if (pollToken.current !== token) {
+                    qrDebug({
+                        ui_step: 'poll_cancelled',
+                        qr_request_id: loginRequestId,
+                        token_id: token,
+                        current_token_id: pollToken.current,
+                        is_open: isOpenRef.current,
+                        is_expired: isExpired(expiresAt),
+                        cancellation_reason: 'token_changed_after_poll',
+                    })
+                    return
+                }
                 setPollMessage(null)
                 qrDebug({
                     ui_step: 'poll_result',
                     command: qrPollCommand,
                     qr_request_id: loginRequestId,
+                    token_id: token,
+                    current_token_id: pollToken.current,
                     status: result.status,
                     approved: result.approved,
+                    is_open: isOpenRef.current,
+                    is_expired: isExpired(expiresAt),
                 })
                 if (result.approved || result.status === 'approved' || result.status === 'consumed') {
                     setApprovedResult(result)
@@ -176,7 +233,7 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess, startOnOpen = fal
                     setState('error')
                     return
                 }
-                const shouldContinue = await waitForPollDelay(QR_POLL_INTERVAL_MS, token)
+                const shouldContinue = await waitForPollDelay(QR_POLL_INTERVAL_MS, token, loginRequestId, expiresAt)
                 if (!shouldContinue) return
             } catch (e) {
                 const classified = classifyQrError(e)
@@ -185,15 +242,19 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess, startOnOpen = fal
                         ui_step: 'poll_error',
                         command: qrPollCommand,
                         qr_request_id: loginRequestId,
+                        token_id: token,
+                        current_token_id: pollToken.current,
                         error_class: classified.errorClass,
                         endpoint_status: classified.endpointStatus,
                         rate_limited: true,
                         retry_delay_ms: QR_RATE_LIMIT_BACKOFF_MS,
+                        is_open: isOpenRef.current,
+                        is_expired: isExpired(expiresAt),
                     })
                     setError(null)
                     setPollMessage(classified.display)
                     setState('waiting')
-                    const shouldContinue = await waitForPollDelay(QR_RATE_LIMIT_BACKOFF_MS, token)
+                    const shouldContinue = await waitForPollDelay(QR_RATE_LIMIT_BACKOFF_MS, token, loginRequestId, expiresAt)
                     if (!shouldContinue) return
                     continue
                 }
@@ -201,9 +262,13 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess, startOnOpen = fal
                     ui_step: 'poll_error',
                     command: qrPollCommand,
                     qr_request_id: loginRequestId,
+                    token_id: token,
+                    current_token_id: pollToken.current,
                     error_class: classified.errorClass,
                     endpoint_status: classified.endpointStatus,
                     rate_limited: false,
+                    is_open: isOpenRef.current,
+                    is_expired: isExpired(expiresAt),
                 })
                 setPollMessage(null)
                 setError(classified.display)
@@ -212,15 +277,42 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess, startOnOpen = fal
             }
         }
         if (pollToken.current !== token) return
+        qrDebug({
+            ui_step: 'poll_expired',
+            qr_request_id: loginRequestId,
+            token_id: token,
+            current_token_id: pollToken.current,
+            is_open: isOpenRef.current,
+            is_expired: true,
+            cancellation_reason: 'expired',
+        })
         setPollMessage(null)
         setError('QR login expired. Create a new QR request and try again.')
         setState('error')
     }, [waitForPollDelay])
 
-    const startLogin = useCallback(async () => {
-        qrDebug({ ui_step: 'start_clicked', command: qrLoginCommand })
+    const startLogin = useCallback(async (reason: StartLoginReason = 'manual') => {
         const token = pollToken.current + 1
+        if (reason === 'retry') {
+            qrDebug({
+                ui_step: 'retry_start',
+                qr_request_id: payload?.loginRequestId,
+                token_id: token,
+                current_token_id: pollToken.current,
+                is_open: isOpenRef.current,
+                is_expired: isExpired(payload?.expiresAt),
+                cancellation_reason: 'retry',
+            })
+        }
         pollToken.current = token
+        qrDebug({
+            ui_step: 'start_clicked',
+            command: qrLoginCommand,
+            token_id: token,
+            current_token_id: pollToken.current,
+            is_open: isOpenRef.current,
+            is_expired: false,
+        })
         setState('loading')
         setError(null)
         setPayload(null)
@@ -229,12 +321,23 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess, startOnOpen = fal
         setPollMessage(null)
 
         try {
-            qrDebug({ ui_step: 'invoke_start_begin', command: qrLoginCommand })
+            qrDebug({
+                ui_step: 'invoke_start_begin',
+                command: qrLoginCommand,
+                token_id: token,
+                current_token_id: pollToken.current,
+                is_open: isOpenRef.current,
+                is_expired: false,
+            })
             const result = await invoke<QrLoginStartResponse>('start_vaulted_qr_login')
             qrDebug({
                 ui_step: 'invoke_start_ok',
                 command: qrLoginCommand,
                 qr_request_id: result.loginRequestId,
+                token_id: token,
+                current_token_id: pollToken.current,
+                is_open: isOpenRef.current,
+                is_expired: isExpired(result.expiresAt),
             })
             setPayload(result)
             setRemaining(secondsRemaining(result.expiresAt))
@@ -248,33 +351,74 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess, startOnOpen = fal
                 error_class: classified.errorClass,
                 endpoint_status: classified.endpointStatus,
                 rate_limited: classified.rateLimited,
+                token_id: token,
+                current_token_id: pollToken.current,
+                is_open: isOpenRef.current,
+                is_expired: false,
             })
             setError(classified.display)
             setState('error')
         }
-    }, [pollQrLogin])
+    }, [payload?.expiresAt, payload?.loginRequestId, pollQrLogin])
 
     useEffect(() => {
-        if (!isOpen) return
-        pollToken.current += 1
-        const frame = requestAnimationFrame(() => {
-            setState('idle')
-            setError(null)
-            setPayload(null)
-            setCopied(false)
-            setRemaining(0)
-            setApprovedResult(null)
-            setPollMessage(null)
-            if (startOnOpen) {
-                qrDebug({ ui_step: 'modal_open_autostart', command: qrLoginCommand })
-                void startLogin()
-            }
-        })
-        return () => {
+        startLoginRef.current = startLogin
+    }, [startLogin])
+
+    useEffect(() => {
+        if (isOpen && !wasOpenRef.current) {
+            wasOpenRef.current = true
+            isOpenRef.current = true
+            modalSessionIdRef.current += 1
+            const modalSessionId = modalSessionIdRef.current
             pollToken.current += 1
-            cancelAnimationFrame(frame)
+            qrDebug({
+                ui_step: 'modal_open_reset',
+                token_id: pollToken.current,
+                current_token_id: pollToken.current,
+                is_open: true,
+                is_expired: false,
+                modal_session_id: modalSessionId,
+            })
+            requestAnimationFrame(() => {
+                if (!wasOpenRef.current || !isOpenRef.current || modalSessionIdRef.current !== modalSessionId) return
+                setState('idle')
+                setError(null)
+                setPayload(null)
+                setCopied(false)
+                setRemaining(0)
+                setApprovedResult(null)
+                setPollMessage(null)
+                if (startOnOpen) {
+                    qrDebug({
+                        ui_step: 'modal_open_autostart',
+                        command: qrLoginCommand,
+                        token_id: pollToken.current,
+                        current_token_id: pollToken.current,
+                        is_open: true,
+                        is_expired: false,
+                        modal_session_id: modalSessionId,
+                    })
+                    void startLoginRef.current('autostart')
+                }
+            })
+        } else if (!isOpen && wasOpenRef.current) {
+            wasOpenRef.current = false
+            isOpenRef.current = false
+            pollToken.current += 1
+            qrDebug({
+                ui_step: 'modal_cleanup',
+                token_id: pollToken.current,
+                current_token_id: pollToken.current,
+                is_open: false,
+                is_expired: isExpired(payloadRef.current?.expiresAt),
+                cancellation_reason: 'closed',
+                modal_session_id: modalSessionIdRef.current,
+            })
+        } else {
+            isOpenRef.current = isOpen
         }
-    }, [isOpen, startOnOpen, startLogin])
+    }, [isOpen, startOnOpen])
 
     useEffect(() => {
         if (!payload) return
@@ -286,12 +430,30 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess, startOnOpen = fal
 
     const copyPayload = async () => {
         if (!qrValue) return
+        qrDebug({
+            ui_step: 'copy_payload',
+            qr_request_id: payload?.loginRequestId,
+            token_id: pollToken.current,
+            current_token_id: pollToken.current,
+            is_open: isOpenRef.current,
+            is_expired: isExpired(payload?.expiresAt),
+        })
         await navigator.clipboard.writeText(qrValue)
         setCopied(true)
         window.setTimeout(() => setCopied(false), 2000)
     }
 
     const cancel = () => {
+        const token = pollToken.current + 1
+        qrDebug({
+            ui_step: 'cancel_clicked',
+            qr_request_id: payload?.loginRequestId,
+            token_id: token,
+            current_token_id: pollToken.current,
+            is_open: isOpenRef.current,
+            is_expired: isExpired(payload?.expiresAt),
+            cancellation_reason: 'user_cancelled',
+        })
         pollToken.current += 1
         onClose()
     }
@@ -328,7 +490,7 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess, startOnOpen = fal
                     {state === 'idle' && (
                         <div className="login-idle">
                             <p>Start a one-time Oracle login request, then approve it from an already-unlocked Vaulted session.</p>
-                            <button className="btn-primary" onClick={startLogin}>Sign in with QR code</button>
+                            <button className="btn-primary" onClick={() => startLogin('manual')}>Sign in with QR code</button>
                         </div>
                     )}
 
@@ -354,7 +516,7 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess, startOnOpen = fal
                                 <button className="btn-secondary" onClick={copyPayload}>
                                     {copied ? 'Copied' : 'Copy payload'}
                                 </button>
-                                <button className="btn-secondary" onClick={startLogin}>Retry</button>
+                                <button className="btn-secondary" onClick={() => startLogin('retry')}>Retry</button>
                                 <button className="btn-secondary" onClick={cancel}>Cancel</button>
                             </div>
                             <details className="qr-login-fallback">
@@ -391,7 +553,7 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess, startOnOpen = fal
                             <p>Authentication failed</p>
                             <p className="error-text">{error}</p>
                             <div className="qr-login-actions">
-                                <button className="btn-primary" onClick={startLogin}>Try again</button>
+                                <button className="btn-primary" onClick={() => startLogin('retry')}>Try again</button>
                                 <button className="btn-secondary" onClick={cancel}>Cancel</button>
                             </div>
                         </div>
