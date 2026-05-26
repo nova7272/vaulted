@@ -336,19 +336,15 @@ pub async fn confirm_qr_login(
         .try_get("expires_at")
         .map_err(|e| ApiError::Database(format!("Malformed QR login expiration: {e}")))?;
 
-    if status != "pending" {
-        return Err(ApiError::BadRequest(format!(
-            "QR login request is {status}"
-        )));
+    if let Err(err) = validate_pending_qr_login_status(&status, expires_at, Utc::now()) {
+        if expires_at < Utc::now() && status == "pending" {
+            let _ = sqlx::query("UPDATE qr_login_requests SET status = 'expired' WHERE id = $1")
+                .bind(login_id)
+                .execute(&state.db)
+                .await;
+        }
+        return Err(err);
     }
-    if expires_at < Utc::now() {
-        let _ = sqlx::query("UPDATE qr_login_requests SET status = 'expired' WHERE id = $1")
-            .bind(login_id)
-            .execute(&state.db)
-            .await;
-        return Err(ApiError::Unauthorized("QR login request expired".into()));
-    }
-
     let identity_row = sqlx::query(
         "SELECT signing_public_key FROM vaulted_identities WHERE id = $1 AND status = 'active'",
     )
@@ -372,9 +368,11 @@ pub async fn confirm_qr_login(
         .public_url
         .clone()
         .unwrap_or_else(|| format!("http://{}:{}", state.config.host, state.config.port));
-    let message = format!(
-        "Vaulted QR Login v1\nlogin_request_id:{}\nchallenge:{}\noracle_url:{}\ndevice_id:{}",
-        req.login_request_id, challenge, oracle_url, req.device_id
+    let message = qr_login_signature_message(
+        &req.login_request_id,
+        &challenge,
+        &oracle_url,
+        &req.device_id,
     );
     verify_ed25519_hex(&req.signing_public_key, message.as_bytes(), &req.signature)?;
 
@@ -1359,6 +1357,34 @@ pub async fn qr_file_grant_approval_status(
     }))
 }
 
+fn qr_login_signature_message(
+    login_request_id: &str,
+    challenge: &str,
+    oracle_url: &str,
+    device_id: &str,
+) -> String {
+    format!(
+        "Vaulted QR Login v1\nlogin_request_id:{}\nchallenge:{}\noracle_url:{}\ndevice_id:{}",
+        login_request_id, challenge, oracle_url, device_id
+    )
+}
+
+fn validate_pending_qr_login_status(
+    status: &str,
+    expires_at: chrono::DateTime<Utc>,
+    now: chrono::DateTime<Utc>,
+) -> Result<()> {
+    if status != "pending" {
+        return Err(ApiError::BadRequest(format!(
+            "QR login request is {status}"
+        )));
+    }
+    if expires_at < now {
+        return Err(ApiError::Unauthorized("QR login request expired".into()));
+    }
+    Ok(())
+}
+
 fn pair_device_signature_message(
     pairing_request_id: &str,
     challenge: &str,
@@ -1577,6 +1603,46 @@ fn verify_ed25519_hex(public_key_hex: &str, message: &[u8], signature_hex: &str)
 #[cfg(test)]
 mod pair_device_tests {
     use super::*;
+
+    #[test]
+    fn qr_login_signature_message_is_stable_and_domain_separated() {
+        let msg = qr_login_signature_message(
+            "login-1",
+            "challenge-1",
+            "https://oracle.example",
+            "device-1",
+        );
+        assert!(msg.starts_with("Vaulted QR Login v1\n"));
+        assert!(msg.contains("login_request_id:login-1"));
+        assert!(msg.contains("challenge:challenge-1"));
+        assert!(msg.contains("device_id:device-1"));
+    }
+
+    #[test]
+    fn qr_login_expired_request_is_rejected() {
+        let now = Utc::now();
+        assert!(
+            validate_pending_qr_login_status("pending", now - Duration::seconds(1), now,).is_err()
+        );
+    }
+
+    #[test]
+    fn qr_login_consumed_request_is_rejected_as_replay() {
+        let now = Utc::now();
+        assert!(
+            validate_pending_qr_login_status("consumed", now + Duration::minutes(1), now,).is_err()
+        );
+    }
+
+    #[test]
+    fn qr_login_invalid_signature_is_rejected() {
+        assert!(verify_ed25519_hex(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            b"message",
+            "bbbb",
+        )
+        .is_err());
+    }
 
     #[test]
     fn pair_device_signature_message_is_stable_and_domain_separated() {

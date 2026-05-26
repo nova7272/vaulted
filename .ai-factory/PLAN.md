@@ -1,102 +1,125 @@
-# Plan: Send Testnet XRP From Vaulted Wallet
+# Plan: Complete Demo-Safe QR Login Flow
 Created: 2026-05-26
 Mode: fast
 Branch: current branch, no branch changes planned
 
 ## Settings
-- **Testing:** yes, include focused Rust unit tests and UI type/build checks.
-- **Logging:** standard safe diagnostics only: command name, request phase, validation status, amount XRP, fee drops, reserve XRP, engine_result, tx_hash, and status enum.
-- **Docs:** no docs changes unless implementation discovers existing wallet docs are directly wrong.
-- **Security:** keep signing local. Never log seed phrase, private keys, derived keys, AES keys, JWTs, `tx_blob`, signatures, plaintext files, decrypted content, recovery phrase, mnemonic entropy, or raw restore input.
+- **Testing:** yes, include focused Oracle/desktop QR login tests and UI lint/type/build checks.
+- **Logging:** standard safe diagnostics only: command name, request phase, QR request id, status enum, identity id, device id, expiration status, and endpoint status. Do not log QR approval signatures or tokens.
+- **Docs:** no docs changes unless implementation discovers existing QR login docs are directly wrong.
+- **Security:** never log or display seed phrase, mnemonic entropy, private keys, derived keys, AES keys, JWTs, `tx_blob`, signatures, plaintext files, decrypted content, recovery phrase, or raw restore input outside the existing seed backup ceremony.
+
+## Next Roadmap Item
+- **Next item:** QR login works or has a clearly implemented demo-safe QR flow.
+- **Source:** `.ai-factory/VAULTED_AGENT_INSTRUCTIONS.md` section 10, and the XRPL Grants MVP checklist item: `QR login works or demo-safe QR flow is clearly implemented`.
+- **Why this is next:** The Wallet tab requirements are now satisfied through balance, receive QR, history, and runtime-tested Send XRP. The remaining checklist still requires QR login before moving deeper into the full file-vault transfer/re-encryption flow. Current code has backend/desktop QR login primitives, but the locked Auth screen only exposes Create and Restore, and the existing Oracle login modal displays raw JSON rather than a user-ready QR/login flow.
 
 ## Scope
-- Add a minimal Send XRP form to the existing Wallet tab for testnet XRP payments from the in-memory Vaulted-derived XRPL wallet.
-- Validate destination classic address and numeric amount before signing.
-- Validate funded status and spendable balance after reserve plus fee before signing/submission.
-- Support optional DestinationTag only if it can be validated and encoded cleanly without widening scope.
-- Build, sign, and submit a `Payment` locally through the desktop client using the in-memory Vaulted XRPL wallet.
-- Return safe submit result fields to UI: `engine_result`, `engine_result_message`, `tx_hash`.
-- Refresh wallet overview and transaction history after successful submit.
-- Require explicit UI confirmation before submit.
+- Add QR login as the third primary Auth screen action alongside Restore and Create.
+- Reuse existing `start_vaulted_qr_login`, `poll_vaulted_qr_login`, and `confirm_vaulted_qr_login` primitives where possible.
+- Make the QR login UI demo-safe:
+  - show a scannable QR payload instead of only raw JSON;
+  - show expiration state/timer;
+  - provide retry and cancel;
+  - provide copy payload for demos where scanning is unavailable;
+  - surface clear safe errors.
+- Add an unlocked trusted-device approval UI that can paste/parse a QR login payload and call the local approval command, so the demo can complete without a separate mobile app.
+- Make Oracle QR login replay and expiry behavior explicit in tests.
+- Keep seed-based restore as the only way to unlock local encrypted file access on the same desktop after restart unless a trusted unlocked device approves QR login.
 
-## Out Of Scope
-- NFT mint signing/serialization beyond the minimum serializer refactor needed to avoid breaking existing mint support.
-- Oracle post-mint linking/finalization.
-- Pending mint recovery.
-- Oracle XRPL HTTP RPC config.
-- 12-word seed policy.
-- Auth restart/logout lifecycle.
-- File encryption/decryption.
-- Transfer/re-encryption.
-- QR login.
-- Runtime reset/logout.
+## Important Constraint
+QR login must not imply that Oracle can reconstruct local encryption identity or file keys. If the approved QR login only establishes an Oracle session and the local Vaulted seed identity is not present, the UI must clearly keep local vault/decrypt actions locked or label the flow as trusted-device Oracle login. Do not create a fake seedless local decrypt path.
 
 ## Current Integration Points
-- Wallet UI lives in `crates/desktop-client/ui/src/screens/WalletScreen.tsx`, with styles in `crates/desktop-client/ui/src/index.css`.
-- Read-only wallet commands already exist in `crates/desktop-client/src/commands.rs`: `get_wallet_overview`, `get_xrpl_transaction_history`, and `check_xrpl_account_status`.
-- XRPL network helpers are in `crates/desktop-client/src/xrpl/client.rs`: `account_info`, `fee_drops`, `ledger_current_index`, `submit`, and `SubmitResult`.
-- Local signing is in `crates/crypto-core/src/xrpl_wallet.rs`. It currently supports only `NFTokenMint`; `Payment` must be added without regressing mint serialization/signing tests.
-- Tauri command registration is in `crates/desktop-client/src/main.rs`.
+- Auth entry screen:
+  - [crates/desktop-client/ui/src/screens/AuthScreen.tsx](/home/riggle/vaulted/crates/desktop-client/ui/src/screens/AuthScreen.tsx)
+- Existing QR login modal:
+  - [crates/desktop-client/ui/src/components/OracleLoginModal.tsx](/home/riggle/vaulted/crates/desktop-client/ui/src/components/OracleLoginModal.tsx)
+- Existing QR code component:
+  - [crates/desktop-client/ui/src/components/QrCode.tsx](/home/riggle/vaulted/crates/desktop-client/ui/src/components/QrCode.tsx)
+- Desktop QR commands:
+  - [crates/desktop-client/src/commands.rs](/home/riggle/vaulted/crates/desktop-client/src/commands.rs)
+- Tauri command registration:
+  - [crates/desktop-client/src/main.rs](/home/riggle/vaulted/crates/desktop-client/src/main.rs)
+- Oracle QR endpoints and tests:
+  - [crates/oracle/src/api/qr_auth.rs](/home/riggle/vaulted/crates/oracle/src/api/qr_auth.rs)
+- QR login schema:
+  - [migrations/011_qr_login_and_vaulted_wallet.sql](/home/riggle/vaulted/migrations/011_qr_login_and_vaulted_wallet.sql)
 
 ## Tasks
 
-- [x] 1. Add Payment transaction support in crypto-core
-  - Files likely to change:
-    - [crates/crypto-core/src/xrpl_wallet.rs](/home/riggle/vaulted/crates/crypto-core/src/xrpl_wallet.rs)
-    - [crates/crypto-core/src/lib.rs](/home/riggle/vaulted/crates/crypto-core/src/lib.rs) if a public builder is exported
-  - Deliverable: add a small `build_xrp_payment_tx(account, destination, amount_drops, destination_tag)` helper and update `validate_supported_signable_tx` / serialization so `Payment` with XRP drops can be signed by `VaultedXrplWallet::sign_xrpl_transaction_json`.
-  - Expected behavior: required fields are `TransactionType=Payment`, `Account`, `Destination`, `Amount` as drops string, `Fee`, `Sequence`, and `LastLedgerSequence`; optional `DestinationTag` is a `u32`.
-  - Logging requirements: none in crypto-core.
-  - Dependency notes: preserve existing `NFTokenMint` behavior and tests; do not add Tauri, HTTP, or network dependencies to `crypto-core`.
-
-- [x] 2. Add desktop send command with validation and local submit
-  - Files likely to change:
+- [x] 1. Confirm QR login behavior boundary and response shape
+  - Files likely to inspect/change:
     - [crates/desktop-client/src/commands.rs](/home/riggle/vaulted/crates/desktop-client/src/commands.rs)
-    - [crates/desktop-client/src/main.rs](/home/riggle/vaulted/crates/desktop-client/src/main.rs)
-  - Deliverable: add `send_xrp_payment` Tauri command accepting `{ destination, amountXrp, destinationTag? }`, validating input, fetching account/fee/sequence/ledger fields, signing locally, submitting through `XrplClient::submit`, and returning a safe response.
-  - Expected behavior:
-    - Reject invalid or non-classic destination before network submit.
-    - Reject non-numeric, zero, negative, NaN, infinite, or over-precision amount before signing.
-    - Reject unfunded accounts.
-    - Reject sends where `balance_drops - reserve_drops - fee_drops < amount_drops`.
-    - Reject invalid destination tags if supported: non-integer, negative, or greater than `u32::MAX`.
-    - Never return or log `tx_blob`, signatures, private keys, or seed material.
-  - Logging requirements: log `command=send_xrp_payment`, `request_phase`, validation status, amount XRP, fee drops, reserve XRP, engine_result, tx_hash, and status enum only.
-  - Dependency notes: reuse `fetch_xrpl_signing_fields`, `drops_to_xrp_string`, `XrplClient::account_info`, `fee_drops`, `ledger_current_index`, and `submit` patterns. Do not route through Oracle.
+    - [crates/desktop-client/src/auth/session.rs](/home/riggle/vaulted/crates/desktop-client/src/auth/session.rs)
+    - [crates/oracle/src/api/qr_auth.rs](/home/riggle/vaulted/crates/oracle/src/api/qr_auth.rs)
+  - Deliverable: define the exact QR-login result semantics for the desktop UI: approved Oracle session, identity id, status, expiration, and whether local Vaulted identity is present.
+  - Expected behavior: no UI or command should claim local decrypt/unlock if the in-memory seed identity is absent.
+  - Logging requirements: log only request phase, login request id, status enum, identity id, and expiration status.
+  - Dependency notes: do not alter auth restart/logout lifecycle or seed persistence policy.
 
-- [x] 3. Add Wallet tab send form and explicit confirmation
+- [x] 2. Add QR login entry point to Auth screen
   - Files likely to change:
-    - [crates/desktop-client/ui/src/screens/WalletScreen.tsx](/home/riggle/vaulted/crates/desktop-client/ui/src/screens/WalletScreen.tsx)
+    - [crates/desktop-client/ui/src/screens/AuthScreen.tsx](/home/riggle/vaulted/crates/desktop-client/ui/src/screens/AuthScreen.tsx)
+    - [crates/desktop-client/ui/src/components/OracleLoginModal.tsx](/home/riggle/vaulted/crates/desktop-client/ui/src/components/OracleLoginModal.tsx)
+    - [crates/desktop-client/ui/src/App.tsx](/home/riggle/vaulted/crates/desktop-client/ui/src/App.tsx) if the modal must be owned above `AuthScreen`
     - [crates/desktop-client/ui/src/index.css](/home/riggle/vaulted/crates/desktop-client/ui/src/index.css)
-  - Deliverable: add a compact Send panel with destination address, XRP amount, optional destination tag, submit button, confirmation state/modal, pending state, validation messages, and safe result display.
-  - Expected behavior:
-    - Client-side validation mirrors backend basics but backend remains authoritative.
-    - Submit requires an explicit confirmation showing destination, amount XRP, fee estimate if available, and reserve/spendable warning.
-    - On accepted submit, show `engine_result`, `engine_result_message`, and `tx_hash`, then refresh overview and history.
-    - On rejection or validation failure, show safe error text without secret-bearing diagnostics.
-  - Logging requirements: no console logging; no signed payload or signature display.
-  - Dependency notes: keep existing Receive and History sections intact; do not introduce a landing page or unrelated wallet UI redesign.
+  - Deliverable: Auth screen shows three primary actions: Sign in with seed phrase, Sign in with QR code, Create new wallet.
+  - Expected behavior: QR login starts from the locked screen, shows QR payload, expiration timer, retry, cancel, and safe result/error states.
+  - Logging requirements: no `console.log`/`console.error` for QR payloads, errors, tokens, or signatures.
+  - Dependency notes: preserve the existing seed backup ceremony and restore validation.
 
-- [x] 4. Add focused tests for signing, validation, and parsing
+- [x] 3. Replace raw QR payload display with scannable and copyable demo-safe UI
   - Files likely to change:
-    - [crates/crypto-core/src/xrpl_wallet.rs](/home/riggle/vaulted/crates/crypto-core/src/xrpl_wallet.rs)
-    - [crates/desktop-client/src/commands.rs](/home/riggle/vaulted/crates/desktop-client/src/commands.rs)
-  - Deliverable: add unit tests for Payment signing serialization and pure validation helpers for amount/destination tag/spendable-balance logic.
-  - Expected behavior:
-    - `Payment` signing produces a non-empty hex `tx_blob`, 64-char `tx_hash`, and includes `TxnSignature`.
-    - mismatched `Account` is rejected for Payment just like mint.
-    - amount parsing rejects zero, negatives, malformed strings, too many decimal places, NaN/infinity, and values that cannot fit in drops.
-    - spendable check accounts for reserve and fee before amount.
-  - Logging requirements: tests must not print or snapshot secret material.
-  - Dependency notes: avoid live XRPL in unit tests; runtime network submit is covered by manual checklist.
+    - [crates/desktop-client/ui/src/components/OracleLoginModal.tsx](/home/riggle/vaulted/crates/desktop-client/ui/src/components/OracleLoginModal.tsx)
+    - [crates/desktop-client/ui/src/components/QrCode.tsx](/home/riggle/vaulted/crates/desktop-client/ui/src/components/QrCode.tsx)
+    - [crates/desktop-client/ui/src/index.css](/home/riggle/vaulted/crates/desktop-client/ui/src/index.css)
+  - Deliverable: render a QR code for the compact login payload and keep copy payload as an explicit fallback.
+  - Expected behavior: user can scan or copy the payload; UI avoids showing tokens, signatures, or seed material; expiration is visible.
+  - Logging requirements: no frontend logging of payload contents.
+  - Dependency notes: do not introduce network dependencies or new QR libraries unless existing `QrCode` cannot encode the payload.
 
-- [x] 5. Run verification and runtime testnet checklist
+- [x] 4. Add trusted-device approval UI for demos
+  - Files likely to change:
+    - [crates/desktop-client/ui/src/screens/SettingsScreen.tsx](/home/riggle/vaulted/crates/desktop-client/ui/src/screens/SettingsScreen.tsx)
+    - [crates/desktop-client/src/commands.rs](/home/riggle/vaulted/crates/desktop-client/src/commands.rs) if a payload-parsing approval helper is needed
+    - [crates/desktop-client/src/main.rs](/home/riggle/vaulted/crates/desktop-client/src/main.rs) only if adding a new Tauri command
+  - Deliverable: an unlocked Vaulted device can paste a QR login payload, review safe request details, and approve it with local Vaulted identity signing.
+  - Expected behavior: approval uses `confirm_vaulted_qr_login`; signatures stay local and are not displayed; malformed, expired, or wrong-shape payloads show safe errors.
+  - Logging requirements: command name, request phase, login request id, validation status, identity id, device id, status enum only.
+  - Dependency notes: keep this as a demo-safe bridge, not a mobile app implementation.
+
+- [x] 5. Add focused QR login tests
+  - Files likely to change:
+    - [crates/oracle/src/api/qr_auth.rs](/home/riggle/vaulted/crates/oracle/src/api/qr_auth.rs)
+    - [crates/desktop-client/src/commands.rs](/home/riggle/vaulted/crates/desktop-client/src/commands.rs) if new parsing helpers are added
+  - Deliverable: tests for expired QR rejected, replay/consumed QR rejected, invalid signature rejected, and payload parsing validation if added.
+  - Expected behavior: existing QR/device-pairing tests continue passing; new tests do not log or snapshot tokens/signatures.
+  - Logging requirements: none in tests beyond default test output.
+  - Dependency notes: avoid live Oracle/XRPL network in unit tests.
+
+- [ ] 6. Run verification and runtime QR login checklist
   - Files likely to change:
     - none beyond implementation files above
-  - Deliverable: run local compile/test/UI/security checks and perform one manual testnet send only with explicit user-controlled testnet funds.
-  - Expected behavior: workspace stays green; runtime send returns safe submit result and wallet history updates.
-  - Logging requirements: inspect logs for forbidden fields, especially `tx_blob` and signatures.
-  - Dependency notes: do not reset runtime state, log out, clear wallets, modify `.env`, or use real/mainnet funds.
+  - Deliverable: local checks plus a manual runtime QR login demo using one locked desktop flow and one unlocked trusted-device approval flow.
+  - Expected behavior: QR login reaches approved/consumed state once, retry works after expiration, replay is rejected, and no forbidden values appear in logs/UI.
+  - Logging requirements: inspect logs for tokens, signatures, seed phrase, private keys, AES keys, and plaintext.
+  - Dependency notes: do not reset runtime state, log out, clear wallets, modify `.env`, or change seed policy.
+
+## Tests To Add Or Update
+- Oracle QR login tests:
+  - expired login request cannot be approved;
+  - consumed/approved login request cannot be replayed;
+  - invalid signature is rejected;
+  - status polling consumes an approved request exactly once.
+- Desktop command tests, only if adding pure parsing helpers:
+  - valid QR login payload parses to request id/challenge/oracle URL;
+  - malformed payloads are rejected safely;
+  - missing challenge/request id is rejected.
+- UI verification:
+  - `npm run lint`;
+  - `npx tsc --noEmit --project tsconfig.json`;
+  - `npm run build`.
 
 ## Verification Commands
 
@@ -106,6 +129,13 @@ Run Rust checks:
 cargo fmt --all --check
 cargo check --workspace
 cargo test --workspace
+```
+
+Run targeted checks while iterating:
+
+```bash
+cargo test -p xrpl-vault-oracle qr
+cargo test -p xrpl-vault-desktop qr
 ```
 
 Run UI checks:
@@ -125,22 +155,35 @@ Run security/diff checks:
 git diff --check
 ```
 
-## Runtime Testnet Send Checklist
+## Runtime Checks
+- Start Postgres/Redis, Oracle, storage-node, and desktop using the existing project commands.
+- On a locked desktop Auth screen, select Sign in with QR code.
+- Confirm a QR code renders, expiration is visible, and retry/cancel work.
+- On an unlocked trusted Vaulted device/session, paste or scan the QR login payload and approve.
+- Confirm the locked desktop observes `approved` then `consumed` and enters the intended authenticated state.
+- Poll or reuse the same QR login id again and confirm replay is rejected or remains consumed.
+- Let a QR request expire and confirm UI shows expired with retry.
+- Review logs and UI for forbidden values: no seed phrase, mnemonic entropy, private keys, derived keys, AES keys, JWTs, `tx_blob`, signatures, plaintext files, decrypted content, recovery phrase, or raw restore input.
 
-- Confirm the active XRPL network is testnet in the Wallet tab.
-- Confirm the Vaulted wallet is funded and shows a balance greater than reserve plus expected send amount plus fee.
-- Use a testnet destination classic address beginning with `r`.
-- If using DestinationTag, use only a non-negative integer within `u32` range.
-- Enter a small XRP amount, for example `0.000001` to `1`, depending on faucet balance.
-- Click Send, review the explicit confirmation, and submit only after destination and amount match.
-- Verify UI shows only safe result fields: `engine_result`, `engine_result_message`, and `tx_hash`.
-- Verify overview refreshes and balance changes after successful submit.
-- Verify transaction history refreshes and contains a sent `Payment` row with the destination as counterparty.
-- Review desktop logs for forbidden values: no seed phrase, private key, derived key, AES key, JWT, `tx_blob`, signature, plaintext, decrypted content, or recovery phrase.
+## Out Of Scope
+- XRPL mint signing/serialization.
+- Oracle post-mint linking/finalization.
+- Pending mint recovery.
+- Oracle XRPL HTTP RPC config.
+- 12-word seed policy.
+- Auth restart/logout lifecycle.
+- Desktop launch/window fallback.
+- Read-only Wallet tab.
+- Send XRP / Payment command.
+- File upload/mint flow changes.
+- Owner download/decrypt changes.
+- NFT transfer/re-encryption and recipient decrypt.
+- Mobile app implementation.
+- Runtime reset/logout or clearing local data.
+- README/demo script updates unless the QR flow directly needs a short command note.
 
 ## Expected Successful State
-- Wallet tab can send testnet XRP from the local Vaulted-derived XRPL wallet after explicit confirmation.
-- Signing and submission remain entirely local to the desktop client.
-- Backend validation prevents invalid destination, invalid amount, unfunded account, and insufficient spendable balance.
-- The UI shows safe submit results and refreshes balance/history after accepted submit.
-- Existing NFT mint behavior remains unchanged.
+- The Auth screen exposes the required three actions.
+- QR login is demonstrably usable in a demo-safe flow with an unlocked trusted Vaulted device approving a locked desktop login request.
+- QR login has explicit expiration, retry, cancel, and replay protections.
+- No secret-bearing material is logged, returned, or displayed.

@@ -1,5 +1,7 @@
-import { useState, useEffect } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { QrCode } from './QrCode'
+import { formatError } from '../utils/formatError'
 
 interface QrLoginStartResponse {
     loginRequestId: string
@@ -9,86 +11,140 @@ interface QrLoginStartResponse {
     qrPayload: unknown
 }
 
+export interface QrLoginPollResponse {
+    status: string
+    approved: boolean
+    oracleSession?: boolean
+    identityId?: string | null
+    localVaultedWallet?: boolean
+    localDecryptAvailable?: boolean
+}
+
 interface OracleLoginModalProps {
     isOpen: boolean
     onClose: () => void
-    onSuccess: () => void
+    onSuccess: (result: QrLoginPollResponse) => void
 }
 
 type LoginState = 'idle' | 'loading' | 'waiting' | 'success' | 'error'
+
+const secondsRemaining = (iso: string) =>
+    Math.max(0, Math.ceil((new Date(iso).getTime() - Date.now()) / 1000))
 
 export function OracleLoginModal({ isOpen, onClose, onSuccess }: OracleLoginModalProps) {
     const [state, setState] = useState<LoginState>('idle')
     const [error, setError] = useState<string | null>(null)
     const [payload, setPayload] = useState<QrLoginStartResponse | null>(null)
-    const [challenge, setChallenge] = useState<string>('')
+    const [copied, setCopied] = useState(false)
+    const [remaining, setRemaining] = useState(0)
+    const [approvedResult, setApprovedResult] = useState<QrLoginPollResponse | null>(null)
+    const pollToken = useRef(0)
 
-    // Reset when modal opens. Defer state writes to avoid synchronous effect updates.
+    const qrValue = useMemo(
+        () => (payload ? JSON.stringify(payload.qrPayload) : ''),
+        [payload],
+    )
+
     useEffect(() => {
         if (!isOpen) return
+        pollToken.current += 1
         const frame = requestAnimationFrame(() => {
             setState('idle')
             setError(null)
             setPayload(null)
-            setChallenge('')
+            setCopied(false)
+            setRemaining(0)
+            setApprovedResult(null)
         })
-        return () => cancelAnimationFrame(frame)
+        return () => {
+            pollToken.current += 1
+            cancelAnimationFrame(frame)
+        }
     }, [isOpen])
 
+    useEffect(() => {
+        if (!payload) return
+        const update = () => setRemaining(secondsRemaining(payload.expiresAt))
+        update()
+        const id = window.setInterval(update, 1000)
+        return () => window.clearInterval(id)
+    }, [payload])
+
     const startLogin = async () => {
+        const token = pollToken.current + 1
+        pollToken.current = token
         setState('loading')
         setError(null)
+        setPayload(null)
+        setCopied(false)
+        setApprovedResult(null)
 
         try {
             const result = await invoke<QrLoginStartResponse>('start_vaulted_qr_login')
-
-            setChallenge(result.challenge)
             setPayload(result)
+            setRemaining(secondsRemaining(result.expiresAt))
             setState('waiting')
-
-            pollQrLogin(result.loginRequestId)
+            void pollQrLogin(result.loginRequestId, token)
         } catch (e) {
-            console.error('Failed to start Oracle login:', e)
-            setError(String(e))
+            setError(formatError(e))
             setState('error')
         }
     }
 
-    const pollQrLogin = async (loginRequestId: string) => {
+    const pollQrLogin = async (loginRequestId: string, token: number) => {
         try {
             for (let i = 0; i < 120; i++) {
-                const result = await invoke<{ status: string; approved: boolean }>('poll_vaulted_qr_login', { loginRequestId })
+                if (pollToken.current !== token) return
+                const result = await invoke<QrLoginPollResponse>('poll_vaulted_qr_login', { loginRequestId })
+                if (pollToken.current !== token) return
                 if (result.approved || result.status === 'approved' || result.status === 'consumed') {
+                    setApprovedResult(result)
                     setState('success')
-                    setTimeout(() => {
-                        onSuccess()
-                        onClose()
-                    }, 1000)
+                    onSuccess(result)
+                    if (result.localDecryptAvailable || result.localVaultedWallet) {
+                        window.setTimeout(onClose, 800)
+                    }
                     return
                 }
                 if (result.status === 'rejected' || result.status === 'expired') {
-                    setError(`Login ${result.status}`)
+                    setError(`Login ${result.status}. Create a new QR request and try again.`)
                     setState('error')
                     return
                 }
-                await new Promise(resolve => setTimeout(resolve, 1500))
+                await new Promise(resolve => window.setTimeout(resolve, 1500))
             }
-            setError('QR login timed out')
+            setError('QR login timed out. Create a new QR request and try again.')
             setState('error')
         } catch (e) {
-            console.error('Vaulted QR login polling failed:', e)
-            setError(String(e))
+            setError(formatError(e))
             setState('error')
         }
     }
 
+    const copyPayload = async () => {
+        if (!qrValue) return
+        await navigator.clipboard.writeText(qrValue)
+        setCopied(true)
+        window.setTimeout(() => setCopied(false), 2000)
+    }
+
+    const cancel = () => {
+        pollToken.current += 1
+        onClose()
+    }
 
     if (!isOpen) return null
 
+    const timerText = payload
+        ? remaining > 0
+            ? `${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, '0')}`
+            : 'Expired'
+        : ''
+
     return (
-        <div className="modal-overlay" onClick={onClose}>
+        <div className="modal-overlay" onClick={cancel}>
             <div className="modal-content oracle-login-modal" onClick={e => e.stopPropagation()}>
-                <button className="modal-close" onClick={onClose}>
+                <button className="modal-close" onClick={cancel} aria-label="Close QR login">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                         <path d="M18 6L6 18M6 6l12 12" />
                     </svg>
@@ -101,20 +157,15 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess }: OracleLoginModa
                             <path d="M7 11V7a5 5 0 0110 0v4" />
                         </svg>
                     </div>
-                    <h2>Oracle Authentication</h2>
-                    <p className="modal-subtitle">Approve with a trusted Vaulted device</p>
+                    <h2>Vaulted QR Login</h2>
+                    <p className="modal-subtitle">Approve with an unlocked trusted Vaulted session</p>
                 </div>
 
                 <div className="modal-body">
                     {state === 'idle' && (
                         <div className="login-idle">
-                            <p>Authentication is required to perform secure operations like uploading files and managing transfers.</p>
-                            <button className="btn-primary" onClick={startLogin}>
-                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                    <path d="M15 3h4a2 2 0 012 2v14a2 2 0 01-2 2h-4M10 17l5-5-5-5M15 12H3" />
-                                </svg>
-                                Start Authentication
-                            </button>
+                            <p>Start a one-time Oracle login request, then approve it from an already-unlocked Vaulted session.</p>
+                            <button className="btn-primary" onClick={startLogin}>Sign in with QR code</button>
                         </div>
                     )}
 
@@ -127,19 +178,26 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess }: OracleLoginModa
 
                     {state === 'waiting' && payload && (
                         <div className="login-waiting">
-                            <p>Scan or copy this Vaulted QR login payload with a trusted device.</p>
-                            <textarea
-                                readOnly
-                                value={JSON.stringify(payload.qrPayload, null, 2)}
-                                style={{ width: '100%', minHeight: 140, borderRadius: 10, padding: 12, fontFamily: 'ui-monospace, monospace', fontSize: 12, background: '#0f1219', color: '#f2f3f7', border: '1px solid #262c3a' }}
-                            />
-                            <p className="challenge-text">
-                                Challenge: <code>{challenge.slice(0, 30)}...</code>
-                            </p>
+                            <QrCode value={qrValue} label="Vaulted QR login" size={220} />
+                            <div className="qr-login-meta">
+                                <span>{timerText}</span>
+                                <code>{payload.loginRequestId.slice(0, 8)}...</code>
+                            </div>
                             <div className="waiting-indicator">
                                 <div className="pulse-dot" />
-                                <span>Waiting for Vaulted device approval...</span>
+                                <span>Waiting for trusted-device approval...</span>
                             </div>
+                            <div className="qr-login-actions">
+                                <button className="btn-secondary" onClick={copyPayload}>
+                                    {copied ? 'Copied' : 'Copy payload'}
+                                </button>
+                                <button className="btn-secondary" onClick={startLogin}>Retry</button>
+                                <button className="btn-secondary" onClick={cancel}>Cancel</button>
+                            </div>
+                            <details className="qr-login-fallback">
+                                <summary>Payload fallback</summary>
+                                <textarea readOnly value={JSON.stringify(payload.qrPayload, null, 2)} />
+                            </details>
                         </div>
                     )}
 
@@ -151,7 +209,11 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess }: OracleLoginModa
                                     <polyline points="22 4 12 14.01 9 11.01" />
                                 </svg>
                             </div>
-                            <p>Authentication successful!</p>
+                            <p>{approvedResult?.localDecryptAvailable ? 'Vaulted session unlocked.' : 'Oracle session approved.'}</p>
+                            {!approvedResult?.localDecryptAvailable && (
+                                <p className="safe-note">Local file decrypt still requires restoring the 12-word phrase on this device.</p>
+                            )}
+                            <button className="btn-secondary" onClick={cancel}>Close</button>
                         </div>
                     )}
 
@@ -165,9 +227,10 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess }: OracleLoginModa
                             </div>
                             <p>Authentication failed</p>
                             <p className="error-text">{error}</p>
-                            <button className="btn-primary" onClick={startLogin}>
-                                Try Again
-                            </button>
+                            <div className="qr-login-actions">
+                                <button className="btn-primary" onClick={startLogin}>Try again</button>
+                                <button className="btn-secondary" onClick={cancel}>Cancel</button>
+                            </div>
                         </div>
                     )}
                 </div>
@@ -175,18 +238,13 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess }: OracleLoginModa
 
             <style>{`
         .oracle-login-modal {
-          max-width: 420px;
+          max-width: 460px;
           background: #181c25;
           border: 1px solid #262c3a;
           border-radius: 16px;
           padding: 24px;
         }
-
-        .modal-header {
-          text-align: center;
-          margin-bottom: 24px;
-        }
-
+        .modal-header { text-align: center; margin-bottom: 24px; }
         .modal-icon {
           width: 64px;
           height: 64px;
@@ -197,47 +255,28 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess }: OracleLoginModa
           justify-content: center;
           margin: 0 auto 16px;
         }
-
-        .modal-header h2 {
-          margin: 0 0 8px;
-          font-size: 20px;
-          color: #f2f3f7;
-        }
-
-        .modal-subtitle {
-          margin: 0;
-          color: #868b98;
-          font-size: 14px;
-        }
-
+        .modal-header h2 { margin: 0 0 8px; font-size: 20px; color: #f2f3f7; }
+        .modal-subtitle { margin: 0; color: #868b98; font-size: 14px; }
         .modal-body {
-          min-height: 200px;
+          min-height: 220px;
           display: flex;
           flex-direction: column;
           align-items: center;
           justify-content: center;
         }
-
-        .login-idle p {
-          text-align: center;
-          color: #868b98;
-          margin-bottom: 20px;
-          line-height: 1.6;
-        }
-
+        .login-idle,
         .login-loading,
         .login-success,
-        .login-error {
-          text-align: center;
-        }
-
+        .login-error,
+        .login-waiting { width: 100%; text-align: center; }
+        .login-idle p,
         .login-loading p,
         .login-success p,
         .login-error p {
           color: #868b98;
-          margin-top: 16px;
+          margin: 0 0 16px;
+          line-height: 1.6;
         }
-
         .spinner {
           width: 40px;
           height: 40px;
@@ -245,50 +284,37 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess }: OracleLoginModa
           border-top-color: #6aa0ff;
           border-radius: 50%;
           animation: spin 1s linear infinite;
+          margin: 0 auto;
         }
-
-        @keyframes spin {
-          to { transform: rotate(360deg); }
-        }
-
-        .qr-container {
-          background: #181c25;
-          padding: 16px;
-          border-radius: 12px;
-          margin-bottom: 16px;
-        }
-
-        .qr-container img {
-          width: 200px;
-          height: 200px;
-          display: block;
-        }
-
-        .login-waiting p {
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .qr-login-meta {
+          display: flex;
+          justify-content: center;
+          align-items: center;
+          gap: 10px;
+          margin: 12px 0;
           color: #868b98;
-          margin: 8px 0;
-        }
-
-        .challenge-text {
           font-size: 12px;
         }
-
-        .challenge-text code {
-          background: #0b0d12;
-          padding: 2px 6px;
-          border-radius: 4px;
-          font-family: monospace;
+        .qr-login-meta span {
+          color: #e6b35a;
+          font-weight: 700;
+          font-variant-numeric: tabular-nums;
         }
-
+        .qr-login-meta code {
+          color: #f2f3f7;
+          font-family: var(--font-mono);
+          font-size: 12px;
+        }
         .waiting-indicator {
           display: flex;
           align-items: center;
+          justify-content: center;
           gap: 8px;
-          margin-top: 16px;
           color: #868b98;
-          font-size: 14px;
+          font-size: 13px;
+          margin: 12px 0;
         }
-
         .pulse-dot {
           width: 8px;
           height: 8px;
@@ -296,74 +322,43 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess }: OracleLoginModa
           border-radius: 50%;
           animation: pulse 1.5s ease-in-out infinite;
         }
-
         @keyframes pulse {
           0%, 100% { opacity: 1; transform: scale(1); }
-          50% { opacity: 0.5; transform: scale(1.2); }
+          50% { opacity: 0.5; transform: scale(1.25); }
         }
-
-        .success-icon,
-        .error-icon {
-          margin-bottom: 8px;
-        }
-
-        .error-text {
-          font-size: 13px;
-          color: #e07a6a !important;
-          margin-bottom: 16px !important;
-        }
-
-        .btn-primary,
-        .btn-secondary {
-          display: inline-flex;
-          align-items: center;
+        .qr-login-actions {
+          display: flex;
+          justify-content: center;
           gap: 8px;
-          padding: 12px 24px;
-          border-radius: 8px;
-          font-size: 14px;
-          font-weight: 500;
-          cursor: pointer;
-          transition: all 0.2s;
+          flex-wrap: wrap;
+          margin-top: 14px;
         }
-
-        .btn-primary {
-          background: #6aa0ff;
+        .qr-login-fallback {
+          margin-top: 14px;
+          text-align: left;
+          color: #868b98;
+          font-size: 12px;
+        }
+        .qr-login-fallback textarea {
+          width: 100%;
+          min-height: 120px;
+          border-radius: 10px;
+          padding: 12px;
+          margin-top: 8px;
+          font-family: var(--font-mono);
+          font-size: 12px;
+          background: #0f1219;
           color: #f2f3f7;
-          border: none;
-        }
-
-        .btn-primary:hover {
-          background: #3b6fe0;
-        }
-
-        .btn-secondary {
-          background: transparent;
-          color: #868b98;
           border: 1px solid #262c3a;
-          margin-top: 12px;
+          resize: vertical;
         }
-
-        .btn-secondary:hover {
-          background: #323232;
-          border-color: #5a5f6c;
+        .safe-note,
+        .error-text {
+          color: #e6b35a !important;
+          font-size: 13px;
+          line-height: 1.5;
         }
-
-        .modal-close {
-          position: absolute;
-          top: 16px;
-          right: 16px;
-          background: none;
-          border: none;
-          color: #5a5f6c;
-          cursor: pointer;
-          padding: 4px;
-          border-radius: 4px;
-        }
-
-        .modal-close:hover {
-          color: #868b98;
-          background: #323232;
-        }
+        .error-text { color: #e07a6a !important; }
       `}</style>
         </div>
     )
