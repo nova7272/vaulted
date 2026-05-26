@@ -8,12 +8,12 @@ use std::path::Path;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
 use xrpl_vault_crypto_core::{
-    add_xrpl_signing_fields, build_nftoken_mint_tx, encryption_public_key_fingerprint_hex,
-    format_fingerprint_groups,
-    generate_vaulted_nft_metadata_preview as build_vaulted_nft_metadata_preview, open_key_envelope,
-    seal_key_for_recipient_hex, KeyEnvelope, SeedManager, VaultedNftMetadataInput,
-    VaultedNftMetadataPreview, VaultedQrSigningRequest, VaultedSignedXrplTransaction,
-    DEFAULT_MNEMONIC_WORDS,
+    add_xrpl_signing_fields, build_nftoken_mint_tx, build_xrp_payment_tx,
+    encryption_public_key_fingerprint_hex, format_fingerprint_groups,
+    generate_vaulted_nft_metadata_preview as build_vaulted_nft_metadata_preview,
+    is_valid_xrpl_classic_address, open_key_envelope, seal_key_for_recipient_hex, KeyEnvelope,
+    SeedManager, VaultedNftMetadataInput, VaultedNftMetadataPreview, VaultedQrSigningRequest,
+    VaultedSignedXrplTransaction, DEFAULT_MNEMONIC_WORDS,
 };
 
 use crate::auth::{Session, VaultedSigningRequest};
@@ -2586,7 +2586,8 @@ mod tests {
     use super::{
         build_auth_lifecycle_status, ensure_recoverable_mint_status,
         file_access_status_from_http_status, generate_create_wallet_mnemonic,
-        parse_wallet_transaction_history, set_vaulted_session, validate_create_wallet_word_count,
+        parse_destination_tag, parse_wallet_transaction_history, parse_xrp_amount_to_drops,
+        set_vaulted_session, validate_create_wallet_word_count, validate_spendable_balance,
     };
     use crate::state::{AppConfig, AppState};
     use xrpl_vault_crypto_core::{SeedManager, DEFAULT_MNEMONIC_WORDS};
@@ -2648,6 +2649,54 @@ mod tests {
         );
         assert!(validate_create_wallet_word_count(None).is_ok());
         assert!(validate_create_wallet_word_count(Some(24)).is_err());
+    }
+
+    #[test]
+    fn parses_xrp_amount_to_drops() {
+        assert_eq!(parse_xrp_amount_to_drops("1").unwrap(), 1_000_000);
+        assert_eq!(parse_xrp_amount_to_drops("0.000001").unwrap(), 1);
+        assert_eq!(parse_xrp_amount_to_drops("12.3456").unwrap(), 12_345_600);
+    }
+
+    #[test]
+    fn xrp_amount_parser_rejects_invalid_values() {
+        for value in [
+            "",
+            "0",
+            "0.000000",
+            "-1",
+            "+1",
+            "abc",
+            "1.2.3",
+            "NaN",
+            "inf",
+            "1.0000001",
+            "18446744073709551616",
+        ] {
+            assert!(parse_xrp_amount_to_drops(value).is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn spendable_balance_validation_accounts_for_reserve_and_fee() {
+        assert!(validate_spendable_balance(20_000_012, 10_000_000, 12, 10_000_000).is_ok());
+        assert!(validate_spendable_balance(20_000_011, 10_000_000, 12, 10_000_000).is_err());
+        assert!(validate_spendable_balance(9_999_999, 10_000_000, 12, 1).is_err());
+    }
+
+    #[test]
+    fn destination_tag_validation_rejects_invalid_values() {
+        assert_eq!(parse_destination_tag(None).unwrap(), None);
+        assert_eq!(parse_destination_tag(Some("")).unwrap(), None);
+        assert_eq!(parse_destination_tag(Some("0")).unwrap(), Some(0));
+        assert_eq!(
+            parse_destination_tag(Some("4294967295")).unwrap(),
+            Some(u32::MAX)
+        );
+
+        for value in ["-1", "+1", "1.5", "abc", "4294967296"] {
+            assert!(parse_destination_tag(Some(value)).is_err(), "{value}");
+        }
     }
 
     #[tokio::test]
@@ -4370,6 +4419,22 @@ pub struct WalletTransactionHistoryItem {
     pub status: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendXrpPaymentRequest {
+    pub destination: String,
+    pub amount_xrp: String,
+    pub destination_tag: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendXrpPaymentResponse {
+    pub engine_result: String,
+    pub engine_result_message: String,
+    pub tx_hash: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServiceStatus {
@@ -4422,6 +4487,109 @@ fn drops_to_xrp_string(drops: &str) -> String {
         },
         Err(_) => "0".to_string(),
     }
+}
+
+fn parse_xrp_amount_to_drops(amount_xrp: &str) -> Result<u64> {
+    let trimmed = amount_xrp.trim();
+    if trimmed.is_empty() {
+        return Err(ClientError::Validation("Amount is required".to_string()));
+    }
+    if trimmed.starts_with('-') || trimmed.starts_with('+') {
+        return Err(ClientError::Validation(
+            "Amount must be a positive XRP value".to_string(),
+        ));
+    }
+    if trimmed.eq_ignore_ascii_case("nan") || trimmed.to_ascii_lowercase().contains("inf") {
+        return Err(ClientError::Validation(
+            "Amount must be a finite XRP value".to_string(),
+        ));
+    }
+
+    let mut parts = trimmed.split('.');
+    let whole = parts.next().unwrap_or_default();
+    let fractional = parts.next();
+    if parts.next().is_some() || whole.is_empty() {
+        return Err(ClientError::Validation(
+            "Amount must be a numeric XRP value".to_string(),
+        ));
+    }
+    if !whole.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(ClientError::Validation(
+            "Amount must be a numeric XRP value".to_string(),
+        ));
+    }
+
+    let fractional = fractional.unwrap_or("");
+    if !fractional.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(ClientError::Validation(
+            "Amount must be a numeric XRP value".to_string(),
+        ));
+    }
+    if fractional.len() > 6 {
+        return Err(ClientError::Validation(
+            "Amount supports at most 6 decimal places".to_string(),
+        ));
+    }
+
+    let whole_drops = whole
+        .parse::<u64>()
+        .map_err(|_| ClientError::Validation("Amount is too large".to_string()))?
+        .checked_mul(1_000_000)
+        .ok_or_else(|| ClientError::Validation("Amount is too large".to_string()))?;
+    let fractional_drops = if fractional.is_empty() {
+        0
+    } else {
+        let padded = format!("{fractional:0<6}");
+        padded
+            .parse::<u64>()
+            .map_err(|_| ClientError::Validation("Amount is too large".to_string()))?
+    };
+    let drops = whole_drops
+        .checked_add(fractional_drops)
+        .ok_or_else(|| ClientError::Validation("Amount is too large".to_string()))?;
+    if drops == 0 {
+        return Err(ClientError::Validation(
+            "Amount must be greater than 0 XRP".to_string(),
+        ));
+    }
+    Ok(drops)
+}
+
+fn parse_destination_tag(tag: Option<&str>) -> Result<Option<u32>> {
+    let Some(tag) = tag.map(str::trim).filter(|tag| !tag.is_empty()) else {
+        return Ok(None);
+    };
+    if tag.starts_with('-')
+        || tag.starts_with('+')
+        || !tag.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(ClientError::Validation(
+            "Destination tag must be a non-negative integer".to_string(),
+        ));
+    }
+    tag.parse::<u32>()
+        .map(Some)
+        .map_err(|_| ClientError::Validation("Destination tag is too large".to_string()))
+}
+
+fn validate_spendable_balance(
+    balance_drops: u64,
+    reserve_drops: u64,
+    fee_drops: u64,
+    amount_drops: u64,
+) -> Result<()> {
+    let spendable = balance_drops
+        .checked_sub(reserve_drops)
+        .and_then(|value| value.checked_sub(fee_drops))
+        .ok_or_else(|| {
+            ClientError::Validation("Wallet balance does not cover reserve and fee".to_string())
+        })?;
+    if spendable < amount_drops {
+        return Err(ClientError::Validation(
+            "Insufficient spendable balance after reserve and fee".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn xrpl_datetime_to_iso(seconds_since_2000: u64) -> Option<String> {
@@ -4578,6 +4746,132 @@ pub async fn get_xrpl_transaction_history(
     client.connect().await?;
     let response = client.account_tx(&address, limit.unwrap_or(20)).await?;
     Ok(parse_wallet_transaction_history(&address, &response))
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn send_xrp_payment(
+    state: State<'_, Arc<AppState>>,
+    request: SendXrpPaymentRequest,
+) -> Result<SendXrpPaymentResponse> {
+    const RESERVE_DROPS: u64 = 10_000_000;
+    const RESERVE_XRP: &str = "10";
+
+    tracing::info!(
+        command = "send_xrp_payment",
+        request_phase = "validation_started",
+        status = "started",
+        "Validating XRP payment request"
+    );
+
+    let destination = request.destination.trim().to_string();
+    if !is_valid_xrpl_classic_address(&destination) {
+        tracing::warn!(
+            command = "send_xrp_payment",
+            request_phase = "validation",
+            validation_status = "invalid_destination",
+            status = "rejected",
+            "XRP payment validation rejected destination"
+        );
+        return Err(ClientError::Validation(
+            "Destination must be a valid XRPL classic address".to_string(),
+        ));
+    }
+
+    let amount_drops = parse_xrp_amount_to_drops(&request.amount_xrp)?;
+    let destination_tag = parse_destination_tag(request.destination_tag.as_deref())?;
+    let amount_xrp = drops_to_xrp_string(&amount_drops.to_string());
+
+    tracing::info!(
+        command = "send_xrp_payment",
+        request_phase = "validation",
+        validation_status = "input_valid",
+        amount_xrp = %amount_xrp,
+        reserve_xrp = RESERVE_XRP,
+        status = "ok",
+        "XRP payment input validation passed"
+    );
+
+    let wallet = state.get_xrpl_wallet().await?;
+    let account = wallet.classic_address()?;
+
+    let mut client = XrplClient::new(&state.config.xrpl_node_url);
+    client.connect().await?;
+    let account_info = client.account_info(&account).await.map_err(|err| {
+        let raw = err.to_string();
+        if raw.contains("actNotFound") || raw.contains("Account not found") {
+            ClientError::Validation("Wallet account is not funded".to_string())
+        } else {
+            err
+        }
+    })?;
+    let balance_drops = account_info
+        .balance
+        .parse::<u64>()
+        .map_err(|_| ClientError::Xrpl("XRPL returned an invalid account balance".to_string()))?;
+    let fee_drops = client.fee_drops().await?;
+    let fee_drops_u64 = fee_drops
+        .parse::<u64>()
+        .map_err(|_| ClientError::Xrpl("XRPL returned an invalid fee".to_string()))?;
+
+    validate_spendable_balance(balance_drops, RESERVE_DROPS, fee_drops_u64, amount_drops)?;
+    tracing::info!(
+        command = "send_xrp_payment",
+        request_phase = "validation",
+        validation_status = "spendable_balance_valid",
+        amount_xrp = %amount_xrp,
+        fee_drops = %fee_drops,
+        reserve_xrp = RESERVE_XRP,
+        status = "ok",
+        "XRP payment spendable balance validation passed"
+    );
+
+    let last_ledger_sequence = client.ledger_current_index().await?.saturating_add(20);
+    let tx = build_xrp_payment_tx(
+        &account,
+        &destination,
+        &amount_drops.to_string(),
+        destination_tag,
+    );
+    let tx = add_xrpl_signing_fields(
+        tx,
+        fee_drops.clone(),
+        account_info.sequence,
+        last_ledger_sequence,
+    );
+    let signed = wallet.sign_xrpl_transaction_json(&tx)?;
+    let tx_blob = signed.tx_blob.ok_or_else(|| {
+        ClientError::Xrpl(
+            "Local signing did not produce a signed XRPL transaction payload".to_string(),
+        )
+    })?;
+
+    tracing::info!(
+        command = "send_xrp_payment",
+        request_phase = "submit_started",
+        amount_xrp = %amount_xrp,
+        fee_drops = %fee_drops,
+        reserve_xrp = RESERVE_XRP,
+        status = "submitting",
+        "Submitting locally signed XRP payment"
+    );
+    let result = client.submit(&tx_blob).await?;
+    tracing::info!(
+        command = "send_xrp_payment",
+        request_phase = "submit_completed",
+        amount_xrp = %amount_xrp,
+        fee_drops = %fee_drops,
+        reserve_xrp = RESERVE_XRP,
+        engine_result = %result.engine_result,
+        tx_hash = %result.tx_hash,
+        status = if result.engine_result.starts_with("tes") { "accepted" } else { "rejected" },
+        "XRP payment submit completed"
+    );
+
+    Ok(SendXrpPaymentResponse {
+        engine_result: result.engine_result,
+        engine_result_message: result.engine_result_message,
+        tx_hash: result.tx_hash,
+    })
 }
 
 #[tauri::command(rename_all = "camelCase")]

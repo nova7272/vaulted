@@ -5,8 +5,8 @@
 //! overlap with Vaulted encryption/signing identity keys.
 //!
 //! The XRPL serializer implemented here intentionally covers the transaction subset Vaulted needs
-//! for its MVP: locally signing XLS-20 `NFTokenMint` transactions. Unsupported fields fail closed
-//! instead of being silently omitted.
+//! for its MVP: locally signing XLS-20 `NFTokenMint` and testnet XRP `Payment` transactions.
+//! Unsupported fields fail closed instead of being silently omitted.
 
 use hkdf::Hkdf;
 use k256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey, VerifyingKey};
@@ -126,9 +126,9 @@ impl VaultedXrplWallet {
 
     /// Locally signs a Vaulted-supported XRPL transaction and returns a submission-ready tx_blob.
     ///
-    /// Currently supported: `NFTokenMint`. The transaction must include the common network fields
-    /// `Fee`, `Sequence`, and `LastLedgerSequence`. This function rejects mismatched Account fields
-    /// and unsupported transaction types.
+    /// Currently supported: `NFTokenMint` and XRP `Payment`. The transaction must include the
+    /// common network fields `Fee`, `Sequence`, and `LastLedgerSequence`. This function rejects
+    /// mismatched Account fields and unsupported transaction types.
     pub fn sign_xrpl_transaction_json(
         &self,
         tx_json: &serde_json::Value,
@@ -261,6 +261,44 @@ pub fn build_nftoken_mint_tx(
     tx
 }
 
+/// XRPL XRP Payment builder for sending drops from a Vaulted-derived account.
+pub fn build_xrp_payment_tx(
+    account: &str,
+    destination: &str,
+    amount_drops: &str,
+    destination_tag: Option<u32>,
+) -> serde_json::Value {
+    let mut tx = serde_json::json!({
+        "TransactionType": "Payment",
+        "Account": account,
+        "Destination": destination,
+        "Amount": amount_drops,
+    });
+    if let Some(tag) = destination_tag {
+        tx["DestinationTag"] = serde_json::json!(tag);
+    }
+    tx
+}
+
+/// Validates an XRPL classic address checksum and account-id shape.
+pub fn is_valid_xrpl_classic_address(address: &str) -> bool {
+    let Ok(decoded) = bs58::decode(address)
+        .with_alphabet(bs58::Alphabet::RIPPLE)
+        .into_vec()
+    else {
+        return false;
+    };
+    if decoded.len() != 25 || decoded[0] != 0x00 {
+        return false;
+    }
+
+    let payload = &decoded[..21];
+    let checksum = &decoded[21..];
+    let first = Sha256::digest(payload);
+    let second = Sha256::digest(first);
+    checksum == &second[..4]
+}
+
 /// Adds network-specific common fields required before local XRPL signing.
 pub fn add_xrpl_signing_fields(
     mut tx_json: serde_json::Value,
@@ -276,18 +314,40 @@ pub fn add_xrpl_signing_fields(
 
 fn validate_supported_signable_tx(tx: &serde_json::Value) -> Result<()> {
     let transaction_type = string_field(tx, "TransactionType")?;
-    if transaction_type != "NFTokenMint" {
-        return Err(CryptoError::InvalidData(format!(
-            "Unsupported XRPL transaction type: {}",
-            transaction_type
-        )));
+    match transaction_type.as_str() {
+        "NFTokenMint" => validate_nftoken_mint_tx(tx)?,
+        "Payment" => validate_xrp_payment_tx(tx)?,
+        _ => {
+            return Err(CryptoError::InvalidData(format!(
+                "Unsupported XRPL transaction type: {}",
+                transaction_type
+            )));
+        },
     }
+    validate_common_signing_fields(tx)?;
+    Ok(())
+}
+
+fn validate_common_signing_fields(tx: &serde_json::Value) -> Result<()> {
     let _ = string_field(tx, "Account")?;
-    let _ = string_field(tx, "URI")?;
-    let _ = u32_field(tx, "NFTokenTaxon")?;
     let _ = string_field(tx, "Fee")?;
     let _ = u32_field(tx, "Sequence")?;
     let _ = u32_field(tx, "LastLedgerSequence")?;
+    Ok(())
+}
+
+fn validate_nftoken_mint_tx(tx: &serde_json::Value) -> Result<()> {
+    let _ = string_field(tx, "URI")?;
+    let _ = u32_field(tx, "NFTokenTaxon")?;
+    Ok(())
+}
+
+fn validate_xrp_payment_tx(tx: &serde_json::Value) -> Result<()> {
+    let _ = string_field(tx, "Destination")?;
+    let _ = string_field(tx, "Amount")?;
+    if tx.get("DestinationTag").is_some() {
+        let _ = u32_field(tx, "DestinationTag")?;
+    }
     Ok(())
 }
 
@@ -391,6 +451,48 @@ mod tests {
         assert!(!tx_blob.is_empty());
         assert_eq!(signed.tx_hash.as_ref().unwrap().len(), 64);
         assert!(signed.tx_json.get("TxnSignature").is_some());
+    }
+
+    #[test]
+    fn signs_xrp_payment_as_xrpl_tx_blob() {
+        let wallet = deterministic_wallet();
+        let account = wallet.classic_address().unwrap();
+        let destination = VaultedXrplWallet::from_bip39_seed(&[8u8; 64])
+            .unwrap()
+            .classic_address()
+            .unwrap();
+        let tx = build_xrp_payment_tx(&account, &destination, "1000000", Some(123));
+        let tx = add_xrpl_signing_fields(tx, "12", 1, 100);
+        let signed = wallet.sign_xrpl_transaction_json(&tx).unwrap();
+        let tx_blob = signed.tx_blob.as_ref().unwrap();
+
+        assert_eq!(signed.protocol, "vaulted-xrpl-tx-blob-v1");
+        assert_eq!(tx_blob.len() % 2, 0);
+        assert!(hex::decode(tx_blob).is_ok());
+        assert!(!tx_blob.is_empty());
+        assert_eq!(signed.tx_hash.as_ref().unwrap().len(), 64);
+        assert_eq!(signed.tx_json["TransactionType"], "Payment");
+        assert!(signed.tx_json.get("TxnSignature").is_some());
+    }
+
+    #[test]
+    fn rejects_mismatched_account_for_payment_signing() {
+        let wallet = deterministic_wallet();
+        let destination = VaultedXrplWallet::from_bip39_seed(&[8u8; 64])
+            .unwrap()
+            .classic_address()
+            .unwrap();
+        let tx = build_xrp_payment_tx("rrrrrrrrrrrrrrrrrrrrrhoLvTp", &destination, "1000000", None);
+        let tx = add_xrpl_signing_fields(tx, "12", 1, 100);
+
+        assert!(wallet.sign_xrpl_transaction_json(&tx).is_err());
+    }
+
+    #[test]
+    fn validates_xrpl_classic_address_checksum() {
+        let address = deterministic_wallet().classic_address().unwrap();
+        assert!(is_valid_xrpl_classic_address(&address));
+        assert!(!is_valid_xrpl_classic_address("rInvalid"));
     }
 
     #[test]

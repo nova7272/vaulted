@@ -446,6 +446,23 @@ body { font-family: var(--font-ui); font-size: 14px; line-height: 1.5; color: va
 .wallet-facts strong { color:var(--fg-0); font-size:14px; text-transform:capitalize; }
 .wallet-faucet { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-top:14px; padding:14px; border:1px solid var(--warn-line); border-radius:12px; background:var(--warn-soft); }
 .wallet-faucet strong { color:var(--warn); font-size:14px; }
+.wallet-summary { grid-row:span 2; }
+.wallet-send-form { display:flex; flex-direction:column; gap:12px; }
+.wallet-send-form label { display:flex; flex-direction:column; gap:6px; min-width:0; }
+.wallet-send-form label span { color:var(--fg-2); font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; }
+.wallet-send-form input { width:100%; min-height:40px; padding:0 11px; border:1px solid var(--line); border-radius:8px; background:var(--bg-1); color:var(--fg-0); font:inherit; font-size:13px; outline:none; }
+.wallet-send-form input:focus { border-color:var(--accent); }
+.wallet-send-form input:disabled { opacity:.62; cursor:not-allowed; }
+.wallet-send-row { display:grid; grid-template-columns:minmax(0, 1fr) minmax(0, 1fr); gap:10px; }
+.wallet-confirm { display:flex; flex-direction:column; gap:7px; padding:12px; border:1px solid var(--warn-line); border-radius:8px; background:var(--warn-soft); color:var(--fg-1); font-size:13px; }
+.wallet-confirm strong { color:var(--warn); font-size:14px; }
+.wallet-confirm code { font-family:var(--font-mono); color:var(--fg-0); }
+.wallet-send-actions { display:flex; gap:8px; justify-content:flex-end; margin-top:4px; }
+.wallet-send-result { display:flex; flex-direction:column; gap:5px; padding:12px; border:1px solid rgba(106,199,154,.3); border-radius:8px; background:var(--ok-soft); }
+.wallet-send-result span { color:var(--ok); font-size:13px; font-weight:800; }
+.wallet-send-result p { margin:0; }
+.wallet-send-result code { color:var(--fg-0); font-family:var(--font-mono); font-size:12px; word-break:break-all; }
+.wallet-send-submit { width:100%; justify-content:center; min-height:40px; }
 .wallet-qr-wrap { display:grid; place-items:center; min-height:230px; }
 .wallet-qr-placeholder { width:210px; height:210px; display:grid; place-items:center; border:1px solid var(--line); border-radius:14px; color:var(--fg-2); background:var(--bg-2); }
 .wallet-address-box { display:grid; grid-template-columns:minmax(0, 1fr) auto; gap:10px; align-items:center; margin-top:14px; padding:10px; border:1px solid var(--line); border-radius:12px; background:var(--bg-1); }
@@ -458,5 +475,7 @@ body { font-family: var(--font-ui); font-size: 14px; line-height: 1.5; color: va
 .wallet-history-empty { padding:22px 14px; border-top:1px solid var(--line); color:var(--fg-2); font-size:14px; }
 @media (max-width: 1050px) {
   .wallet-grid { grid-template-columns:1fr; }
+  .wallet-summary { grid-row:auto; }
   .wallet-facts { grid-template-columns:1fr; }
+  .wallet-send-row { grid-template-columns:1fr; }
 }
