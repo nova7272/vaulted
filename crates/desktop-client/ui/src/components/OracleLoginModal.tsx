@@ -29,48 +29,74 @@ interface OracleLoginModalProps {
 
 type LoginState = 'idle' | 'loading' | 'waiting' | 'success' | 'error'
 
+const QR_POLL_INTERVAL_MS = 7000
+const QR_POLL_GRACE_MS = 5000
+const QR_RATE_LIMIT_BACKOFF_MS = 15000
+const QR_CANCEL_CHECK_MS = 250
+
 const secondsRemaining = (iso: string) =>
     Math.max(0, Math.ceil((new Date(iso).getTime() - Date.now()) / 1000))
 
 const qrLoginCommand = 'start_vaulted_qr_login'
 const qrPollCommand = 'poll_vaulted_qr_login'
 
-const classifyQrError = (error: unknown) => {
+interface QrErrorClassification {
+    errorClass: string
+    display: string
+    rateLimited: boolean
+    endpointStatus?: number
+}
+
+const classifyQrError = (error: unknown): QrErrorClassification => {
     const message = String(error)
     const lower = message.toLowerCase()
+    if (lower.includes('429') || lower.includes('rate limit') || lower.includes('too many requests')) {
+        return {
+            errorClass: 'rate_limited',
+            display: 'Waiting before retrying QR status...',
+            rateLimited: true,
+            endpointStatus: 429,
+        }
+    }
     if (lower.includes('command') || lower.includes('invoke') || lower.includes('not found')) {
         return {
             errorClass: 'tauri_invoke_error',
             display: 'QR login command did not reach the desktop backend. Restart the desktop app and try again.',
+            rateLimited: false,
         }
     }
     if (lower.includes('timeout') || lower.includes('timed out')) {
         return {
             errorClass: 'timeout',
             display: 'QR login request timed out. Confirm Oracle is running and try again.',
+            rateLimited: false,
         }
     }
     if (lower.includes('oracle api error') || lower.includes('http') || lower.includes('error sending request') || lower.includes('localhost:3000')) {
         return {
             errorClass: 'oracle_request_error',
             display: 'Desktop reached the QR login command, but Oracle could not be reached. Confirm the Oracle service URL and try again.',
+            rateLimited: false,
         }
     }
     if (lower.includes('expired')) {
         return {
             errorClass: 'expired',
             display: 'QR login expired. Create a new QR request and try again.',
+            rateLimited: false,
         }
     }
     if (lower.includes('consumed') || lower.includes('replay')) {
         return {
             errorClass: 'replay_or_consumed',
             display: 'QR login request was already used. Create a new QR request and try again.',
+            rateLimited: false,
         }
     }
     return {
         errorClass: 'unknown',
         display: `${formatError(error)} Check desktop logs for the safe QR command boundary status.`,
+        rateLimited: false,
     }
 }
 
@@ -89,6 +115,7 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess, startOnOpen = fal
     const [copied, setCopied] = useState(false)
     const [remaining, setRemaining] = useState(0)
     const [approvedResult, setApprovedResult] = useState<QrLoginPollResponse | null>(null)
+    const [pollMessage, setPollMessage] = useState<string | null>(null)
     const pollToken = useRef(0)
     const onCloseRef = useRef(onClose)
     const onSuccessRef = useRef(onSuccess)
@@ -103,9 +130,20 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess, startOnOpen = fal
         onSuccessRef.current = onSuccess
     }, [onClose, onSuccess])
 
-    const pollQrLogin = useCallback(async (loginRequestId: string, token: number) => {
-        try {
-            for (let i = 0; i < 120; i++) {
+    const waitForPollDelay = useCallback(async (delayMs: number, token: number) => {
+        const deadline = Date.now() + delayMs
+        while (Date.now() < deadline) {
+            if (pollToken.current !== token) return false
+            await new Promise(resolve => window.setTimeout(resolve, Math.min(QR_CANCEL_CHECK_MS, deadline - Date.now())))
+        }
+        return pollToken.current === token
+    }, [])
+
+    const pollQrLogin = useCallback(async (loginRequestId: string, token: number, expiresAt: string) => {
+        const parsedExpiresAt = new Date(expiresAt).getTime()
+        const expiresAtMs = Number.isFinite(parsedExpiresAt) ? parsedExpiresAt : Date.now() + 120_000
+        while (Date.now() <= expiresAtMs + QR_POLL_GRACE_MS) {
+            try {
                 if (pollToken.current !== token) return
                 qrDebug({
                     ui_step: 'poll_begin',
@@ -114,6 +152,7 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess, startOnOpen = fal
                 })
                 const result = await invoke<QrLoginPollResponse>('poll_vaulted_qr_login', { loginRequestId })
                 if (pollToken.current !== token) return
+                setPollMessage(null)
                 qrDebug({
                     ui_step: 'poll_result',
                     command: qrPollCommand,
@@ -123,6 +162,7 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess, startOnOpen = fal
                 })
                 if (result.approved || result.status === 'approved' || result.status === 'consumed') {
                     setApprovedResult(result)
+                    setPollMessage(null)
                     setState('success')
                     onSuccessRef.current(result)
                     if (result.localDecryptAvailable || result.localVaultedWallet) {
@@ -132,25 +172,50 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess, startOnOpen = fal
                 }
                 if (result.status === 'rejected' || result.status === 'expired') {
                     setError(`Login ${result.status}. Create a new QR request and try again.`)
+                    setPollMessage(null)
                     setState('error')
                     return
                 }
-                await new Promise(resolve => window.setTimeout(resolve, 1500))
+                const shouldContinue = await waitForPollDelay(QR_POLL_INTERVAL_MS, token)
+                if (!shouldContinue) return
+            } catch (e) {
+                const classified = classifyQrError(e)
+                if (classified.rateLimited) {
+                    qrWarn({
+                        ui_step: 'poll_error',
+                        command: qrPollCommand,
+                        qr_request_id: loginRequestId,
+                        error_class: classified.errorClass,
+                        endpoint_status: classified.endpointStatus,
+                        rate_limited: true,
+                        retry_delay_ms: QR_RATE_LIMIT_BACKOFF_MS,
+                    })
+                    setError(null)
+                    setPollMessage(classified.display)
+                    setState('waiting')
+                    const shouldContinue = await waitForPollDelay(QR_RATE_LIMIT_BACKOFF_MS, token)
+                    if (!shouldContinue) return
+                    continue
+                }
+                qrWarn({
+                    ui_step: 'poll_error',
+                    command: qrPollCommand,
+                    qr_request_id: loginRequestId,
+                    error_class: classified.errorClass,
+                    endpoint_status: classified.endpointStatus,
+                    rate_limited: false,
+                })
+                setPollMessage(null)
+                setError(classified.display)
+                setState('error')
+                return
             }
-            setError('QR login timed out. Create a new QR request and try again.')
-            setState('error')
-        } catch (e) {
-            const classified = classifyQrError(e)
-            qrWarn({
-                ui_step: 'poll_error',
-                command: qrPollCommand,
-                qr_request_id: loginRequestId,
-                error_class: classified.errorClass,
-            })
-            setError(classified.display)
-            setState('error')
         }
-    }, [])
+        if (pollToken.current !== token) return
+        setPollMessage(null)
+        setError('QR login expired. Create a new QR request and try again.')
+        setState('error')
+    }, [waitForPollDelay])
 
     const startLogin = useCallback(async () => {
         qrDebug({ ui_step: 'start_clicked', command: qrLoginCommand })
@@ -161,6 +226,7 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess, startOnOpen = fal
         setPayload(null)
         setCopied(false)
         setApprovedResult(null)
+        setPollMessage(null)
 
         try {
             qrDebug({ ui_step: 'invoke_start_begin', command: qrLoginCommand })
@@ -173,13 +239,15 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess, startOnOpen = fal
             setPayload(result)
             setRemaining(secondsRemaining(result.expiresAt))
             setState('waiting')
-            void pollQrLogin(result.loginRequestId, token)
+            void pollQrLogin(result.loginRequestId, token, result.expiresAt)
         } catch (e) {
             const classified = classifyQrError(e)
             qrWarn({
                 ui_step: 'invoke_start_error',
                 command: qrLoginCommand,
                 error_class: classified.errorClass,
+                endpoint_status: classified.endpointStatus,
+                rate_limited: classified.rateLimited,
             })
             setError(classified.display)
             setState('error')
@@ -196,6 +264,7 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess, startOnOpen = fal
             setCopied(false)
             setRemaining(0)
             setApprovedResult(null)
+            setPollMessage(null)
             if (startOnOpen) {
                 qrDebug({ ui_step: 'modal_open_autostart', command: qrLoginCommand })
                 void startLogin()
@@ -279,7 +348,7 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess, startOnOpen = fal
                             </div>
                             <div className="waiting-indicator">
                                 <div className="pulse-dot" />
-                                <span>Waiting for trusted-device approval...</span>
+                                <span>{pollMessage ?? 'Waiting for trusted-device approval...'}</span>
                             </div>
                             <div className="qr-login-actions">
                                 <button className="btn-secondary" onClick={copyPayload}>
