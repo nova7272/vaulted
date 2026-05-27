@@ -5,7 +5,8 @@
 //! overlap with Vaulted encryption/signing identity keys.
 //!
 //! The XRPL serializer implemented here intentionally covers the transaction subset Vaulted needs
-//! for its MVP: locally signing XLS-20 `NFTokenMint` and testnet XRP `Payment` transactions.
+//! for its MVP: locally signing XLS-20 `NFTokenMint`, `NFTokenCreateOffer`,
+//! `NFTokenAcceptOffer`, and testnet XRP `Payment` transactions.
 //! Unsupported fields fail closed instead of being silently omitted.
 
 use hkdf::Hkdf;
@@ -126,9 +127,10 @@ impl VaultedXrplWallet {
 
     /// Locally signs a Vaulted-supported XRPL transaction and returns a submission-ready tx_blob.
     ///
-    /// Currently supported: `NFTokenMint` and XRP `Payment`. The transaction must include the
-    /// common network fields `Fee`, `Sequence`, and `LastLedgerSequence`. This function rejects
-    /// mismatched Account fields and unsupported transaction types.
+    /// Currently supported: `NFTokenMint`, `NFTokenCreateOffer`, `NFTokenAcceptOffer`, and XRP
+    /// `Payment`. The transaction must include the common network fields `Fee`, `Sequence`, and
+    /// `LastLedgerSequence`. This function rejects mismatched Account fields and unsupported
+    /// transaction types.
     pub fn sign_xrpl_transaction_json(
         &self,
         tx_json: &serde_json::Value,
@@ -280,6 +282,32 @@ pub fn build_xrp_payment_tx(
     tx
 }
 
+/// XRPL NFTokenCreateOffer builder for a zero-amount destination transfer offer.
+pub fn build_nftoken_create_offer_tx(
+    account: &str,
+    nftoken_id: &str,
+    destination: &str,
+    amount_drops: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "TransactionType": "NFTokenCreateOffer",
+        "Account": account,
+        "NFTokenID": nftoken_id,
+        "Amount": amount_drops,
+        "Flags": 1,
+        "Destination": destination,
+    })
+}
+
+/// XRPL NFTokenAcceptOffer builder for accepting a sell offer.
+pub fn build_nftoken_accept_offer_tx(account: &str, nftoken_sell_offer: &str) -> serde_json::Value {
+    serde_json::json!({
+        "TransactionType": "NFTokenAcceptOffer",
+        "Account": account,
+        "NFTokenSellOffer": nftoken_sell_offer,
+    })
+}
+
 /// Validates an XRPL classic address checksum and account-id shape.
 pub fn is_valid_xrpl_classic_address(address: &str) -> bool {
     let Ok(decoded) = bs58::decode(address)
@@ -316,6 +344,8 @@ fn validate_supported_signable_tx(tx: &serde_json::Value) -> Result<()> {
     let transaction_type = string_field(tx, "TransactionType")?;
     match transaction_type.as_str() {
         "NFTokenMint" => validate_nftoken_mint_tx(tx)?,
+        "NFTokenCreateOffer" => validate_nftoken_create_offer_tx(tx)?,
+        "NFTokenAcceptOffer" => validate_nftoken_accept_offer_tx(tx)?,
         "Payment" => validate_xrp_payment_tx(tx)?,
         _ => {
             return Err(CryptoError::InvalidData(format!(
@@ -348,6 +378,21 @@ fn validate_xrp_payment_tx(tx: &serde_json::Value) -> Result<()> {
     if tx.get("DestinationTag").is_some() {
         let _ = u32_field(tx, "DestinationTag")?;
     }
+    Ok(())
+}
+
+fn validate_nftoken_create_offer_tx(tx: &serde_json::Value) -> Result<()> {
+    let _ = string_field(tx, "NFTokenID")?;
+    let _ = string_field(tx, "Amount")?;
+    let _ = u32_field(tx, "Flags")?;
+    if tx.get("Destination").is_some() {
+        let _ = string_field(tx, "Destination")?;
+    }
+    Ok(())
+}
+
+fn validate_nftoken_accept_offer_tx(tx: &serde_json::Value) -> Result<()> {
+    let _ = string_field(tx, "NFTokenSellOffer")?;
     Ok(())
 }
 
@@ -476,6 +521,54 @@ mod tests {
     }
 
     #[test]
+    fn signs_nftoken_create_offer_as_xrpl_tx_blob() {
+        let wallet = deterministic_wallet();
+        let account = wallet.classic_address().unwrap();
+        let destination = VaultedXrplWallet::from_bip39_seed(&[8u8; 64])
+            .unwrap()
+            .classic_address()
+            .unwrap();
+        let tx = build_nftoken_create_offer_tx(
+            &account,
+            "00080000DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4FAEB4C857010D42BC",
+            &destination,
+            "0",
+        );
+        let tx = add_xrpl_signing_fields(tx, "12", 1, 100);
+        let signed = wallet.sign_xrpl_transaction_json(&tx).unwrap();
+        let tx_blob = signed.tx_blob.as_ref().unwrap();
+
+        assert_eq!(signed.protocol, "vaulted-xrpl-tx-blob-v1");
+        assert_eq!(tx_blob.len() % 2, 0);
+        assert!(hex::decode(tx_blob).is_ok());
+        assert!(!tx_blob.is_empty());
+        assert_eq!(signed.tx_hash.as_ref().unwrap().len(), 64);
+        assert_eq!(signed.tx_json["TransactionType"], "NFTokenCreateOffer");
+        assert!(signed.tx_json.get("TxnSignature").is_some());
+    }
+
+    #[test]
+    fn signs_nftoken_accept_offer_as_xrpl_tx_blob() {
+        let wallet = deterministic_wallet();
+        let account = wallet.classic_address().unwrap();
+        let tx = build_nftoken_accept_offer_tx(
+            &account,
+            "ABCD1234DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4FAEB4C857010D42BC",
+        );
+        let tx = add_xrpl_signing_fields(tx, "12", 1, 100);
+        let signed = wallet.sign_xrpl_transaction_json(&tx).unwrap();
+        let tx_blob = signed.tx_blob.as_ref().unwrap();
+
+        assert_eq!(signed.protocol, "vaulted-xrpl-tx-blob-v1");
+        assert_eq!(tx_blob.len() % 2, 0);
+        assert!(hex::decode(tx_blob).is_ok());
+        assert!(!tx_blob.is_empty());
+        assert_eq!(signed.tx_hash.as_ref().unwrap().len(), 64);
+        assert_eq!(signed.tx_json["TransactionType"], "NFTokenAcceptOffer");
+        assert!(signed.tx_json.get("TxnSignature").is_some());
+    }
+
+    #[test]
     fn rejects_mismatched_account_for_payment_signing() {
         let wallet = deterministic_wallet();
         let destination = VaultedXrplWallet::from_bip39_seed(&[8u8; 64])
@@ -483,6 +576,73 @@ mod tests {
             .classic_address()
             .unwrap();
         let tx = build_xrp_payment_tx("rrrrrrrrrrrrrrrrrrrrrhoLvTp", &destination, "1000000", None);
+        let tx = add_xrpl_signing_fields(tx, "12", 1, 100);
+
+        assert!(wallet.sign_xrpl_transaction_json(&tx).is_err());
+    }
+
+    #[test]
+    fn rejects_mismatched_account_for_nftoken_create_offer_signing() {
+        let wallet = deterministic_wallet();
+        let destination = VaultedXrplWallet::from_bip39_seed(&[8u8; 64])
+            .unwrap()
+            .classic_address()
+            .unwrap();
+        let tx = build_nftoken_create_offer_tx(
+            "rrrrrrrrrrrrrrrrrrrrrhoLvTp",
+            "00080000DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4FAEB4C857010D42BC",
+            &destination,
+            "0",
+        );
+        let tx = add_xrpl_signing_fields(tx, "12", 1, 100);
+
+        assert!(wallet.sign_xrpl_transaction_json(&tx).is_err());
+    }
+
+    #[test]
+    fn rejects_mismatched_account_for_nftoken_accept_offer_signing() {
+        let wallet = deterministic_wallet();
+        let tx = build_nftoken_accept_offer_tx(
+            "rrrrrrrrrrrrrrrrrrrrrhoLvTp",
+            "ABCD1234DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4FAEB4C857010D42BC",
+        );
+        let tx = add_xrpl_signing_fields(tx, "12", 1, 100);
+
+        assert!(wallet.sign_xrpl_transaction_json(&tx).is_err());
+    }
+
+    #[test]
+    fn rejects_nftoken_create_offer_missing_required_fields() {
+        let wallet = deterministic_wallet();
+        let account = wallet.classic_address().unwrap();
+        let destination = VaultedXrplWallet::from_bip39_seed(&[8u8; 64])
+            .unwrap()
+            .classic_address()
+            .unwrap();
+
+        for missing_field in ["NFTokenID", "Amount"] {
+            let mut tx = build_nftoken_create_offer_tx(
+                &account,
+                "00080000DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4FAEB4C857010D42BC",
+                &destination,
+                "0",
+            );
+            tx.as_object_mut().unwrap().remove(missing_field);
+            let tx = add_xrpl_signing_fields(tx, "12", 1, 100);
+
+            assert!(wallet.sign_xrpl_transaction_json(&tx).is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_nftoken_accept_offer_missing_required_fields() {
+        let wallet = deterministic_wallet();
+        let account = wallet.classic_address().unwrap();
+        let mut tx = build_nftoken_accept_offer_tx(
+            &account,
+            "ABCD1234DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4FAEB4C857010D42BC",
+        );
+        tx.as_object_mut().unwrap().remove("NFTokenSellOffer");
         let tx = add_xrpl_signing_fields(tx, "12", 1, 100);
 
         assert!(wallet.sign_xrpl_transaction_json(&tx).is_err());

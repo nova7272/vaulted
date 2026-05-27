@@ -9,8 +9,9 @@ import { useActivityLog } from '../contexts/ActivityLogContext'
 interface NftInfo { nftTokenId:string; uri:string; filename:string|null; createdAt:string|null; fileStatus:string; preKeyMismatch?:boolean; preKeyOwner?:string|null }
 interface FilesScreenProps { onNavigate:(s:'files'|'upload'|'settings')=>void; searchQuery?:string; oracleConnected?:boolean }
 interface SigningRequestPayload { uuid:string; qrPng:string; websocketUrl:string }
-interface TransferResult { transferId:string; status:string; signingRequest:SigningRequestPayload|null }
+interface TransferResult { transferId:string; status:string; signingRequest:SigningRequestPayload|null; offerIndex?:string|null; txHash?:string|null; engineResult?:string|null; engineResultMessage?:string|null }
 interface IncomingOffer { offerIndex:string; nftTokenId:string; fromAddress:string; amount:string }
+interface ClaimResult { success:boolean; txHash:string; nftTokenId?:string|null; transferId?:string|null; engineResult:string; engineResultMessage:string }
 interface SecureNoteContent { nftTokenId:string; content:string; noteType:string; mimeType:string }
 interface RecipientTrustInfo { recipientIdentityId:string; recipientEncryptionPublicKey:string; recipientEncryptionPublicKeyFingerprint?:string; displayFingerprint:string; trusted:boolean; trustLevel:string; trustSource?:string; trustedAt?:string|null; revokedAt?:string|null; activeRecipientEncryptionPublicKeyFingerprint?:string; keyRotationDetected?:boolean; trustedDifferentKeyFingerprint?:string|null; trustedDifferentKeyAt?:string|null }
 interface GrantStartResult { grantRequestId:string; grantId:string; challenge:string; oracleUrl:string; expiresAt:string; grantContextHash:string; vaultObjectId:string; recipientIdentityId:string; qrPayload:unknown }
@@ -414,7 +415,12 @@ export default function FilesScreen({onNavigate,searchQuery=''}:FilesScreenProps
     try{
       setTransferring(true)
       const result=await invoke<TransferResult>('initiate_transfer',{nftTokenId:transferNft.nftTokenId,toAddress:transferTo.trim()})
-      if(result.signingRequest?.qrPng){
+      if(result.offerIndex){
+        toast({type:'success',title:'Transfer offer created',sub:`Offer ${result.offerIndex.slice(0,8)}… submitted`})
+        addEntry('transfer_sent',`Sent ${transferNft.filename||'NFT'}`,{detail:`To: ${transferTo.slice(0,6)}...${transferTo.slice(-4)}`,nftTokenId:transferNft.nftTokenId})
+        setTransferQr(null);setTransferNft(null);setTransferTo('')
+        load()
+      }else if(result.signingRequest?.qrPng){
         setTransferQr(result.signingRequest.qrPng)
         toast({type:'info',title:'Vaulted signing',sub:'Approve the transfer with Vaulted wallet signing'})
         setWaitingSignature(true)
@@ -444,8 +450,17 @@ export default function FilesScreen({onNavigate,searchQuery=''}:FilesScreenProps
   const claimOffer=async(offer:IncomingOffer)=>{
     setClaimingOffer(offer.offerIndex)
     setClaimQr(null)
-    toast({type:'warning',title:'Vaulted signing pending',sub:'Local XRPL NFT claim signing is not implemented yet'})
-    setClaimingOffer(null)
+    try{
+      const result=await invoke<ClaimResult>('claim_nft',{offerIndex:offer.offerIndex})
+      toast({type:'success',title:'NFT claimed',sub:`Transaction ${result.txHash.slice(0,8)}… accepted`})
+      setClaimedOffers(prev=>new Set(prev).add(offer.offerIndex))
+      addEntry('transfer_received','Accepted NFT transfer',{status:'success',detail:`Offer: ${offer.offerIndex.slice(0,8)}…`,nftTokenId:offer.nftTokenId})
+      load()
+    }catch(e){
+      toast({type:'error',title:'Claim failed',sub:String(e)})
+    }finally{
+      setClaimingOffer(null)
+    }
   }
 
   const deleteVault=async()=>{
