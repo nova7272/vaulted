@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react'
 
 export interface ToastData {
     id: number
-    type: 'success' | 'info' | 'error'
+    type: 'success' | 'info' | 'warning' | 'error'
     title: string
     sub?: string
 }
@@ -33,14 +33,17 @@ function Toast({ toast, onRemove }: ToastProps) {
     const colors = {
         success: { bg: '#0d1a14', border: 'rgba(106,199,154,0.3)', ico: '#6ac79a', ibg: 'rgba(106,199,154,0.15)' },
         info:    { bg: '#0d1220', border: 'rgba(106,160,255,0.3)', ico: '#6aa0ff', ibg: 'rgba(106,160,255,0.15)' },
+        warning: { bg: '#1a160d', border: 'rgba(230,179,90,0.3)', ico: '#e6b35a', ibg: 'rgba(230,179,90,0.15)' },
         error:   { bg: '#1a0d0d', border: 'rgba(224,122,106,0.3)', ico: '#e07a6a', ibg: 'rgba(224,122,106,0.15)' },
     }
-    const c = colors[toast.type]
+    const c = colors[toast.type] ?? colors.info
 
     const icon = toast.type === 'success' ? (
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5" /></svg>
     ) : toast.type === 'error' ? (
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10" /><line x1="15" y1="9" x2="9" y2="15" /><line x1="9" y1="9" x2="15" y2="15" /></svg>
+    ) : toast.type === 'warning' ? (
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
     ) : (
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10" /><line x1="12" y1="16" x2="12" y2="12" /><line x1="12" y1="8" x2="12.01" y2="8" /></svg>
     )
