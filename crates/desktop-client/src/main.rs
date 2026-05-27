@@ -262,6 +262,7 @@ fn main() {
             get_user_public_key,
             initiate_transfer,
             complete_transfer,
+            claim_nft,
             cancel_transfer,
             get_transfer_history,
             // Vault/Files
