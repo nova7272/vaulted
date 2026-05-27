@@ -60,13 +60,13 @@ export default function AuthScreen({ onLogin, lockedAfterRestart = true }: AuthS
     const finishLogin = async () => onLogin(await invoke<UserInfo>('get_current_user'))
 
     const handleQrLoginSuccess = async (result: QrLoginPollResponse) => {
-        if (result.localDecryptAvailable || result.localVaultedWallet) {
-            setStatus('QR login approved.')
+        if (result.localDecryptAvailable || result.localIdentityMatchesApproved) {
+            setStatus('Oracle session approved. Local Vaulted wallet is unlocked on this device.')
             await finishLogin()
             return
         }
         setShowQrLogin(false)
-        setStatus('Oracle session approved. Local file decrypt still requires restoring the 12-word phrase on this device.')
+        setStatus('Oracle session approved. Restore the matching 12-word Vaulted wallet on this device for local files, minting, transfers, and decrypt.')
     }
 
     const createVaultedWallet = async () => {
@@ -140,7 +140,7 @@ export default function AuthScreen({ onLogin, lockedAfterRestart = true }: AuthS
                         </button>
                         <button className="v-auth-choice" onClick={() => setShowQrLogin(true)}>
                             <span className="v-auth-choice-title">Sign in with QR code</span>
-                            <span className="v-auth-choice-sub">Approve Oracle login from an already-unlocked Vaulted session.</span>
+                            <span className="v-auth-choice-sub">Approve an Oracle session from a trusted device. Restore your 12-word wallet here for local files, minting, transfers, and decrypt.</span>
                         </button>
                     </div>
 

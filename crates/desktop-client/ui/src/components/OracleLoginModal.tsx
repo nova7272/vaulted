@@ -17,6 +17,7 @@ export interface QrLoginPollResponse {
     oracleSession?: boolean
     identityId?: string | null
     localVaultedWallet?: boolean
+    localIdentityMatchesApproved?: boolean
     localDecryptAvailable?: boolean
 }
 
@@ -119,7 +120,6 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess, startOnOpen = fal
     const [state, setState] = useState<LoginState>('idle')
     const [error, setError] = useState<string | null>(null)
     const [payload, setPayload] = useState<QrLoginStartResponse | null>(null)
-    const [copied, setCopied] = useState(false)
     const [remaining, setRemaining] = useState(0)
     const [approvedResult, setApprovedResult] = useState<QrLoginPollResponse | null>(null)
     const [pollMessage, setPollMessage] = useState<string | null>(null)
@@ -222,7 +222,7 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess, startOnOpen = fal
                     setPollMessage(null)
                     setState('success')
                     onSuccessRef.current(result)
-                    if (result.localDecryptAvailable || result.localVaultedWallet) {
+                    if (result.localDecryptAvailable || result.localIdentityMatchesApproved) {
                         window.setTimeout(() => onCloseRef.current(), 800)
                     }
                     return
@@ -316,7 +316,6 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess, startOnOpen = fal
         setState('loading')
         setError(null)
         setPayload(null)
-        setCopied(false)
         setApprovedResult(null)
         setPollMessage(null)
 
@@ -385,7 +384,6 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess, startOnOpen = fal
                 setState('idle')
                 setError(null)
                 setPayload(null)
-                setCopied(false)
                 setRemaining(0)
                 setApprovedResult(null)
                 setPollMessage(null)
@@ -428,21 +426,6 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess, startOnOpen = fal
         return () => window.clearInterval(id)
     }, [payload])
 
-    const copyPayload = async () => {
-        if (!qrValue) return
-        qrDebug({
-            ui_step: 'copy_payload',
-            qr_request_id: payload?.loginRequestId,
-            token_id: pollToken.current,
-            current_token_id: pollToken.current,
-            is_open: isOpenRef.current,
-            is_expired: isExpired(payload?.expiresAt),
-        })
-        await navigator.clipboard.writeText(qrValue)
-        setCopied(true)
-        window.setTimeout(() => setCopied(false), 2000)
-    }
-
     const cancel = () => {
         const token = pollToken.current + 1
         qrDebug({
@@ -465,6 +448,7 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess, startOnOpen = fal
             ? `${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, '0')}`
             : 'Expired'
         : ''
+    const localWalletReady = Boolean(approvedResult?.localDecryptAvailable || approvedResult?.localIdentityMatchesApproved)
 
     return (
         <div className="modal-overlay" onClick={cancel}>
@@ -483,13 +467,13 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess, startOnOpen = fal
                         </svg>
                     </div>
                     <h2>Vaulted QR Login</h2>
-                    <p className="modal-subtitle">Approve with an unlocked trusted Vaulted session</p>
+                    <p className="modal-subtitle">Approve Oracle access from an unlocked trusted Vaulted session. This does not restore the local seed wallet.</p>
                 </div>
 
                 <div className="modal-body">
                     {state === 'idle' && (
                         <div className="login-idle">
-                            <p>Start a one-time Oracle login request, then approve it from an already-unlocked Vaulted session.</p>
+                            <p>Start a one-time Oracle session request, then approve it from an already-unlocked Vaulted session.</p>
                             <button className="btn-primary" onClick={() => startLogin('manual')}>Sign in with QR code</button>
                         </div>
                     )}
@@ -510,19 +494,12 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess, startOnOpen = fal
                             </div>
                             <div className="waiting-indicator">
                                 <div className="pulse-dot" />
-                                <span>{pollMessage ?? 'Waiting for trusted-device approval...'}</span>
+                                <span>{pollMessage ?? 'Waiting for trusted-device Oracle approval...'}</span>
                             </div>
                             <div className="qr-login-actions">
-                                <button className="btn-secondary" onClick={copyPayload}>
-                                    {copied ? 'Copied' : 'Copy payload'}
-                                </button>
                                 <button className="btn-secondary" onClick={() => startLogin('retry')}>Retry</button>
                                 <button className="btn-secondary" onClick={cancel}>Cancel</button>
                             </div>
-                            <details className="qr-login-fallback">
-                                <summary>Payload fallback</summary>
-                                <textarea readOnly value={JSON.stringify(payload.qrPayload, null, 2)} />
-                            </details>
                         </div>
                     )}
 
@@ -534,9 +511,9 @@ export function OracleLoginModal({ isOpen, onClose, onSuccess, startOnOpen = fal
                                     <polyline points="22 4 12 14.01 9 11.01" />
                                 </svg>
                             </div>
-                            <p>{approvedResult?.localDecryptAvailable ? 'Vaulted session unlocked.' : 'Oracle session approved.'}</p>
-                            {!approvedResult?.localDecryptAvailable && (
-                                <p className="safe-note">Local file decrypt still requires restoring the 12-word phrase on this device.</p>
+                            <p>{localWalletReady ? 'Oracle session approved. Local Vaulted wallet is unlocked on this device.' : 'Oracle session approved.'}</p>
+                            {!localWalletReady && (
+                                <p className="safe-note">Restore the matching 12-word Vaulted wallet on this device to view files, mint, transfer, or decrypt.</p>
                             )}
                             <button className="btn-secondary" onClick={cancel}>Close</button>
                         </div>
