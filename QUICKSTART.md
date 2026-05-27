@@ -76,9 +76,15 @@ cargo test --workspace
 ## 8. Основные dev flows
 
 - Create or restore Vaulted seed phrase.
+- Check Wallet balance, receive QR, and Send XRP on testnet.
 - Upload encrypted file.
 - Generate deterministic NFT metadata preview.
 - Locally sign XRPL NFT mint transaction.
 - Finalize mint after Oracle ledger verification.
+- Download/decrypt as owner.
+- Transfer NFT/file access to a recipient.
+- Accept the incoming recipient offer and decrypt after re-encryption.
 - Share file access with recipient identity using fingerprint confirmation and `KeyEnvelope` grants.
 - Approve device pairing / XRPL signing / file grants through signed QR payloads.
+
+Текущий XRPL Grants runtime checkpoint и финальный checklist описаны в `docs/RUNTIME_VERIFICATION.md`.
