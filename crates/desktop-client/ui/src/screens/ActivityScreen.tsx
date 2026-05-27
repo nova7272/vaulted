@@ -37,6 +37,15 @@ interface TransferHistory {
     received: TransferHistoryItem[]
 }
 
+interface ClaimResult {
+    success: boolean
+    txHash: string
+    nftTokenId?: string | null
+    transferId?: string | null
+    engineResult: string
+    engineResultMessage: string
+}
+
 /* ── Filter types ── */
 type FilterType = 'all' | 'transfers' | 'creates' | 'removes'
 
@@ -145,10 +154,18 @@ export default function ActivityScreen({ oracleConnected }: ActivityScreenProps)
 
     /* ── Claim ── */
     const acceptOffer = async (offer: IncomingOffer) => {
-        setClaimingOffer(offer.offerIndex)
-        toast({ type: 'warning', title: 'Vaulted signing pending', sub: 'Local XRPL NFT claim signing is not implemented yet' })
-        addEntry('info', 'Vaulted NFT claim signing is pending', { detail: `From ${short(offer.fromAddress)}`, nftTokenId: offer.nftTokenId })
-        setClaimingOffer(null)
+        try {
+            setClaimingOffer(offer.offerIndex)
+            const result = await invoke<ClaimResult>('claim_nft', { offerIndex: offer.offerIndex })
+            setIncomingOffers(prev => prev.filter(item => item.offerIndex !== offer.offerIndex))
+            toast({ type: 'success', title: 'NFT claimed', sub: `Transaction ${result.txHash.slice(0, 8)}... accepted` })
+            addEntry('transfer_received', 'Accepted NFT transfer', { detail: `Offer: ${short(offer.offerIndex, 8, 4)}`, nftTokenId: offer.nftTokenId })
+            loadAll()
+        } catch (e) {
+            toast({ type: 'error', title: 'Claim failed', sub: formatError(e) })
+        } finally {
+            setClaimingOffer(null)
+        }
     }
 
     /* ── Cancel transfer ── */

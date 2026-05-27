@@ -15,7 +15,7 @@ interface ClaimResult { success:boolean; txHash:string; nftTokenId?:string|null;
 interface SecureNoteContent { nftTokenId:string; content:string; noteType:string; mimeType:string }
 interface RecipientTrustInfo { recipientIdentityId:string; recipientEncryptionPublicKey:string; recipientEncryptionPublicKeyFingerprint?:string; displayFingerprint:string; trusted:boolean; trustLevel:string; trustSource?:string; trustedAt?:string|null; revokedAt?:string|null; activeRecipientEncryptionPublicKeyFingerprint?:string; keyRotationDetected?:boolean; trustedDifferentKeyFingerprint?:string|null; trustedDifferentKeyAt?:string|null }
 interface GrantStartResult { grantRequestId:string; grantId:string; challenge:string; oracleUrl:string; expiresAt:string; grantContextHash:string; vaultObjectId:string; recipientIdentityId:string; qrPayload:unknown }
-interface GrantApprovalStatus { status:string; identityId?:string|null; vaultObjectId?:string|null; grantId?:string|null; recipientIdentityId?:string|null; grantContextHash?:string|null; approvedByDeviceId?:string|null; approvalSignature?:string|null; createdGrantId?:string|null; approvedAt?:string|null; approved?:boolean }
+interface GrantApprovalStatus { status:string; identityId?:string|null; vaultObjectId?:string|null; grantId?:string|null; recipientIdentityId?:string|null; grantContextHash?:string|null; approvedByDeviceId?:string|null; createdGrantId?:string|null; approvedAt?:string|null; approved?:boolean }
 interface IncomingGrantInfo { grantId:string; vaultObjectId:string; recipientIdentityId:string; permissions:unknown; expiresAt:string|null; status:string; nftTokenId:string|null; manifestHash:string|null; canDecryptKey:boolean; keyEnvelopeAlg:string }
 interface OutgoingGrantInfo { grantId:string; vaultObjectId:string; recipientIdentityId:string; permissions:unknown; expiresAt:string|null; status:string; nftTokenId:string|null; manifestHash:string|null }
 interface IncomingGrantPreview { grantId:string; vaultObjectId:string; nftTokenId:string; filename:string; size:number; mimeType:string; fragmentsCount:number }
@@ -368,13 +368,6 @@ export default function FilesScreen({onNavigate,searchQuery=''}:FilesScreenProps
     }catch(e){toast({type:'error',title:'Share failed',sub:String(e)})}
     finally{setStartingGrant(false)}
   }
-
-  const copyGrantPayload=async()=>{
-    if(!grantResult)return
-    await navigator.clipboard.writeText(compactQrPayload(grantResult.qrPayload))
-    toast({type:'success',title:'Approval payload copied'})
-  }
-
 
   const downloadIncomingGrant=async(grant:IncomingGrantInfo)=>{
     try{
@@ -898,7 +891,7 @@ export default function FilesScreen({onNavigate,searchQuery=''}:FilesScreenProps
                   </>
                 ) : (
                   <div>
-                    <p style={{fontSize:14,color:'#868b98',marginBottom:14}}>Grant request is ready for trusted-device approval. Scan this QR with a paired Vaulted device, or copy the canonical payload for scanner/debug flows.</p>
+                    <p style={{fontSize:14,color:'#868b98',marginBottom:14}}>Grant request is ready for trusted-device approval. Scan this QR with a paired Vaulted device.</p>
                     <div style={{border:'1px solid var(--line)',borderRadius:12,padding:12,background:'var(--bg-3)',marginBottom:14}}>
                       <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:10,marginBottom:8}}>
                         <div style={{fontSize:12,color:'var(--fg-2)'}}>Approval status</div>
@@ -918,20 +911,19 @@ export default function FilesScreen({onNavigate,searchQuery=''}:FilesScreenProps
                         </div>
                       )}
                       {grantStatus?.approvedAt && <div style={{fontSize:12,color:'var(--fg-2)',marginTop:8}}>Approved at {new Date(grantStatus.approvedAt).toLocaleString()}</div>}
-                      {grantStatus?.approvalSignature && (
-                        <details style={{marginTop:10}}>
-                          <summary style={{fontSize:12,color:'var(--fg-2)',cursor:'pointer'}}>Approval signature</summary>
-                          <div style={{fontFamily:'var(--font-mono)',fontSize:11,color:'var(--fg-1)',wordBreak:'break-all',marginTop:6}}>{grantStatus.approvalSignature}</div>
-                        </details>
-                      )}
                       {grantPollError && <div style={{fontSize:12,color:'#e07a6a',marginTop:10}}>{grantPollError}</div>}
                     </div>
                     <div style={{display:'grid',gridTemplateColumns:'240px 1fr',gap:16,alignItems:'start',marginBottom:14}}>
                       <div style={{display:'flex',justifyContent:'center'}}>
                         <QrCode value={compactQrPayload(grantResult.qrPayload)} label="Vaulted grant approval QR" size={220} />
                       </div>
-                      <div style={{border:'1px solid var(--line)',borderRadius:12,padding:12,background:'#11151f',maxHeight:240,overflow:'auto'}}>
-                        <pre style={{margin:0,fontSize:11,color:'var(--fg-1)',whiteSpace:'pre-wrap',wordBreak:'break-word'}}>{JSON.stringify(grantResult.qrPayload,null,2)}</pre>
+                      <div style={{border:'1px solid var(--line)',borderRadius:12,padding:12,background:'#11151f'}}>
+                        <div style={{fontSize:13,fontWeight:700,color:'var(--fg-0)',marginBottom:8}}>Approval details</div>
+                        <div style={{display:'grid',gap:8,fontSize:12,color:'var(--fg-2)'}}>
+                          <div>Scan with a paired Vaulted device to approve recipient-bound file access.</div>
+                          <div>Status: {grantApprovalDone(grantStatus)?'approved':grantApprovalExpired(grantStatus,grantResult.expiresAt)?'expired':(grantStatus?.status||'pending')}</div>
+                          <div>Expires: {formatQrExpiry(grantResult.expiresAt)}</div>
+                        </div>
                       </div>
                     </div>
                     <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,fontSize:12,color:'var(--fg-2)',marginBottom:14}}>
@@ -939,7 +931,6 @@ export default function FilesScreen({onNavigate,searchQuery=''}:FilesScreenProps
                       <div><strong style={{color:'var(--fg-0)'}}>Vault object</strong><br/>{grantResult.vaultObjectId}</div>
                     </div>
                     <div style={{display:'flex',gap:10}}>
-                      <button className="v-btn" style={{flex:1,justifyContent:'center'}} onClick={copyGrantPayload}>Copy payload</button>
                       <button className="v-btn" style={{flex:1,justifyContent:'center'}} onClick={load}>Refresh grants</button>
                       <button className="v-btn v-btn-primary" style={{flex:1,justifyContent:'center'}} onClick={closeShareModal}>{grantApprovalDone(grantStatus)?'Done':'Close'}</button>
                     </div>
