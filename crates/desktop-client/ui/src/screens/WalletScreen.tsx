@@ -76,7 +76,11 @@ function validateDestinationTag(value: string) {
     return null
 }
 
-export default function WalletScreen() {
+interface WalletScreenProps {
+    localWalletAvailable?: boolean
+}
+
+export default function WalletScreen({ localWalletAvailable = true }: WalletScreenProps) {
     const [overview, setOverview] = useState<WalletOverview | null>(null)
     const [history, setHistory] = useState<WalletHistoryItem[]>([])
     const [overviewLoading, setOverviewLoading] = useState(false)
@@ -116,9 +120,10 @@ export default function WalletScreen() {
     }, [])
 
     useEffect(() => {
+        if (!localWalletAvailable) return
         void refreshOverview()
         void refreshHistory()
-    }, [refreshOverview, refreshHistory])
+    }, [localWalletAvailable, refreshOverview, refreshHistory])
 
     const copyAddress = async () => {
         if (!overview?.classicAddress) return
@@ -174,6 +179,16 @@ export default function WalletScreen() {
     }
 
     const statusClass = overview?.funded ? 'ok' : overview?.connected ? 'warn' : 'syncing'
+
+    if (!localWalletAvailable) {
+        return (
+            <div className="wallet-screen">
+                <div className="wallet-error">
+                    Restore the matching 12-word Vaulted wallet to use the local XRPL wallet. QR login only approves Oracle access.
+                </div>
+            </div>
+        )
+    }
 
     return (
         <div className="wallet-screen">

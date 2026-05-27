@@ -11,7 +11,7 @@ import WalletScreen from './screens/WalletScreen'
 import SettingsScreen from './screens/SettingsScreen'
 import ActivityScreen from './screens/ActivityScreen'
 import { SecureNotesScreen } from './screens/SecureNotesScreen'
-import { OracleLoginModal } from './components/OracleLoginModal'
+import { OracleLoginModal, type QrLoginPollResponse } from './components/OracleLoginModal'
 import { ActivityLogProvider } from './contexts/ActivityLogContext'
 import type { ToastData } from './components/Toast'
 import { ToastContainer, registerToastFn } from './components/Toast'
@@ -176,10 +176,19 @@ function App() {
         }, 500)
     }, [checkOracleAuth])
 
-    const handleOracleLoginSuccess = () => {
+    const handleOracleLoginSuccess = (result: QrLoginPollResponse) => {
+        if (!result.localDecryptAvailable && !result.localIdentityMatchesApproved) {
+            setOracleAuthed(false)
+            addToast({
+                type: 'info',
+                title: 'Oracle session approved',
+                sub: 'Restore the matching 12-word Vaulted wallet on this device for local files, minting, transfers, and decrypt.',
+            })
+            return
+        }
         setOracleAuthed(true)
         setShowOracleLogin(false)
-        addToast({ type: 'success', title: 'Oracle authentication successful' })
+        addToast({ type: 'success', title: 'Oracle session approved' })
     }
 
     if(loading) return (
@@ -199,6 +208,7 @@ function App() {
     const shortWallet = user?.walletAddress
         ? `${user.walletAddress.slice(0,4)}...${user.walletAddress.slice(-4)}`
         : '—'
+    const localWalletAvailable = Boolean(user?.hasVaultedWallet)
 
     return (
         <ActivityLogProvider>
@@ -295,13 +305,13 @@ function App() {
                     </header>
 
                     <main className="main-content">
-                        {screen==='files' && <FilesScreen onNavigate={setScreen} searchQuery={searchQuery} oracleConnected={oracleAuthed} />}
+                        {screen==='files' && <FilesScreen onNavigate={setScreen} searchQuery={searchQuery} oracleConnected={oracleAuthed} localWalletAvailable={localWalletAvailable} />}
                         {/* UploadScreen stays mounted to preserve upload progress */}
                         <div style={{display: screen==='upload' ? 'contents' : 'none'}}>
                             <UploadScreen oracleConnected={oracleAuthed} onNavigate={setScreen} />
                         </div>
                         {screen==='secure-notes' && <SecureNotesScreen oracleConnected={oracleAuthed} />}
-                        {screen==='wallet' && <WalletScreen />}
+                        {screen==='wallet' && <WalletScreen localWalletAvailable={localWalletAvailable} />}
                         {screen==='activity' && <ActivityScreen oracleConnected={oracleAuthed} />}
                         {screen==='settings' && <SettingsScreen user={user} />}
                     </main>

@@ -972,34 +972,63 @@ pub async fn poll_vaulted_qr_login(
         status = %status.status,
         "qr_login_command_boundary"
     );
-    let has_local_identity = state.has_vaulted_identity().await;
+    let local_identity_id = state
+        .get_vaulted_identity()
+        .await
+        .ok()
+        .map(|identity| identity.identity_id_hex());
+    let has_local_identity = local_identity_id.is_some();
+    let local_identity_matches_approved = local_identity_matches_approved(
+        local_identity_id.as_deref(),
+        status.identity_id.as_deref(),
+    );
     if status.status == "approved" || status.status == "consumed" {
         if let (Some(token), Some(identity_id)) =
             (status.access_token.clone(), status.identity_id.clone())
         {
-            let identity = state.get_vaulted_identity().await.ok();
-            let public_key = identity
-                .as_ref()
-                .map(|i| i.signing_public_key_hex())
-                .unwrap_or_default();
-            let mut session = Session::with_oracle_token(
-                identity_id,
-                public_key,
-                format!("vaulted-qr:{}", login_request_id),
-                24,
-                token,
-            );
-            if let Some(refresh) = status.refresh_token.clone() {
-                session.set_refresh_token(refresh);
-            }
-            if let Some(expires_in) = status.expires_in {
-                session.set_oracle_token_with_expiry(
-                    session.oracle_token.clone().unwrap_or_default(),
-                    expires_in,
+            if local_identity_matches_approved {
+                let mut session = match state.get_session().await {
+                    Ok(session) => session,
+                    Err(_) => {
+                        let wallet = state.get_xrpl_wallet().await?;
+                        Session::new(
+                            wallet.classic_address()?,
+                            wallet.public_key_hex()?,
+                            format!("vaulted-seed:{}", identity_id),
+                            24,
+                        )
+                    },
+                };
+                if let Some(expires_in) = status.expires_in {
+                    session.set_oracle_token_with_expiry(token, expires_in);
+                } else {
+                    session.set_oracle_token(token);
+                }
+                if let Some(refresh) = status.refresh_token.clone() {
+                    session.set_refresh_token(refresh);
+                }
+                session.set_device_fingerprint(state.device_fingerprint().to_string());
+                state.set_session(session).await;
+            } else if !has_local_identity {
+                let mut session = Session::with_oracle_token(
+                    identity_id,
+                    String::new(),
+                    format!("vaulted-qr:{}", login_request_id),
+                    24,
+                    token,
                 );
+                if let Some(refresh) = status.refresh_token.clone() {
+                    session.set_refresh_token(refresh);
+                }
+                if let Some(expires_in) = status.expires_in {
+                    session.set_oracle_token_with_expiry(
+                        session.oracle_token.clone().unwrap_or_default(),
+                        expires_in,
+                    );
+                }
+                session.set_device_fingerprint(state.device_fingerprint().to_string());
+                state.set_session(session).await;
             }
-            session.set_device_fingerprint(state.device_fingerprint().to_string());
-            state.set_session(session).await;
         }
     }
     Ok(serde_json::json!({
@@ -1008,8 +1037,22 @@ pub async fn poll_vaulted_qr_login(
         "approved": status.access_token.is_some(),
         "oracleSession": status.access_token.is_some(),
         "localVaultedWallet": has_local_identity,
-        "localDecryptAvailable": has_local_identity,
+        "localIdentityMatchesApproved": local_identity_matches_approved,
+        "localDecryptAvailable": local_identity_matches_approved,
     }))
+}
+
+fn local_identity_matches_approved(
+    local_identity_id: Option<&str>,
+    approved_identity_id: Option<&str>,
+) -> bool {
+    match (local_identity_id, approved_identity_id) {
+        (Some(local), Some(approved)) => {
+            let local = local.trim();
+            !local.is_empty() && local.eq_ignore_ascii_case(approved.trim())
+        },
+        _ => false,
+    }
 }
 
 /// Confirms QR login from a device that has the Vaulted seed unlocked.
@@ -2706,9 +2749,9 @@ mod tests {
     use super::{
         build_auth_lifecycle_status, ensure_recoverable_mint_status,
         file_access_status_from_http_status, generate_create_wallet_mnemonic,
-        owner_download_error_for_status, parse_destination_tag, parse_wallet_transaction_history,
-        parse_xrp_amount_to_drops, set_vaulted_session, validate_create_wallet_word_count,
-        validate_spendable_balance,
+        local_identity_matches_approved, owner_download_error_for_status, parse_destination_tag,
+        parse_wallet_transaction_history, parse_xrp_amount_to_drops, set_vaulted_session,
+        validate_create_wallet_word_count, validate_spendable_balance,
     };
     use crate::state::{AppConfig, AppState};
     use xrpl_vault_crypto_core::{SeedManager, DEFAULT_MNEMONIC_WORDS};
@@ -2739,6 +2782,35 @@ mod tests {
             file_access_status_from_http_status(reqwest::StatusCode::NOT_FOUND),
             Some("deleted")
         );
+    }
+
+    #[test]
+    fn qr_login_local_decrypt_available_when_identity_matches() {
+        assert!(local_identity_matches_approved(
+            Some("abc123"),
+            Some("ABC123")
+        ));
+    }
+
+    #[test]
+    fn qr_login_local_decrypt_unavailable_when_identity_differs() {
+        assert!(!local_identity_matches_approved(
+            Some("local_identity"),
+            Some("approved_identity")
+        ));
+    }
+
+    #[test]
+    fn qr_login_local_decrypt_unavailable_when_approved_identity_missing() {
+        assert!(!local_identity_matches_approved(
+            Some("local_identity"),
+            None
+        ));
+        assert!(!local_identity_matches_approved(
+            None,
+            Some("approved_identity")
+        ));
+        assert!(!local_identity_matches_approved(None, None));
     }
 
     #[test]
