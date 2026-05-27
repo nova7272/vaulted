@@ -1,89 +1,106 @@
-# Plan: Complete Transfer And Recipient Decrypt
+# Plan: Fix Transfer Confirm-Signed Payload Shape
 Created: 2026-05-27
 Mode: fast
 Branch: current branch, no branch changes planned
 
 ## Settings
-- **Testing:** yes. Add focused Rust tests for XRPL transfer signing support and any pure Oracle/desktop helpers; run UI lint/typecheck/build if `FilesScreen.tsx` changes.
-- **Logging:** standard, security-safe diagnostics only. Allowed: command name, phase, NFT token id, transfer id, offer index, tx hash, engine result/message, accepted boolean, endpoint status, byte counts. Forbidden: seed phrase, mnemonic entropy, private keys, derived keys, AES keys, JWTs, storage tokens, `tx_blob`, signatures, plaintext files, decrypted content, recovery phrase, QR payloads, QR approval signatures, raw encrypted key material, tokenized URLs, raw storage keys.
-- **Docs:** no docs changes in the implementation task; update `docs/RUNTIME_VERIFICATION.md` later when the full runtime milestone is proven.
+- **Testing:** yes. Add focused serialization/deserialization tests around the confirm-signed payload shape and run narrow Rust package checks before workspace checks.
+- **Logging:** standard, security-safe diagnostics only. Allowed: command name, phase, transfer id, offer index, tx hash, endpoint status, status enum, validation reason. Forbidden: `tx_blob`, signatures, JWTs, storage tokens, AES keys, plaintext/decrypted content, seed phrase, private keys, raw encrypted key material, tokenized URLs, raw storage keys.
+- **Docs:** no docs changes for this fix.
 - **Roadmap linkage:** `VAULTED_AGENT_INSTRUCTIONS.md` section 18, item 8: `Complete transfer/re-encryption`.
 
-## Next Roadmap Item
-- **Next item:** Complete transfer/re-encryption.
-- **Why it is next:** The user-provided completed checkpoints cover immediate tasks 1-7 plus owner download/decrypt. In `VAULTED_AGENT_INSTRUCTIONS.md`, the next unfinished production-MVP task is item 8. It also maps directly to the remaining XRPL Grants checklist items: `Transfer NFT/file access to another user works` and `Recipient decrypts after re-encryption`.
+## Runtime Evidence
+- NFT token id: `00080000DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4FAEB4C857010D42BC`
+- Recipient address: `rEpL6nvbvrxxR4HDKT4g1P8KAhHrQ2KQus`
+- `NFTokenCreateOffer` submit succeeded with `engine_result=tesSUCCESS`
+- XRPL tx hash: `779504A054633772C741E95E999419D9110B5E690B2D7F1A46ABDCCB4D4AB01D`
+- Extracted offer index: `21DE5973654BA063B81A3F63FEF66478D81762AA1FF83E66A40027F740AB1708`
+- Oracle transfer initiate succeeded with `transfer_id=e9e46f99-4aa6-48ec-94ea-f16d7f2d21eb`
+- Failure: `POST /api/v1/transfers/confirm-signed -> 422 Unprocessable Entity`
 
-## Current Findings
-- The Oracle transfer API exists in [crates/oracle/src/api/transfers.rs](/home/riggle/vaulted/crates/oracle/src/api/transfers.rs), including initiate, confirm-signed, incoming, complete, history, and cancel routes.
-- Desktop transfer commands exist in [crates/desktop-client/src/commands.rs](/home/riggle/vaulted/crates/desktop-client/src/commands.rs), but `create_transfer_offer`, `wait_for_transfer_offer`, `claim_nft`, and `wait_for_claim` are disabled legacy external-wallet placeholders.
-- UI transfer/claim buttons in [crates/desktop-client/ui/src/screens/FilesScreen.tsx](/home/riggle/vaulted/crates/desktop-client/ui/src/screens/FilesScreen.tsx) currently show `Local XRPL ... signing is not implemented yet`.
-- `crypto-core` local XRPL signing currently supports `NFTokenMint` and `Payment` only in [crates/crypto-core/src/xrpl_wallet.rs](/home/riggle/vaulted/crates/crypto-core/src/xrpl_wallet.rs), so it must add `NFTokenCreateOffer` and `NFTokenAcceptOffer` before desktop can submit transfer transactions locally.
-- Owner/grant decrypt infrastructure exists; keep the completed owner download path intact and use it only as a reference for recipient decrypt verification.
+## Finding
+- **Likely exact mismatch:** desktop sends `ConfirmTransferOfferSignedRequest` as camelCase JSON because [crates/desktop-client/src/oracle/api.rs](/home/riggle/vaulted/crates/desktop-client/src/oracle/api.rs) has `#[serde(rename_all = "camelCase")]`, so the payload is:
 
-## Likely Files To Inspect/Change
-- [crates/crypto-core/src/xrpl_wallet.rs](/home/riggle/vaulted/crates/crypto-core/src/xrpl_wallet.rs): add validation/serialization tests for `NFTokenCreateOffer` and `NFTokenAcceptOffer`.
-- [crates/desktop-client/src/xrpl/nft.rs](/home/riggle/vaulted/crates/desktop-client/src/xrpl/nft.rs): reuse or adjust transaction builders for create/accept offer JSON.
-- [crates/desktop-client/src/xrpl/client.rs](/home/riggle/vaulted/crates/desktop-client/src/xrpl/client.rs): inspect existing account info/fee/submit helpers and offer-index derivation needs.
-- [crates/desktop-client/src/commands.rs](/home/riggle/vaulted/crates/desktop-client/src/commands.rs): implement local offer create/submit, recipient accept/submit, Oracle confirm/complete, and safe command-level status responses.
-- [crates/desktop-client/src/oracle/api.rs](/home/riggle/vaulted/crates/desktop-client/src/oracle/api.rs): add typed clients for transfer `confirm-signed`, incoming transfers, by-offer/by-nft, and finalize if needed.
-- [crates/oracle/src/api/transfers.rs](/home/riggle/vaulted/crates/oracle/src/api/transfers.rs): inspect status transitions for pending/transferring/completed/finalized ambiguity; minimally fix only if local transfer flow cannot complete reliably.
-- [crates/oracle/src/models.rs](/home/riggle/vaulted/crates/oracle/src/models.rs): inspect transfer request/response models if typed client gaps require model changes.
-- [crates/oracle/src/api/mod.rs](/home/riggle/vaulted/crates/oracle/src/api/mod.rs): inspect routes only if client paths do not match mounted API.
-- [crates/desktop-client/ui/src/screens/FilesScreen.tsx](/home/riggle/vaulted/crates/desktop-client/ui/src/screens/FilesScreen.tsx): replace placeholder transfer/claim UX with local-signing progress, errors, and refresh behavior.
+```json
+{
+  "transferId": "e9e46f99-4aa6-48ec-94ea-f16d7f2d21eb",
+  "offerIndex": "21DE5973654BA063B81A3F63FEF66478D81762AA1FF83E66A40027F740AB1708"
+}
+```
+
+- Oracle’s local request struct in [crates/oracle/src/api/transfers.rs](/home/riggle/vaulted/crates/oracle/src/api/transfers.rs) is:
+
+```rust
+#[derive(serde::Deserialize)]
+pub struct ConfirmOfferSignedRequest {
+    pub transfer_id: Uuid,
+    pub offer_index: String,
+}
+```
+
+- Because it lacks `#[serde(rename_all = "camelCase")]`, serde expects `transfer_id` and `offer_index`. Axum returns `422 Unprocessable Entity` during JSON extraction/deserialization before `confirm_offer_signed` runs application validation.
+
+## Answers To Scope Questions
+- **What JSON shape does Oracle expect now?** `{"transfer_id": "...", "offer_index": "..."}`.
+- **What JSON shape does desktop send now?** `{"transferId": "...", "offerIndex": "..."}`.
+- **Does Oracle expect `offerIndex` vs `nftOfferIndex` vs `signedPayload`?** Current Oracle code expects only `offer_index`, no `nft_offer_index` or signed payload.
+- **Does it require `tx_hash` / `xrpl_tx_hash`?** No. Current confirm-signed updates `nft_offer_index` and status only; tx hash is not stored at this step.
+- **Does it require status pending/signing before confirm?** Yes. The row must be `status = 'pending'`; otherwise the handler returns application `400 BadRequest`.
+- **Is desktop sending camelCase while Oracle expects snake_case?** Yes. This is the likely 422 cause.
+- **Does Oracle validate the submitted offer on-chain?** No. Current handler only checks auth sender, pending status, and updates DB.
+- **Is 422 from Axum JSON deserialize, validation, or application error?** Likely Axum JSON deserialize because required snake_case fields are absent from the camelCase body. Application validation would map through `ApiError`, not Axum’s extractor-level 422.
+
+## Minimal Files To Change
+- [crates/oracle/src/api/transfers.rs](/home/riggle/vaulted/crates/oracle/src/api/transfers.rs)
+  - Add `#[serde(rename_all = "camelCase")]` to `ConfirmOfferSignedRequest`.
+  - Optionally add safe structured logs around confirm-signed request acceptance and validation failure phases using transfer id / offer index only.
+- [crates/desktop-client/src/oracle/api.rs](/home/riggle/vaulted/crates/desktop-client/src/oracle/api.rs)
+  - Keep current camelCase request unless implementation chooses the less preferred alternative of switching desktop to snake_case.
+  - Add/adjust a unit test if there is an existing API serialization test pattern.
+- [crates/desktop-client/src/commands.rs](/home/riggle/vaulted/crates/desktop-client/src/commands.rs)
+  - Inspect only; change only if extra endpoint status diagnostics are needed around `confirm_transfer_offer_signed`.
+- [crates/oracle/src/api/mod.rs](/home/riggle/vaulted/crates/oracle/src/api/mod.rs)
+  - No expected change; route is already mounted at `/transfers/confirm-signed`.
 
 ## Tasks
 
-- [x] 1. Add local XRPL signing support for NFT offer transactions
-  - Deliverable: `VaultedXrplWallet::sign_xrpl_transaction_json` accepts `NFTokenCreateOffer` and `NFTokenAcceptOffer` with required fields and common signing fields.
-  - Expected behavior: signed blobs are submission-ready through the same XRPL submit path used by mint/payment.
-  - Logging: no secret logs; tests must not print `tx_blob` or signatures.
-  - Dependencies: required before desktop transfer commands can move off legacy placeholders.
+- [x] 1. Align Oracle confirm-signed request casing
+  - Deliverable: Oracle accepts the desktop camelCase payload `{ transferId, offerIndex }` for `/api/v1/transfers/confirm-signed`.
+  - Expected behavior: Axum no longer returns 422 for the runtime payload shape; handler proceeds to auth/status validation.
+  - Files likely to change:
+    - [crates/oracle/src/api/transfers.rs](/home/riggle/vaulted/crates/oracle/src/api/transfers.rs)
+  - Logging requirements: do not log JWTs, tx blobs, signatures, keys, or raw request bodies; only safe transfer id, offer index, phase, and status.
+  - Dependency notes: do not change XRPL signing, mint/finalize, auth, QR, storage, or owner download paths.
 
-- [x] 2. Implement desktop owner transfer offer creation/submission
-  - Deliverable: `initiate_transfer` creates recipient re-encryption data, builds a zero-amount destination sell offer, signs locally, submits to XRPL, derives or fetches the offer index, and calls Oracle `confirm-signed`.
-  - Expected behavior: owner sees concrete success/failure, and recipient incoming offers list refreshes after successful offer creation.
-  - Logging: safe phase logs with NFT id, transfer id, destination address, tx hash, engine result/message, accepted; never log `tx_blob`, keys, JWTs, or raw re-encryption material.
-  - Dependencies: depends on task 1 and existing `generate_transfer_key`.
+- [x] 2. Add focused payload-shape tests
+  - Deliverable: add a narrow test proving `ConfirmOfferSignedRequest` deserializes from camelCase and, if practical, rejects or documents snake_case behavior.
+  - Expected behavior: test fails on current code and passes after adding `rename_all = "camelCase"`.
+  - Files likely to change:
+    - [crates/oracle/src/api/transfers.rs](/home/riggle/vaulted/crates/oracle/src/api/transfers.rs)
+    - [crates/desktop-client/src/oracle/api.rs](/home/riggle/vaulted/crates/desktop-client/src/oracle/api.rs) only if a matching client serialization unit test is useful and low cost.
+  - Logging requirements: tests must not print tx blobs, signatures, JWTs, keys, raw encrypted material, or plaintext.
+  - Dependency notes: no database integration test required for this casing fix.
 
-- [x] 3. Implement recipient NFT accept/claim and Oracle finalization
-  - Deliverable: recipient claim flow signs/submits `NFTokenAcceptOffer`, confirms ledger submission, then calls Oracle `complete_transfer` with transfer id and tx hash.
-  - Expected behavior: Oracle owner changes to recipient, re-encrypted AES key is active, transfer history updates, and incoming offer disappears or becomes completed.
-  - Logging: safe claim phase logs with offer index, transfer id, tx hash, engine result/message; no signatures, `tx_blob`, keys, or decrypted content.
-  - Dependencies: depends on tasks 1-2.
-
-- [ ] 4. Wire UI transfer and claim flows to local commands
-  - Deliverable: remove the “not implemented yet” transfer/claim placeholders in `FilesScreen.tsx`; show processing, submitted, accepted, and failed states with actionable messages.
-  - Expected behavior: owner can start transfer from a minted vault NFT; recipient can accept an incoming offer; lists refresh after each success.
-  - Logging: UI must not render raw stack traces, `tx_blob`, signatures, key material, QR payloads, or plaintext/decrypted content.
-  - Dependencies: depends on tasks 2-3.
-
-- [ ] 5. Verify recipient decrypt after transfer
-  - Deliverable: after transfer completion, recipient can download/decrypt the transferred/shared file through the existing recipient grant or transferred-owner path, with old owner access behavior explicitly observed.
-  - Expected behavior: recipient output file decrypts successfully; Oracle/storage/desktop logs remain free of forbidden values.
-  - Logging: safe download/decrypt phases only; no tokenized URLs, storage tokens, AES keys, plaintext, or output content.
-  - Dependencies: depends on task 3 and completed owner download/decrypt path.
-
-- [ ] 6. Add focused tests and run gates
-  - Deliverable: tests for XRPL offer transaction signing plus any helper/status mapping added during implementation.
-  - Expected behavior: Rust workspace and frontend checks pass for touched areas.
-  - Logging: tests do not print or snapshot secrets, transaction blobs, signatures, key material, or plaintext.
-  - Dependencies: final verification task.
-
-## Tests To Add/Update
-- `crates/crypto-core/src/xrpl_wallet.rs`
-  - `signs_nftoken_create_offer_as_xrpl_tx_blob`
-  - `signs_nftoken_accept_offer_as_xrpl_tx_blob`
-  - rejects missing `NFTokenID` / `Amount` / `NFTokenSellOffer`
-  - rejects mismatched `Account`
-- `crates/desktop-client/src/commands.rs`
-  - focused pure-helper tests only if new offer-index, status, or error mapping helpers are extracted.
-- `crates/oracle/src/api/transfers.rs`
-  - add narrow tests only if status transition logic is changed.
-- `crates/desktop-client/ui/src/screens/FilesScreen.tsx`
-  - no new UI test harness required; verify through lint/typecheck/build and runtime.
+- [x] 3. Verify confirm-signed status transition assumptions
+  - Deliverable: inspect the initiate -> confirm-signed -> incoming query path and verify the transition remains `pending` -> `completed` with `nft_offer_index` set, because incoming transfers query `status = 'completed' AND nft_offer_index IS NOT NULL`.
+  - Expected behavior: no status model changes unless evidence shows the runtime transfer row is not `pending` after initiate.
+  - Files likely to inspect/change:
+    - [crates/oracle/src/api/transfers.rs](/home/riggle/vaulted/crates/oracle/src/api/transfers.rs)
+    - [crates/oracle/src/api/mod.rs](/home/riggle/vaulted/crates/oracle/src/api/mod.rs) inspect only if route behavior is still suspect.
+  - Logging requirements: allowed diagnostics only; no raw request body logging.
+  - Dependency notes: this task should remain read-mostly unless the status mismatch is proven.
 
 ## Verification Commands
-Rust:
+Narrow checks:
+
+```bash
+cargo fmt --all --check
+cargo test -p xrpl-vault-oracle confirm
+cargo check -p xrpl-vault-oracle
+cargo check -p xrpl-vault-desktop
+```
+
+Full checks before commit:
 
 ```bash
 cargo fmt --all --check
@@ -93,50 +110,48 @@ cargo test --workspace
 git diff --check
 ```
 
-Frontend, if UI changes:
+Frontend checks are not required unless implementation changes frontend files. If frontend is changed unexpectedly:
 
 ```bash
 cd crates/desktop-client/ui
 npm run lint
 npx tsc --noEmit --project tsconfig.json
 npm run build
-npm audit --audit-level=high
 cd ../../..
 ```
 
-Narrow checks during implementation:
+## Runtime Retest Steps
+- Do not re-submit the already successful XRPL offer if the pending transfer row and offer index still exist.
+- Start Oracle with the fixed binary and existing database state.
+- Confirm transfer row still exists and is pending, if DB access is available:
 
 ```bash
-cargo test -p xrpl-vault-crypto-core xrpl_wallet
-cargo check -p xrpl-vault-desktop
-cargo check -p xrpl-vault-oracle
+docker compose exec -T postgres psql -U xrpl_vault -d xrpl_vault -c "SELECT id, status, nft_offer_index FROM transfer_requests WHERE id = 'e9e46f99-4aa6-48ec-94ea-f16d7f2d21eb';"
 ```
 
-## Runtime Checks
-- Start Postgres/Redis, Oracle, storage-node, and desktop using existing dev workflow; do not reset runtime state or modify `.env`.
-- Use two registered Vaulted identities/wallets with funded XRPL testnet accounts.
-- Owner uploads/mints or uses an already active minted vault object.
-- Owner starts transfer to recipient wallet address.
-- Confirm XRPL `NFTokenCreateOffer` succeeds and returns safe diagnostics.
-- Confirm Oracle transfer status becomes ready for recipient claim and incoming transfer appears for recipient.
-- Recipient accepts the offer; confirm XRPL `NFTokenAcceptOffer` succeeds.
-- Confirm Oracle owner/final transfer state updates and by-NFT lookup remains valid.
-- Confirm `account_nfts` shows the NFT under recipient account after claim.
-- Recipient downloads/decrypts the file successfully.
-- Inspect desktop/Oracle/storage logs for forbidden values, especially `tx_blob`, signatures, JWTs, AES/file keys, plaintext/decrypted content, storage tokens, tokenized URLs, QR payloads, and raw encrypted key material.
+- If row is `pending`, manually retry the existing confirm step with the already extracted offer index through the desktop flow if it can resume, or with an authenticated request using the owner’s active Oracle token without printing the token:
+
+```text
+POST /api/v1/transfers/confirm-signed
+{
+  "transferId": "e9e46f99-4aa6-48ec-94ea-f16d7f2d21eb",
+  "offerIndex": "21DE5973654BA063B81A3F63FEF66478D81762AA1FF83E66A40027F740AB1708"
+}
+```
+
+- Expected response: `200 OK`, `success=true`, `status="transferring"` or existing response status string from handler.
+- Verify incoming transfer appears for recipient through `/api/v1/transfers/incoming/{recipient}` or Files screen.
+- Then continue recipient claim flow in the existing desktop runtime.
+- If the transfer row is no longer pending, create one new runtime transfer attempt after the fix and confirm the same endpoint no longer returns 422.
 
 ## Out Of Scope
-- XRPL mint signing/serialization.
-- Oracle post-mint linking/finalization.
-- Pending mint recovery.
-- Oracle XRPL HTTP RPC configuration.
-- 12-word seed policy.
-- Auth restart/logout lifecycle.
-- Desktop launch/window fallback.
-- Wallet tab and Send XRP / Payment command.
-- QR login flow.
-- Owner download/decrypt path changes except inspection/reference.
-- Broad UI polish for the XRPL Grants demo.
-- Runtime verification doc/README updates.
-- Mobile app implementation.
-- `git push`, runtime reset/logout, clearing app data, deleting user data, or `.env` changes.
+- `NFTokenCreateOffer` signing/serialization changes.
+- `NFTokenAcceptOffer` signing/serialization changes.
+- QR/auth.
+- Wallet tab or Send XRP.
+- Owner download/decrypt.
+- Seed policy.
+- Mint/finalize.
+- Storage.
+- Broad UI polish or retry/recovery UX.
+- Oracle schema changes unless unavoidable and proven by inspection.

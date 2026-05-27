@@ -382,6 +382,7 @@ pub async fn confirm_offer_signed(
 }
 
 #[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ConfirmOfferSignedRequest {
     pub transfer_id: Uuid,
     pub offer_index: String,
@@ -991,4 +992,37 @@ pub async fn cancel_transfer(
         message,
         tx_hash,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn confirm_offer_signed_request_accepts_camel_case_payload() {
+        let request: ConfirmOfferSignedRequest = serde_json::from_value(serde_json::json!({
+            "transferId": "e9e46f99-4aa6-48ec-94ea-f16d7f2d21eb",
+            "offerIndex": "21DE5973654BA063B81A3F63FEF66478D81762AA1FF83E66A40027F740AB1708"
+        }))
+        .expect("camelCase confirm-signed payload should deserialize");
+
+        assert_eq!(
+            request.transfer_id,
+            Uuid::parse_str("e9e46f99-4aa6-48ec-94ea-f16d7f2d21eb").unwrap()
+        );
+        assert_eq!(
+            request.offer_index,
+            "21DE5973654BA063B81A3F63FEF66478D81762AA1FF83E66A40027F740AB1708"
+        );
+    }
+
+    #[test]
+    fn confirm_offer_signed_request_rejects_snake_case_payload() {
+        let result = serde_json::from_value::<ConfirmOfferSignedRequest>(serde_json::json!({
+            "transfer_id": "e9e46f99-4aa6-48ec-94ea-f16d7f2d21eb",
+            "offer_index": "21DE5973654BA063B81A3F63FEF66478D81762AA1FF83E66A40027F740AB1708"
+        }));
+
+        assert!(result.is_err());
+    }
 }
