@@ -8,8 +8,9 @@ use std::path::Path;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
 use xrpl_vault_crypto_core::{
-    add_xrpl_signing_fields, build_nftoken_mint_tx, build_xrp_payment_tx,
-    encryption_public_key_fingerprint_hex, format_fingerprint_groups,
+    add_xrpl_signing_fields, build_nftoken_accept_offer_tx, build_nftoken_create_offer_tx,
+    build_nftoken_mint_tx, build_xrp_payment_tx, encryption_public_key_fingerprint_hex,
+    format_fingerprint_groups,
     generate_vaulted_nft_metadata_preview as build_vaulted_nft_metadata_preview,
     is_valid_xrpl_classic_address, open_key_envelope, seal_key_for_recipient_hex, KeyEnvelope,
     SeedManager, VaultedNftMetadataInput, VaultedNftMetadataPreview, VaultedQrSigningRequest,
@@ -20,12 +21,12 @@ use crate::auth::{Session, VaultedSigningRequest};
 use crate::crypto::FileEncryptor;
 use crate::error::{ClientError, Result};
 use crate::oracle::api::{
-    CreateVaultRequest, FinalizeVaultMintRequest, GrantResponse, IdentityDeviceResponse,
-    IdentityTokenRequest, OracleClient, OracleConfig, PublishVaultMetadataRequest,
-    PublishVaultMetadataResponse, QrFileGrantConfirmRequest, QrFileGrantStartRequest,
-    QrXrplSigningConfirmRequest, QrXrplSigningStartRequest, RecipientKeyTrustResponse,
-    RegisterVaultObjectRequest, RevokeRecipientKeyTrustRequest, TrustRecipientKeyRequest,
-    VaultFragment, VaultManifest, VaultObjectResponse,
+    ConfirmTransferOfferSignedRequest, CreateVaultRequest, FinalizeVaultMintRequest, GrantResponse,
+    IdentityDeviceResponse, IdentityTokenRequest, OracleClient, OracleConfig,
+    PublishVaultMetadataRequest, PublishVaultMetadataResponse, QrFileGrantConfirmRequest,
+    QrFileGrantStartRequest, QrXrplSigningConfirmRequest, QrXrplSigningStartRequest,
+    RecipientKeyTrustResponse, RegisterVaultObjectRequest, RevokeRecipientKeyTrustRequest,
+    TrustRecipientKeyRequest, VaultFragment, VaultManifest, VaultObjectResponse,
 };
 use crate::state::AppState;
 use crate::xrpl::client::is_xrpl_tx_blob_hex;
@@ -3690,6 +3691,14 @@ pub async fn initiate_transfer(
 ) -> Result<InitiateTransferResult> {
     let session = state.get_session().await?;
 
+    tracing::info!(
+        command = "initiate_transfer",
+        phase = "begin",
+        nft_token_id = %nft_token_id,
+        to_address = %to_address,
+        "Starting local XRPL NFT transfer flow"
+    );
+
     let transfer_key = generate_transfer_key(state.clone(), to_address.clone()).await?;
 
     let oracle = state.get_oracle_client_with_timeout(120).await?;
@@ -3703,27 +3712,22 @@ pub async fn initiate_transfer(
         )
         .await?;
 
-    let signing_request = match create_transfer_offer(
-        state.clone(),
+    let offer = create_transfer_offer_inner(
+        state.inner(),
+        response.transfer_id.clone(),
         nft_token_id.clone(),
         to_address.clone(),
     )
-    .await
-    {
-        Ok(p) => {
-            tracing::info!("Created Vaulted signing request: uuid={}", p.uuid);
-            Some(p)
-        },
-        Err(e) => {
-            tracing::error!("Failed to create offer: {}", e);
-            None
-        },
-    };
+    .await?;
 
     Ok(InitiateTransferResult {
         transfer_id: response.transfer_id,
-        status: response.status,
-        signing_request,
+        status: offer.status,
+        signing_request: None,
+        offer_index: Some(offer.offer_index),
+        tx_hash: Some(offer.tx_hash),
+        engine_result: Some(offer.engine_result),
+        engine_result_message: Some(offer.engine_result_message),
     })
 }
 
@@ -3733,15 +3737,20 @@ pub struct InitiateTransferResult {
     pub transfer_id: String,
     pub status: String,
     pub signing_request: Option<crate::auth::VaultedSigningRequest>,
+    pub offer_index: Option<String>,
+    pub tx_hash: Option<String>,
+    pub engine_result: Option<String>,
+    pub engine_result_message: Option<String>,
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 pub async fn create_transfer_offer(
-    _state: State<'_, Arc<AppState>>,
-    _nft_token_id: String,
-    _to_address: String,
-) -> Result<crate::auth::VaultedSigningRequest> {
-    Err(ClientError::Auth("Legacy external-wallet signing is disabled in Vaulted wallet mode; use Vaulted XRPL wallet QR signing/submission flows".to_string()))
+    state: State<'_, Arc<AppState>>,
+    transfer_id: String,
+    nft_token_id: String,
+    to_address: String,
+) -> Result<TransferOfferResult> {
+    create_transfer_offer_inner(state.inner(), transfer_id, nft_token_id, to_address).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -3761,6 +3770,113 @@ pub struct TransferOfferResult {
     pub transfer_id: String,
     pub offer_index: String,
     pub tx_hash: String,
+    pub engine_result: String,
+    pub engine_result_message: String,
+    pub status: String,
+}
+
+async fn create_transfer_offer_inner(
+    state: &Arc<AppState>,
+    transfer_id: String,
+    nft_token_id: String,
+    to_address: String,
+) -> Result<TransferOfferResult> {
+    let wallet = state.get_xrpl_wallet().await?;
+    let account = wallet.classic_address()?;
+    if !is_valid_xrpl_classic_address(&to_address) {
+        return Err(ClientError::Validation(
+            "Recipient wallet address is not a valid XRPL classic address".to_string(),
+        ));
+    }
+
+    let mut client = XrplClient::new(&state.config.xrpl_node_url);
+    client.connect().await?;
+    let account_info = client.account_info(&account).await?;
+    let fee_drops = client.fee_drops().await?;
+    let last_ledger_sequence = client.ledger_current_index().await?.saturating_add(20);
+    let tx = build_nftoken_create_offer_tx(&account, &nft_token_id, &to_address, "0");
+    let tx = add_xrpl_signing_fields(
+        tx,
+        fee_drops.clone(),
+        account_info.sequence,
+        last_ledger_sequence,
+    );
+    let signed = wallet.sign_xrpl_transaction_json(&tx)?;
+    let tx_blob = signed.tx_blob.ok_or_else(|| {
+        ClientError::Xrpl(
+            "Local signing did not produce a signed XRPL transaction payload".to_string(),
+        )
+    })?;
+
+    tracing::info!(
+        command = "create_transfer_offer",
+        phase = "submit_started",
+        nft_token_id = %nft_token_id,
+        transfer_id = %transfer_id,
+        fee_drops = %fee_drops,
+        "Submitting locally signed NFTokenCreateOffer"
+    );
+    let submit = client.submit(&tx_blob).await?;
+    let accepted = submit.engine_result.starts_with("tes");
+    tracing::info!(
+        command = "create_transfer_offer",
+        phase = "submit_completed",
+        nft_token_id = %nft_token_id,
+        transfer_id = %transfer_id,
+        accepted,
+        engine_result = %submit.engine_result,
+        engine_result_message = %submit.engine_result_message,
+        tx_hash = %submit.tx_hash,
+        "NFTokenCreateOffer submit completed"
+    );
+    if !accepted {
+        return Err(ClientError::Xrpl(format!(
+            "{}: {}",
+            submit.engine_result, submit.engine_result_message
+        )));
+    }
+
+    let offer_index = client
+        .extract_nftoken_offer_index(&submit.tx_hash)
+        .await?
+        .ok_or_else(|| {
+            ClientError::Xrpl(
+                "Accepted NFTokenCreateOffer did not expose an offer index yet".to_string(),
+            )
+        })?;
+
+    let oracle = state.get_oracle_client_with_timeout(120).await?;
+    let confirmation = oracle
+        .confirm_transfer_offer_signed(&ConfirmTransferOfferSignedRequest {
+            transfer_id: transfer_id.clone(),
+            offer_index: offer_index.clone(),
+        })
+        .await?;
+    if !confirmation.success {
+        return Err(ClientError::Oracle(
+            "Oracle did not confirm the NFT transfer offer".to_string(),
+        ));
+    }
+
+    tracing::info!(
+        command = "create_transfer_offer",
+        phase = "oracle_confirmed",
+        nft_token_id = %nft_token_id,
+        transfer_id = %transfer_id,
+        offer_index = %offer_index,
+        tx_hash = %submit.tx_hash,
+        status = %confirmation.status,
+        "Oracle confirmed locally submitted NFT transfer offer"
+    );
+
+    Ok(TransferOfferResult {
+        transfer_id,
+        offer_index,
+        tx_hash: submit.tx_hash,
+        engine_result: submit.engine_result,
+        engine_result_message: submit.engine_result_message,
+        status: confirmation.status,
+    })
 }
 
 #[tauri::command]
@@ -3769,8 +3885,15 @@ pub async fn complete_transfer(
     transfer_id: String,
     xrpl_tx_hash: String,
 ) -> Result<bool> {
-    let oracle = state.get_oracle_client_with_timeout(120).await?;
+    complete_transfer_inner(state.inner(), transfer_id, xrpl_tx_hash).await
+}
 
+async fn complete_transfer_inner(
+    state: &Arc<AppState>,
+    transfer_id: String,
+    xrpl_tx_hash: String,
+) -> Result<bool> {
+    let oracle = state.get_oracle_client_with_timeout(120).await?;
     let request = crate::oracle::api::CompleteTransferRequest {
         transfer_id: transfer_id.clone(),
         xrpl_tx_hash,
@@ -3782,12 +3905,12 @@ pub async fn complete_transfer(
     Ok(response.success)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 pub async fn claim_nft(
-    _state: State<'_, Arc<AppState>>,
-    _offer_index: String,
-) -> Result<crate::auth::VaultedSigningRequest> {
-    Err(ClientError::Auth("Legacy external-wallet signing is disabled in Vaulted wallet mode; use Vaulted XRPL wallet QR signing/submission flows".to_string()))
+    state: State<'_, Arc<AppState>>,
+    offer_index: String,
+) -> Result<ClaimResult> {
+    claim_nft_inner(state.inner(), offer_index).await
 }
 
 #[derive(Debug, Serialize)]
@@ -3796,6 +3919,9 @@ pub struct ClaimResult {
     pub success: bool,
     pub tx_hash: String,
     pub nft_token_id: Option<String>,
+    pub transfer_id: Option<String>,
+    pub engine_result: String,
+    pub engine_result_message: String,
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -3806,6 +3932,112 @@ pub async fn wait_for_claim(
     _offer_index: Option<String>,
 ) -> Result<ClaimResult> {
     Err(ClientError::Auth("Legacy external-wallet signing is disabled in Vaulted wallet mode; use Vaulted XRPL wallet QR signing/submission flows".to_string()))
+}
+
+async fn claim_nft_inner(state: &Arc<AppState>, offer_index: String) -> Result<ClaimResult> {
+    let wallet = state.get_xrpl_wallet().await?;
+    let account = wallet.classic_address()?;
+    let oracle = state.get_oracle_client_with_timeout(120).await?;
+    let transfer = oracle.get_transfer_by_offer(&offer_index).await?;
+
+    let mut client = XrplClient::new(&state.config.xrpl_node_url);
+    client.connect().await?;
+    let account_info = client.account_info(&account).await?;
+    let fee_drops = client.fee_drops().await?;
+    let last_ledger_sequence = client.ledger_current_index().await?.saturating_add(20);
+    let tx = build_nftoken_accept_offer_tx(&account, &offer_index);
+    let tx = add_xrpl_signing_fields(
+        tx,
+        fee_drops.clone(),
+        account_info.sequence,
+        last_ledger_sequence,
+    );
+    let signed = wallet.sign_xrpl_transaction_json(&tx)?;
+    let tx_blob = signed.tx_blob.ok_or_else(|| {
+        ClientError::Xrpl(
+            "Local signing did not produce a signed XRPL transaction payload".to_string(),
+        )
+    })?;
+
+    tracing::info!(
+        command = "claim_nft",
+        phase = "submit_started",
+        transfer_id = %transfer.transfer_id,
+        offer_index = %offer_index,
+        fee_drops = %fee_drops,
+        "Submitting locally signed NFTokenAcceptOffer"
+    );
+    let submit = client.submit(&tx_blob).await?;
+    let accepted = submit.engine_result.starts_with("tes");
+    tracing::info!(
+        command = "claim_nft",
+        phase = "submit_completed",
+        transfer_id = %transfer.transfer_id,
+        offer_index = %offer_index,
+        accepted,
+        engine_result = %submit.engine_result,
+        engine_result_message = %submit.engine_result_message,
+        tx_hash = %submit.tx_hash,
+        "NFTokenAcceptOffer submit completed"
+    );
+    if !accepted {
+        return Err(ClientError::Xrpl(format!(
+            "{}: {}",
+            submit.engine_result, submit.engine_result_message
+        )));
+    }
+
+    wait_for_xrpl_tx_validated(&client, &submit.tx_hash, "claim_nft").await?;
+    let completed =
+        complete_transfer_inner(state, transfer.transfer_id.clone(), submit.tx_hash.clone())
+            .await?;
+
+    tracing::info!(
+        command = "claim_nft",
+        phase = "oracle_completed",
+        transfer_id = %transfer.transfer_id,
+        offer_index = %offer_index,
+        tx_hash = %submit.tx_hash,
+        "Oracle completed locally accepted NFT transfer"
+    );
+
+    Ok(ClaimResult {
+        success: completed,
+        tx_hash: submit.tx_hash,
+        nft_token_id: None,
+        transfer_id: Some(transfer.transfer_id),
+        engine_result: submit.engine_result,
+        engine_result_message: submit.engine_result_message,
+    })
+}
+
+async fn wait_for_xrpl_tx_validated(
+    client: &XrplClient,
+    tx_hash: &str,
+    command: &'static str,
+) -> Result<()> {
+    const MAX_ATTEMPTS: usize = 12;
+    const POLL_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        match client.tx(tx_hash).await {
+            Ok(_) => {
+                tracing::info!(
+                    command,
+                    phase = "validated",
+                    tx_hash = %tx_hash,
+                    "XRPL transaction reached validated lookup"
+                );
+                return Ok(());
+            },
+            Err(e) if attempt == MAX_ATTEMPTS => return Err(e),
+            Err(_) => tokio::time::sleep(POLL_DELAY).await,
+        }
+    }
+
+    Err(ClientError::Xrpl(
+        "XRPL transaction validation polling exhausted".to_string(),
+    ))
 }
 // ==================== Incoming Offers ====================
 

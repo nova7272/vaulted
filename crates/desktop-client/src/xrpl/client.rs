@@ -486,6 +486,64 @@ impl XrplClient {
         Ok(None)
     }
 
+    /// Attempts to extract an NFTokenOffer ledger index from a validated transaction.
+    pub async fn extract_nftoken_offer_index(&self, tx_hash: &str) -> Result<Option<String>> {
+        const MAX_ATTEMPTS: usize = 12;
+        const POLL_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            let response = match self.tx(tx_hash).await {
+                Ok(response) => response,
+                Err(e) => {
+                    tracing::warn!(
+                        tx_hash = %tx_hash,
+                        request_phase = "extract_nftoken_offer_index",
+                        status = "tx_lookup_failed",
+                        "Failed to load XRPL transaction while extracting NFTokenOffer index"
+                    );
+                    if attempt == MAX_ATTEMPTS {
+                        return Err(e);
+                    }
+                    tokio::time::sleep(POLL_DELAY).await;
+                    continue;
+                },
+            };
+            let result = response
+                .get("result")
+                .ok_or_else(|| ClientError::Xrpl("No result".to_string()))?;
+
+            if let Some(offer_index) = extract_nftoken_offer_index_from_tx_result(result) {
+                tracing::info!(
+                    offer_index = %offer_index,
+                    tx_hash = %tx_hash,
+                    request_phase = "extract_nftoken_offer_index",
+                    status = "found",
+                    "Extracted NFTokenOffer index from XRPL transaction metadata"
+                );
+                return Ok(Some(offer_index));
+            }
+
+            tracing::debug!(
+                tx_hash = %tx_hash,
+                request_phase = "extract_nftoken_offer_index",
+                status = "missing_offer_index",
+                "XRPL transaction metadata did not include NFTokenOffer index yet"
+            );
+
+            if attempt < MAX_ATTEMPTS {
+                tokio::time::sleep(POLL_DELAY).await;
+            }
+        }
+
+        tracing::warn!(
+            tx_hash = %tx_hash,
+            request_phase = "extract_nftoken_offer_index",
+            status = "missing_offer_index",
+            "NFTokenOffer index was unavailable after validated transaction polling"
+        );
+        Ok(None)
+    }
+
     /// Получает текущий fee
     pub async fn server_info(&self) -> Result<ServerInfo> {
         let response = self.request("server_info", json!({})).await?;
@@ -700,6 +758,26 @@ fn extract_minted_nftoken_id_from_tx_result(result: &Value) -> Option<String> {
     }
 
     None
+}
+
+fn extract_nftoken_offer_index_from_tx_result(result: &Value) -> Option<String> {
+    let meta = result
+        .get("meta")
+        .or_else(|| result.get("metaData"))
+        .or_else(|| result.get("metadata"))?;
+    let affected_nodes = meta.get("AffectedNodes")?.as_array()?;
+
+    affected_nodes.iter().find_map(|node| {
+        let created = node.get("CreatedNode")?;
+        let ledger_entry_type = created.get("LedgerEntryType")?.as_str()?;
+        if ledger_entry_type != "NFTokenOffer" {
+            return None;
+        }
+        created
+            .get("LedgerIndex")
+            .and_then(|id| id.as_str())
+            .map(ToOwned::to_owned)
+    })
 }
 
 fn minted_nftoken_id_from_created_node(node: &Value) -> Option<String> {

@@ -569,6 +569,20 @@ impl OracleClient {
         self.post("/api/v1/transfers/complete", request).await
     }
 
+    /// Confirms the sender's locally submitted NFTokenCreateOffer.
+    pub async fn confirm_transfer_offer_signed(
+        &self,
+        request: &ConfirmTransferOfferSignedRequest,
+    ) -> Result<ConfirmTransferOfferSignedResponse> {
+        self.post("/api/v1/transfers/confirm-signed", request).await
+    }
+
+    /// Looks up the latest transfer associated with an XRPL offer index.
+    pub async fn get_transfer_by_offer(&self, offer_index: &str) -> Result<TransferLookupResponse> {
+        self.get(&format!("/api/v1/transfers/by-offer/{}", offer_index))
+            .await
+    }
+
     // ==================== NFT API ====================
 
     /// Получает метаданные NFT
@@ -1238,6 +1252,28 @@ pub struct CompleteTransferRequest {
 pub struct CompleteTransferResponse {
     pub success: bool,
     pub new_owner: String,
+}
+
+/// Confirm sender-created NFT offer.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfirmTransferOfferSignedRequest {
+    pub transfer_id: String,
+    pub offer_index: String,
+}
+
+/// Response for transfer offer confirmation.
+#[derive(Debug, Deserialize)]
+pub struct ConfirmTransferOfferSignedResponse {
+    pub success: bool,
+    pub status: String,
+}
+
+/// Transfer lookup response.
+#[derive(Debug, Deserialize)]
+pub struct TransferLookupResponse {
+    pub transfer_id: String,
+    pub status: String,
 }
 
 // ==================== NFT Types ====================
