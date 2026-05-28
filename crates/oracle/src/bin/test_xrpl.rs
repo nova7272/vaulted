@@ -4,6 +4,11 @@ use xrpl_mithril::wallet::{Algorithm, Seed, Wallet};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var("VAULTED_RUN_XRPL_TEST_BIN").as_deref() != Ok("1") {
+        eprintln!("Refusing to run live XRPL test binary without VAULTED_RUN_XRPL_TEST_BIN=1");
+        return Ok(());
+    }
+
     // Generate a seed and wallet
     let seed = Seed::random();
     let encoded_seed = seed.encode();
@@ -11,7 +16,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Generated wallet:");
     println!("  Address: {}", wallet.classic_address());
-    println!("  Seed: {}", encoded_seed);
 
     // Use XrplService
     let config = xrpl_vault_oracle::xrpl::XrplConfig {
@@ -51,7 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("\nMinting NFT...");
         let result = xrpl.mint_nft("xvault:test123456789abcdef", 0).await?;
         println!("✅ Minted NFT: {}", result.nft_token_id);
-        println!("   TX: {}", result.tx_hash);
+        println!("   Transaction hash: {}", result.tx_hash);
 
         // Create an offer
         println!("\nCreating sell offer...");
@@ -59,7 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .create_sell_offer(&result.nft_token_id, "rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe")
             .await?;
         println!("✅ Created offer: {}", offer.offer_index);
-        println!("   TX: {}", offer.tx_hash);
+        println!("   Transaction hash: {}", offer.tx_hash);
 
         // Balance after
         let balance_after = xrpl.get_balance(wallet.classic_address()).await?;

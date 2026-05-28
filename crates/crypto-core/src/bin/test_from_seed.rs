@@ -15,7 +15,6 @@ fn main() {
     // Verify that the public keys are the same
     assert_eq!(kp1.export_public_key_bytes(), kp2.export_public_key_bytes());
     println!("from_seed deterministic: OK");
-    println!("Public key: {}", kp1.public_key().to_hex());
 
     // Verify that encryption works
     let pre = ProxyReEncryption::new();
