@@ -3,55 +3,55 @@
 -- Version: 1.1.0
 -- ============================================
 
--- Расширяем transfer_requests для поддержки Escrow
+-- Extend transfer_requests to support Escrow
 ALTER TABLE transfer_requests 
-    -- Escrow информация
-    ADD COLUMN price_drops VARCHAR(20),                    -- Цена в drops (NULL = бесплатная передача)
-    ADD COLUMN escrow_owner VARCHAR(35),                   -- Кто создал escrow (buyer)
-    ADD COLUMN escrow_sequence INT,                        -- Sequence number escrow на XRPL
-    ADD COLUMN escrow_tx_hash VARCHAR(64),                 -- Hash транзакции EscrowCreate
-    ADD COLUMN escrow_condition VARCHAR(512),              -- Crypto-condition (опционально)
-    ADD COLUMN escrow_fulfillment VARCHAR(512),            -- Fulfillment для condition
+    -- Escrow information
+    ADD COLUMN price_drops VARCHAR(20),                    -- Price in drops (NULL = free transfer)
+    ADD COLUMN escrow_owner VARCHAR(35),                   -- Who created the escrow (buyer)
+    ADD COLUMN escrow_sequence INT,                        -- Escrow sequence number on XRPL
+    ADD COLUMN escrow_tx_hash VARCHAR(64),                 -- EscrowCreate transaction hash
+    ADD COLUMN escrow_condition VARCHAR(512),              -- Crypto-condition (optional)
+    ADD COLUMN escrow_fulfillment VARCHAR(512),            -- Fulfillment for condition
     
     -- Oracle approval
-    ADD COLUMN approval_signature TEXT,                     -- Подпись Oracle для NFT offer
-    ADD COLUMN approval_message TEXT,                       -- Сообщение которое подписано
+    ADD COLUMN approval_signature TEXT,                     -- Oracle signature for the NFT offer
+    ADD COLUMN approval_message TEXT,                       -- Signed message
     
-    -- NFT offer информация  
-    ADD COLUMN nft_offer_index VARCHAR(64),                -- Offer index на XRPL
-    ADD COLUMN nft_offer_tx_hash VARCHAR(64),              -- Hash транзакции NFTokenCreateOffer
-    ADD COLUMN nft_accept_tx_hash VARCHAR(64),             -- Hash транзакции NFTokenAcceptOffer
+    -- NFT offer information
+    ADD COLUMN nft_offer_index VARCHAR(64),                -- Offer index on XRPL
+    ADD COLUMN nft_offer_tx_hash VARCHAR(64),              -- NFTokenCreateOffer transaction hash
+    ADD COLUMN nft_accept_tx_hash VARCHAR(64),             -- NFTokenAcceptOffer transaction hash
     
-    -- Escrow завершение
-    ADD COLUMN escrow_finish_tx_hash VARCHAR(64),          -- Hash транзакции EscrowFinish
-    ADD COLUMN escrow_cancel_tx_hash VARCHAR(64),          -- Hash транзакции EscrowCancel
+    -- Escrow completion
+    ADD COLUMN escrow_finish_tx_hash VARCHAR(64),          -- EscrowFinish transaction hash
+    ADD COLUMN escrow_cancel_tx_hash VARCHAR(64),          -- EscrowCancel transaction hash
     
-    -- Расширенные статусы
-    ADD COLUMN expires_at TIMESTAMPTZ;                     -- Когда transfer истекает
+    -- Extended statuses
+    ADD COLUMN expires_at TIMESTAMPTZ;                     -- When the transfer expires
 
--- Обновляем CHECK constraint для status
+-- Update the CHECK constraint for status
 ALTER TABLE transfer_requests 
     DROP CONSTRAINT IF EXISTS transfer_requests_status_check;
     
 ALTER TABLE transfer_requests
     ADD CONSTRAINT transfer_requests_status_check 
     CHECK (status IN (
-        'pending_escrow',      -- Ожидает создания escrow покупателем
-        'pending_re_key',      -- Escrow создан, ожидает re-key от продавца
-        'pending_nft_offer',   -- Re-key получен, ожидает NFT offer
-        'pending_nft_accept',  -- NFT offer создан, ожидает accept
-        'pending_escrow_finish', -- NFT передан, ожидает escrow finish
-        'completed',           -- Успешно завершено
-        'cancelled_timeout',   -- Отменено по таймауту
-        'cancelled_by_seller', -- Отменено продавцом
-        'cancelled_by_buyer',  -- Отменено покупателем
-        'failed',              -- Ошибка
-        -- Legacy статусы для совместимости
+        'pending_escrow',      -- Waiting for escrow creation by the buyer
+        'pending_re_key',      -- Escrow created, waiting for re-key from the seller
+        'pending_nft_offer',   -- Re-key received, waiting for NFT offer
+        'pending_nft_accept',  -- NFT offer created, waiting for accept
+        'pending_escrow_finish', -- NFT transferred, waiting for escrow finish
+        'completed',           -- Successfully completed
+        'cancelled_timeout',   -- Cancelled by timeout
+        'cancelled_by_seller', -- Cancelled by seller
+        'cancelled_by_buyer',  -- Cancelled by buyer
+        'failed',              -- Error
+        -- Legacy statuses for compatibility
         'pending',
         'processing'
     ));
 
--- Индексы для новых полей
+-- Indexes for new fields
 CREATE INDEX IF NOT EXISTS idx_transfer_requests_expires 
     ON transfer_requests(expires_at) 
     WHERE status NOT IN ('completed', 'cancelled_timeout', 'cancelled_by_seller', 'cancelled_by_buyer', 'failed');
@@ -61,23 +61,23 @@ CREATE INDEX IF NOT EXISTS idx_transfer_requests_escrow
     WHERE escrow_sequence IS NOT NULL;
 
 -- ============================================
--- Таблица для подписей Oracle (для верификации)
+-- Table for Oracle signatures (for verification)
 -- ============================================
 CREATE TABLE IF NOT EXISTS oracle_signatures (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     
-    -- Связь с transfer
+    -- Transfer link
     transfer_id UUID NOT NULL REFERENCES transfer_requests(id) ON DELETE CASCADE,
     
-    -- Что подписано
+    -- What was signed
     message_type VARCHAR(50) NOT NULL,  -- 'transfer_approval', 'escrow_release'
-    message_hash VARCHAR(64) NOT NULL,  -- SHA256 сообщения
+    message_hash VARCHAR(64) NOT NULL,  -- Message SHA256
     
-    -- Подпись
-    signature TEXT NOT NULL,            -- Ed25519 подпись (hex)
-    public_key VARCHAR(64) NOT NULL,    -- Публичный ключ Oracle (hex)
+    -- Signature
+    signature TEXT NOT NULL,            -- Ed25519 signature (hex)
+    public_key VARCHAR(64) NOT NULL,    -- Oracle public key (hex)
     
-    -- Время
+    -- Time
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     
     UNIQUE(transfer_id, message_type)
@@ -86,7 +86,7 @@ CREATE TABLE IF NOT EXISTS oracle_signatures (
 CREATE INDEX idx_oracle_signatures_transfer ON oracle_signatures(transfer_id);
 
 -- ============================================
--- Таблица конфигурации Oracle
+-- Oracle configuration table
 -- ============================================
 CREATE TABLE IF NOT EXISTS oracle_config (
     key VARCHAR(100) PRIMARY KEY,
@@ -95,7 +95,7 @@ CREATE TABLE IF NOT EXISTS oracle_config (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Начальная конфигурация
+-- Initial configuration
 INSERT INTO oracle_config (key, value, description) VALUES
     ('transfer_timeout_hours', '24', 'Время жизни transfer request в часах'),
     ('min_escrow_amount_drops', '1000000', 'Минимальная сумма escrow (1 XRP)'),
@@ -104,7 +104,7 @@ INSERT INTO oracle_config (key, value, description) VALUES
 ON CONFLICT (key) DO NOTHING;
 
 -- ============================================
--- View для активных transfers
+-- View for active transfers
 -- ============================================
 CREATE OR REPLACE VIEW active_transfers AS
 SELECT 
@@ -122,7 +122,7 @@ JOIN nft_metadata nm ON tr.nft_metadata_id = nm.id
 WHERE tr.status NOT IN ('completed', 'cancelled_timeout', 'cancelled_by_seller', 'cancelled_by_buyer', 'failed');
 
 -- ============================================
--- Функция для очистки просроченных transfers
+-- Function for cleaning up expired transfers
 -- ============================================
 CREATE OR REPLACE FUNCTION cleanup_expired_transfers()
 RETURNS INTEGER AS $$
