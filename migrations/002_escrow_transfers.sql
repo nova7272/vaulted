@@ -97,10 +97,10 @@ CREATE TABLE IF NOT EXISTS oracle_config (
 
 -- Initial configuration
 INSERT INTO oracle_config (key, value, description) VALUES
-    ('transfer_timeout_hours', '24', 'Время жизни transfer request в часах'),
-    ('min_escrow_amount_drops', '1000000', 'Минимальная сумма escrow (1 XRP)'),
-    ('oracle_fee_percent', '0', 'Комиссия Oracle в процентах'),
-    ('oracle_signing_key', '', 'Публичный ключ Oracle для подписей (заполняется при старте)')
+    ('transfer_timeout_hours', '24', 'Transfer request lifetime in hours'),
+    ('min_escrow_amount_drops', '1000000', 'Minimum escrow amount (1 XRP)'),
+    ('oracle_fee_percent', '0', 'Oracle fee percentage'),
+    ('oracle_signing_key', '', 'Oracle public key for signatures (filled at startup)')
 ON CONFLICT (key) DO NOTHING;
 
 -- ============================================
