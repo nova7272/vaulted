@@ -1,7 +1,7 @@
-//! Proxy Re-Encryption (PRE) модуль
+//! Proxy Re-Encryption (PRE) module
 //!
-//! Использует библиотеку umbral-pre (NuCypher) для реализации PRE схемы.
-//! Позволяет передавать зашифрованные данные без раскрытия ключа.
+//! Uses the umbral-pre (NuCypher) library to implement the PRE scheme.
+//! Allows encrypted data to be shared without revealing the key.
 
 use crate::error::{CryptoError, Result};
 use serde::{Deserialize, Serialize};
@@ -11,7 +11,7 @@ use umbral_pre::{
     SecretKeyFactory, Signer, VerifiedCapsuleFrag, VerifiedKeyFrag,
 };
 
-/// Ключевая пара PRE
+/// PRE keypair
 #[derive(Clone)]
 pub struct PreKeyPair {
     secret_key: SecretKey,
@@ -20,7 +20,7 @@ pub struct PreKeyPair {
 }
 
 impl PreKeyPair {
-    /// Создаёт ключевую пару из seed (детерминистично)
+    /// Creates a keypair from a seed (deterministically)
     pub fn from_seed(seed: &[u8; 32]) -> Result<Self> {
         let factory = SecretKeyFactory::from_secure_randomness(seed)
             .map_err(|e| CryptoError::InvalidKey(format!("Invalid seed: {:?}", e)))?;
@@ -28,7 +28,7 @@ impl PreKeyPair {
         let secret_key = factory.make_key(b"main");
         let public_key = secret_key.public_key();
 
-        // Создаём signer из того же factory
+        // Create the signer from the same factory
         let signer_key = factory.make_key(b"signer");
         let signer = Signer::new(signer_key);
 
@@ -39,14 +39,14 @@ impl PreKeyPair {
         })
     }
 
-    /// Возвращает публичный ключ
+    /// Returns the public key
     pub fn public_key(&self) -> PrePublicKey {
         PrePublicKey {
             inner: self.public_key.clone(),
         }
     }
 
-    /// Экспортирует публичный ключ как байты (33 bytes compressed)
+    /// Exports the public key as bytes (33 compressed bytes)
     pub fn export_public_key_bytes(&self) -> Vec<u8> {
         self.public_key.clone().to_compressed_bytes().to_vec()
     }
@@ -57,14 +57,14 @@ impl PreKeyPair {
     }
 }
 
-/// Публичный ключ PRE
+/// PRE public key
 #[derive(Clone)]
 pub struct PrePublicKey {
     inner: UmbralPublicKey,
 }
 
 impl PrePublicKey {
-    /// Создаёт из байтов (33 bytes compressed)
+    /// Creates from bytes (33 compressed bytes)
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         let pk = UmbralPublicKey::try_from_compressed_bytes(bytes)
             .map_err(|e| CryptoError::InvalidKey(format!("Invalid public key: {}", e)))?;
@@ -72,30 +72,30 @@ impl PrePublicKey {
         Ok(Self { inner: pk })
     }
 
-    /// Создаёт из hex строки
+    /// Creates from a hex string
     pub fn from_hex(hex_str: &str) -> Result<Self> {
         let bytes = hex::decode(hex_str)
             .map_err(|e| CryptoError::InvalidKey(format!("Invalid hex: {}", e)))?;
         Self::from_bytes(&bytes)
     }
 
-    /// Экспортирует как байты (33 bytes compressed)
+    /// Exports as bytes (33 compressed bytes)
     pub fn to_bytes(&self) -> Vec<u8> {
         self.inner.clone().to_compressed_bytes().to_vec()
     }
 
-    /// Экспортирует как hex
+    /// Exports as hex
     pub fn to_hex(&self) -> String {
         hex::encode(self.to_bytes())
     }
 }
 
-/// Зашифрованные данные PRE
+/// PRE encrypted data
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncryptedPreData {
-    /// Capsule (сериализованный)
+    /// Capsule (serialized)
     pub capsule: Vec<u8>,
-    /// Зашифрованные данные
+    /// Encrypted data
     pub ciphertext: Vec<u8>,
 }
 
@@ -107,13 +107,13 @@ impl EncryptedPreData {
         }
     }
 
-    /// Извлекает Capsule из зашифрованных данных
+    /// Extracts the Capsule from encrypted data
     pub fn get_capsule(&self) -> Result<Capsule> {
         Capsule::from_bytes(&self.capsule)
             .map_err(|e| CryptoError::InvalidData(format!("Invalid capsule: {:?}", e)))
     }
 
-    /// Сериализует в base64
+    /// Serializes to base64
     pub fn to_base64(&self) -> Result<String> {
         use base64::Engine;
         let json =
@@ -121,7 +121,7 @@ impl EncryptedPreData {
         Ok(base64::engine::general_purpose::STANDARD.encode(json.as_bytes()))
     }
 
-    /// Десериализует из base64
+    /// Deserializes from base64
     pub fn from_base64(s: &str) -> Result<Self> {
         use base64::Engine;
         let bytes = base64::engine::general_purpose::STANDARD
@@ -132,29 +132,29 @@ impl EncryptedPreData {
         serde_json::from_str(&json).map_err(|e| CryptoError::Serialization(e.to_string()))
     }
 
-    /// Сериализует в bytes (JSON)
+    /// Serializes to bytes (JSON)
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         serde_json::to_vec(self).map_err(|e| CryptoError::Serialization(e.to_string()))
     }
 
-    /// Десериализует из bytes (JSON)
+    /// Deserializes from bytes (JSON)
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         serde_json::from_slice(bytes).map_err(|e| CryptoError::Deserialization(e.to_string()))
     }
 }
 
-/// Контекст Proxy Re-Encryption
+/// Proxy Re-Encryption context
 pub struct ProxyReEncryption;
 
-/// Re-encryption key для передачи доступа
+/// Re-encryption key for access transfer
 pub struct ReEncryptionKey {
     kfrags: Vec<VerifiedKeyFrag>,
 }
 
 impl ReEncryptionKey {
-    /// Сериализует в bytes
+    /// Serializes to bytes
     pub fn to_bytes(&self) -> Vec<u8> {
-        // Сериализуем каждый kfrag
+        // Serialize each kfrag
         let kfrag_bytes: Vec<Vec<u8>> = self
             .kfrags
             .iter()
@@ -164,33 +164,33 @@ impl ReEncryptionKey {
         serde_json::to_vec(&kfrag_bytes).unwrap_or_default()
     }
 
-    /// Десериализует из bytes
-    /// TODO: Полная реализация требует верификации kfrags
+    /// Deserializes from bytes
+    /// TODO: Full implementation requires kfrag verification
     pub fn from_bytes(_bytes: &[u8]) -> Result<Self> {
-        // VerifiedKeyFrag нельзя десериализовать напрямую без верификации
-        // Для полной реализации нужно хранить KeyFrag и верифицировать при загрузке
+        // VerifiedKeyFrag cannot be deserialized directly without verification
+        // A full implementation must store KeyFrag and verify it on load
         Err(CryptoError::Deserialization(
             "ReEncryptionKey deserialization not yet implemented".to_string(),
         ))
     }
 
-    /// Возвращает kfrags
+    /// Returns kfrags
     pub fn kfrags(&self) -> &[VerifiedKeyFrag] {
         &self.kfrags
     }
 
-    /// Возвращает первый kfrag
+    /// Returns the first kfrag
     pub fn first_kfrag(&self) -> Option<VerifiedKeyFrag> {
         self.kfrags.first().cloned()
     }
 
-    /// Сериализует в base64 с публичным ключом отправителя
+    /// Serializes to base64 with the sender public key
     /// DEPRECATED: Use to_base64_verified instead
     pub fn to_base64(&self, sender_public_key: &PrePublicKey) -> String {
         self.to_base64_impl(sender_public_key, None)
     }
 
-    /// Сериализует в base64 с публичным ключом и verifying key отправителя (MED-04)
+    /// Serializes to base64 with the sender public key and verifying key (MED-04)
     pub fn to_base64_verified(&self, sender_keypair: &PreKeyPair) -> String {
         let verifying_key_bytes = sender_keypair.export_verifying_key_bytes();
         self.to_base64_impl(&sender_keypair.public_key(), Some(verifying_key_bytes))
@@ -220,12 +220,12 @@ impl ReEncryptionKey {
 }
 
 impl ProxyReEncryption {
-    /// Создаёт новый контекст PRE
+    /// Creates a new PRE context
     pub fn new() -> Self {
         Self
     }
 
-    /// Генерирует новую случайную ключевую пару
+    /// Generates a new random keypair
     pub fn generate_keypair(&self) -> PreKeyPair {
         let secret_key = SecretKey::random();
         let public_key = secret_key.public_key();
@@ -238,23 +238,23 @@ impl ProxyReEncryption {
         }
     }
 
-    /// Генерирует ключевую пару из seed (детерминистично)
+    /// Generates a keypair from a seed (deterministically)
     pub fn generate_keypair_from_seed(&self, seed: &[u8; 32]) -> Result<PreKeyPair> {
         PreKeyPair::from_seed(seed)
     }
 
-    /// Генерирует re-encryption key для передачи доступа от одного пользователя другому
+    /// Generates a re-encryption key to transfer access from one user to another
     pub fn generate_re_key(
         &self,
         from_keypair: &PreKeyPair,
         to_public_key: &PrePublicKey,
     ) -> Result<ReEncryptionKey> {
-        // Используем threshold=1, shares=1 для простоты
+        // Use threshold=1 and shares=1 for simplicity
         let kfrags = self.generate_kfrags(from_keypair, to_public_key, 1, 1);
         Ok(ReEncryptionKey { kfrags })
     }
 
-    /// Шифрует данные для получателя
+    /// Encrypts data for a recipient
     pub fn encrypt(&self, public_key: &PrePublicKey, plaintext: &[u8]) -> Result<EncryptedPreData> {
         let (capsule, ciphertext) = encrypt(&public_key.inner, plaintext)
             .map_err(|e| CryptoError::PreEncryption(format!("Encryption failed: {:?}", e)))?;
@@ -262,7 +262,7 @@ impl ProxyReEncryption {
         Ok(EncryptedPreData::new(&capsule, &ciphertext))
     }
 
-    /// Расшифровывает данные
+    /// Decrypts data
     pub fn decrypt(&self, keypair: &PreKeyPair, encrypted: &EncryptedPreData) -> Result<Vec<u8>> {
         let capsule = encrypted.get_capsule()?;
 
@@ -272,7 +272,7 @@ impl ProxyReEncryption {
         Ok(plaintext.to_vec())
     }
 
-    /// Генерирует ключевые фрагменты для перешифровки
+    /// Generates key fragments for re-encryption
     pub fn generate_kfrags(
         &self,
         from_keypair: &PreKeyPair,
@@ -292,7 +292,7 @@ impl ProxyReEncryption {
         .to_vec()
     }
 
-    /// Перешифровывает capsule (выполняется proxy)
+    /// Re-encrypts the capsule (performed by the proxy)
     pub fn reencrypt_capsule(
         &self,
         capsule: &Capsule,
@@ -301,7 +301,7 @@ impl ProxyReEncryption {
         reencrypt(capsule, kfrag)
     }
 
-    /// Расшифровывает перешифрованные данные
+    /// Decrypts re-encrypted data
     pub fn decrypt_reencrypted(
         &self,
         to_keypair: &PreKeyPair,
@@ -446,25 +446,25 @@ mod tests {
     }
 }
 
-/// Перешифрованные данные (для получателя после transfer)
+/// Re-encrypted data (for the recipient after transfer)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReEncryptedData {
-    /// Оригинальный capsule
+    /// Original capsule
     pub capsule: Vec<u8>,
-    /// Capsule fragment (после re-encryption)
+    /// Capsule fragment (after re-encryption)
     pub cfrag: Vec<u8>,
-    /// Зашифрованные данные (не меняются)
+    /// Encrypted data (unchanged)
     pub ciphertext: Vec<u8>,
-    /// Публичный ключ отправителя (нужен для расшифровки)
+    /// Sender public key (required for decryption)
     pub sender_public_key: Vec<u8>,
-    /// Verifying key отправителя (нужен для верификации cfrag)
-    /// None только для backward compatibility с данными до v0.2
+    /// Sender verifying key (required to verify the cfrag)
+    /// None only for backward compatibility with pre-v0.2 data
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_verifying_key: Option<Vec<u8>>,
 }
 
 impl ReEncryptedData {
-    /// Сериализует в base64
+    /// Serializes to base64
     pub fn to_base64(&self) -> Result<String> {
         use base64::Engine;
         let json =
@@ -472,7 +472,7 @@ impl ReEncryptedData {
         Ok(base64::engine::general_purpose::STANDARD.encode(json.as_bytes()))
     }
 
-    /// Десериализует из base64
+    /// Deserializes from base64
     pub fn from_base64(s: &str) -> Result<Self> {
         use base64::Engine;
         let bytes = base64::engine::general_purpose::STANDARD
@@ -485,8 +485,8 @@ impl ReEncryptedData {
 }
 
 impl ProxyReEncryption {
-    /// Выполняет re-encryption capsule с использованием kfrag
-    /// Возвращает ReEncryptedData для получателя
+    /// Performs capsule re-encryption using kfrag
+    /// Returns ReEncryptedData for the recipient
     pub fn perform_reencryption_with_kfrag(
         &self,
         encrypted_data: &EncryptedPreData,
@@ -501,7 +501,7 @@ impl ProxyReEncryption {
         )
     }
 
-    /// Выполняет re-encryption с сохранением verifying key для последующей верификации cfrag
+    /// Performs re-encryption while preserving the verifying key for later cfrag verification
     pub fn perform_reencryption_with_kfrag_verified(
         &self,
         encrypted_data: &EncryptedPreData,
@@ -521,7 +521,7 @@ impl ProxyReEncryption {
         })
     }
 
-    /// Расшифровывает ReEncryptedData (для получателя)
+    /// Decrypts ReEncryptedData (for the recipient)
     pub fn decrypt_reencrypted_data(
         &self,
         recipient_keypair: &PreKeyPair,

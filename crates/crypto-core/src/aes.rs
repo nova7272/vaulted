@@ -1,21 +1,21 @@
-//! AES-256-GCM шифрование для файлов
+//! AES-256-GCM encryption for files
 //!
-//! Использует authenticated encryption для защиты конфиденциальности
-//! и целостности данных.
+//! Uses authenticated encryption to protect confidentiality
+//! and data integrity.
 //!
-//! ## Пример
+//! ## Example
 //!
 //! ```rust,ignore
 //! use xrpl_vault_crypto_core::aes::AesKey;
 //!
-//! // Генерируем ключ
+//! // Generate a key
 //! let key = AesKey::generate();
 //!
-//! // Шифруем
+//! // Encrypt
 //! let plaintext = b"Hello, XRPL!";
 //! let encrypted = key.encrypt(plaintext).unwrap();
 //!
-//! // Расшифровываем
+//! // Decrypt
 //! let decrypted = key.decrypt(&encrypted).unwrap();
 //! assert_eq!(plaintext.as_slice(), decrypted.as_slice());
 //! ```
@@ -33,7 +33,7 @@ use crate::{
     AES_KEY_SIZE, AES_NONCE_SIZE, CRYPTO_VERSION,
 };
 
-/// AES-256 ключ с безопасным управлением памятью
+/// AES-256 key with secure memory handling
 #[derive(Clone, Zeroize)]
 #[zeroize(drop)]
 pub struct AesKey {
@@ -41,17 +41,17 @@ pub struct AesKey {
 }
 
 impl AesKey {
-    /// Генерирует новый случайный AES-256 ключ
+    /// Generates a new random AES-256 key
     pub fn generate() -> Self {
         let mut key = [0u8; AES_KEY_SIZE];
         OsRng.fill_bytes(&mut key);
         Self { key }
     }
 
-    /// Создаёт ключ из байтов
+    /// Creates a key from bytes
     ///
     /// # Errors
-    /// Возвращает ошибку если размер не равен 32 байтам
+    /// Returns an error if the size is not 32 bytes
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         if bytes.len() != AES_KEY_SIZE {
             return Err(CryptoError::InvalidKeySize {
@@ -64,32 +64,32 @@ impl AesKey {
         Ok(Self { key })
     }
 
-    /// Возвращает ключ как байты
+    /// Returns the key as bytes
     pub fn as_bytes(&self) -> &[u8] {
         &self.key
     }
 
-    /// Возвращает ключ как SecretBytes (для безопасной передачи)
+    /// Returns the key as SecretBytes (for safe transfer)
     pub fn to_secret_bytes(&self) -> SecretBytes {
         SecretBytes::new(self.key.to_vec())
     }
 
-    /// Шифрует данные с помощью AES-256-GCM
+    /// Encrypts data with AES-256-GCM
     ///
     /// # Arguments
-    /// * `plaintext` - данные для шифрования
+    /// * `plaintext` - data to encrypt
     ///
     /// # Returns
-    /// Зашифрованные данные включая nonce и authentication tag
+    /// Encrypted data including the nonce and authentication tag
     pub fn encrypt(&self, plaintext: &[u8]) -> Result<EncryptedData> {
         let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&self.key));
 
-        // Генерируем случайный nonce (12 байт для GCM)
+        // Generate a random nonce (12 bytes for GCM)
         let mut nonce_bytes = [0u8; AES_NONCE_SIZE];
         OsRng.fill_bytes(&mut nonce_bytes);
         let nonce = Nonce::from_slice(&nonce_bytes);
 
-        // Шифруем (ciphertext включает authentication tag)
+        // Encrypt (ciphertext includes the authentication tag)
         let ciphertext = cipher
             .encrypt(nonce, plaintext)
             .map_err(|e| CryptoError::AesEncryption(e.to_string()))?;
@@ -101,7 +101,7 @@ impl AesKey {
         ))
     }
 
-    /// Шифрует данные с AAD (associated authenticated data) для привязки ciphertext к контексту.
+    /// Encrypts data with AAD (associated authenticated data) to bind the ciphertext to context.
     pub fn encrypt_with_aad(&self, plaintext: &[u8], aad: &[u8]) -> Result<EncryptedData> {
         let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&self.key));
 
@@ -126,7 +126,7 @@ impl AesKey {
         ))
     }
 
-    /// Расшифровывает данные с AAD и проверкой authentication tag.
+    /// Decrypts data with AAD and authentication tag verification.
     pub fn decrypt_with_aad(&self, encrypted: &EncryptedData, aad: &[u8]) -> Result<Vec<u8>> {
         if encrypted.version != CRYPTO_VERSION {
             return Err(CryptoError::UnsupportedVersion(encrypted.version));
@@ -150,24 +150,24 @@ impl AesKey {
             .map_err(|_| CryptoError::AesDecryption("Authentication failed".to_string()))
     }
 
-    /// Расшифровывает данные
+    /// Decrypts data
     ///
     /// # Arguments
-    /// * `encrypted` - зашифрованные данные
+    /// * `encrypted` - encrypted data
     ///
     /// # Returns
-    /// Расшифрованные данные
+    /// Decrypted data
     ///
     /// # Errors
-    /// - Неверная версия схемы
-    /// - Ошибка аутентификации (данные были изменены)
+    /// - Invalid scheme version
+    /// - Authentication error (data was modified)
     pub fn decrypt(&self, encrypted: &EncryptedData) -> Result<Vec<u8>> {
-        // Проверяем версию
+        // Check version
         if encrypted.version != CRYPTO_VERSION {
             return Err(CryptoError::UnsupportedVersion(encrypted.version));
         }
 
-        // Проверяем размер nonce
+        // Check nonce size
         if encrypted.nonce.len() != AES_NONCE_SIZE {
             return Err(CryptoError::InvalidNonceSize {
                 expected: AES_NONCE_SIZE,
@@ -178,19 +178,19 @@ impl AesKey {
         let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&self.key));
         let nonce = Nonce::from_slice(&encrypted.nonce);
 
-        // Расшифровываем и верифицируем authentication tag
+        // Decrypt and verify the authentication tag
         cipher
             .decrypt(nonce, encrypted.ciphertext.as_ref())
             .map_err(|_| CryptoError::AesDecryption("Authentication failed".to_string()))
     }
 
-    /// Шифрует данные и возвращает как base64
+    /// Encrypts data and returns it as base64
     pub fn encrypt_to_base64(&self, plaintext: &[u8]) -> Result<String> {
         let encrypted = self.encrypt(plaintext)?;
         encrypted.to_base64()
     }
 
-    /// Расшифровывает данные из base64
+    /// Decrypts data from base64
     pub fn decrypt_from_base64(&self, base64_data: &str) -> Result<Vec<u8>> {
         let encrypted = EncryptedData::from_base64(base64_data)?;
         self.decrypt(&encrypted)
@@ -203,18 +203,18 @@ impl std::fmt::Debug for AesKey {
     }
 }
 
-/// Утилита для шифрования файлов по частям (streaming)
+/// Utility for encrypting files in chunks (streaming)
 pub struct AesStreamEncryptor {
     key: AesKey,
     chunk_size: usize,
 }
 
 impl AesStreamEncryptor {
-    /// Создаёт новый streaming encryptor
+    /// Creates a new streaming encryptor
     ///
     /// # Arguments
-    /// * `key` - AES ключ
-    /// * `chunk_size` - размер чанка в байтах (по умолчанию 1MB)
+    /// * `key` - AES key
+    /// * `chunk_size` - chunk size in bytes (defaults to 1 MB)
     pub fn new(key: AesKey, chunk_size: Option<usize>) -> Self {
         Self {
             key,
@@ -222,17 +222,17 @@ impl AesStreamEncryptor {
         }
     }
 
-    /// Шифрует данные по чанкам
+    /// Encrypts data in chunks
     ///
     /// # Returns
-    /// Вектор зашифрованных чанков
+    /// Vector of encrypted chunks
     pub fn encrypt_chunks(&self, data: &[u8]) -> Result<Vec<EncryptedData>> {
         data.chunks(self.chunk_size)
             .map(|chunk| self.key.encrypt(chunk))
             .collect()
     }
 
-    /// Расшифровывает чанки и собирает в единый вектор
+    /// Decrypts chunks and combines them into a single vector
     pub fn decrypt_chunks(&self, chunks: &[EncryptedData]) -> Result<Vec<u8>> {
         let mut result = Vec::new();
         for chunk in chunks {
@@ -242,7 +242,7 @@ impl AesStreamEncryptor {
         Ok(result)
     }
 
-    /// Возвращает ссылку на ключ
+    /// Returns a reference to the key
     pub fn key(&self) -> &AesKey {
         &self.key
     }
@@ -257,7 +257,7 @@ mod tests {
         let key1 = AesKey::generate();
         let key2 = AesKey::generate();
 
-        // Ключи должны быть разными
+        // Keys must be different
         assert_ne!(key1.as_bytes(), key2.as_bytes());
         assert_eq!(key1.as_bytes().len(), AES_KEY_SIZE);
     }
@@ -290,7 +290,7 @@ mod tests {
 
     #[test]
     fn test_key_from_bytes_invalid_size() {
-        let bytes = [42u8; 16]; // Неверный размер
+        let bytes = [42u8; 16]; // Invalid size
         let result = AesKey::from_bytes(&bytes);
         assert!(matches!(result, Err(CryptoError::InvalidKeySize { .. })));
     }
@@ -346,7 +346,7 @@ mod tests {
         let plaintext = b"Secret message";
 
         let mut encrypted = key.encrypt(plaintext).unwrap();
-        // Изменяем ciphertext
+        // Modify the ciphertext
         if let Some(byte) = encrypted.ciphertext.get_mut(0) {
             *byte ^= 0xFF;
         }
@@ -374,7 +374,7 @@ mod tests {
         let data: Vec<u8> = (0..500).map(|i| (i % 256) as u8).collect();
         let chunks = encryptor.encrypt_chunks(&data).unwrap();
 
-        // Должно быть 5 чанков (500 / 100)
+        // Should be 5 chunks (500 / 100)
         assert_eq!(chunks.len(), 5);
 
         let decrypted = encryptor.decrypt_chunks(&chunks).unwrap();
@@ -389,9 +389,9 @@ mod tests {
         let encrypted1 = key.encrypt(plaintext).unwrap();
         let encrypted2 = key.encrypt(plaintext).unwrap();
 
-        // Nonces должны быть разными
+        // Nonces must be different
         assert_ne!(encrypted1.nonce, encrypted2.nonce);
-        // Ciphertext тоже разный (из-за разных nonces)
+        // Ciphertext is also different (because of different nonces)
         assert_ne!(encrypted1.ciphertext, encrypted2.ciphertext);
     }
 }

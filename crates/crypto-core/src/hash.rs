@@ -1,42 +1,42 @@
-//! Утилиты хеширования для верификации данных
+//! Hashing utilities for data verification
 //!
-//! Использует SHA-256 для совместимости и BLAKE3 для производительности.
+//! Uses SHA-256 for compatibility and BLAKE3 for performance.
 
 use sha2::{Digest, Sha256};
 
-/// Вычисляет SHA-256 хеш данных
+/// Computes the SHA-256 hash of data
 pub fn sha256(data: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(data);
     hasher.finalize().into()
 }
 
-/// Вычисляет SHA-256 хеш и возвращает как hex-строку
+/// Computes the SHA-256 hash and returns it as a hex string
 pub fn sha256_hex(data: &[u8]) -> String {
     hex::encode(sha256(data))
 }
 
-/// Вычисляет SHA-256 хеш с префиксом "sha256:"
+/// Computes the SHA-256 hash with the "sha256:" prefix
 pub fn sha256_prefixed(data: &[u8]) -> String {
     format!("sha256:{}", sha256_hex(data))
 }
 
-/// Вычисляет BLAKE3 хеш данных (быстрее SHA-256)
+/// Computes the BLAKE3 hash of data (faster than SHA-256)
 pub fn blake3(data: &[u8]) -> [u8; 32] {
     blake3::hash(data).into()
 }
 
-/// Вычисляет BLAKE3 хеш и возвращает как hex-строку
+/// Computes the BLAKE3 hash and returns it as a hex string
 pub fn blake3_hex(data: &[u8]) -> String {
     hex::encode(blake3(data))
 }
 
-/// Вычисляет BLAKE3 хеш с префиксом "blake3:"
+/// Computes the BLAKE3 hash with the "blake3:" prefix
 pub fn blake3_prefixed(data: &[u8]) -> String {
     format!("blake3:{}", blake3_hex(data))
 }
 
-/// Инкрементальный hasher для больших файлов
+/// Incremental hasher for large files
 pub struct StreamingHasher {
     sha256: Sha256,
     blake3: blake3::Hasher,
@@ -44,7 +44,7 @@ pub struct StreamingHasher {
 }
 
 impl StreamingHasher {
-    /// Создаёт новый streaming hasher
+    /// Creates a new streaming hasher
     pub fn new() -> Self {
         Self {
             sha256: Sha256::new(),
@@ -53,19 +53,19 @@ impl StreamingHasher {
         }
     }
 
-    /// Добавляет данные в hasher
+    /// Adds data to the hasher
     pub fn update(&mut self, data: &[u8]) {
         self.sha256.update(data);
         self.blake3.update(data);
         self.bytes_processed += data.len() as u64;
     }
 
-    /// Возвращает количество обработанных байт
+    /// Returns the number of processed bytes
     pub fn bytes_processed(&self) -> u64 {
         self.bytes_processed
     }
 
-    /// Финализирует и возвращает оба хеша
+    /// Finalizes and returns both hashes
     pub fn finalize(self) -> HashResult {
         HashResult {
             sha256: self.sha256.finalize().into(),
@@ -81,47 +81,47 @@ impl Default for StreamingHasher {
     }
 }
 
-/// Результат хеширования
+/// Hashing result
 #[derive(Debug, Clone)]
 pub struct HashResult {
-    /// SHA-256 хеш
+    /// SHA-256 hash
     pub sha256: [u8; 32],
-    /// BLAKE3 хеш
+    /// BLAKE3 hash
     pub blake3: [u8; 32],
-    /// Количество обработанных байт
+    /// Number of processed bytes
     pub bytes_processed: u64,
 }
 
 impl HashResult {
-    /// SHA-256 как hex-строка
+    /// SHA-256 as a hex string
     pub fn sha256_hex(&self) -> String {
         hex::encode(self.sha256)
     }
 
-    /// BLAKE3 как hex-строка
+    /// BLAKE3 as a hex string
     pub fn blake3_hex(&self) -> String {
         hex::encode(self.blake3)
     }
 
-    /// SHA-256 с префиксом
+    /// SHA-256 with prefix
     pub fn sha256_prefixed(&self) -> String {
         format!("sha256:{}", self.sha256_hex())
     }
 
-    /// BLAKE3 с префиксом
+    /// BLAKE3 with prefix
     pub fn blake3_prefixed(&self) -> String {
         format!("blake3:{}", self.blake3_hex())
     }
 }
 
-/// Проверяет соответствие хеша
+/// Checks whether the hash matches
 pub fn verify_hash(data: &[u8], expected: &str) -> bool {
     if let Some(hex_hash) = expected.strip_prefix("sha256:") {
         sha256_hex(data) == hex_hash
     } else if let Some(hex_hash) = expected.strip_prefix("blake3:") {
         blake3_hex(data) == hex_hash
     } else {
-        // Пробуем как SHA-256 без префикса
+        // Try as SHA-256 without a prefix
         sha256_hex(data) == expected
     }
 }
@@ -137,10 +137,10 @@ mod tests {
 
         assert_eq!(hash.len(), 32);
 
-        // Тот же вход = тот же хеш
+        // Same input = same hash
         assert_eq!(sha256(data), hash);
 
-        // Другой вход = другой хеш
+        // Different input = different hash
         assert_ne!(sha256(b"Hello, World!"), hash);
     }
 

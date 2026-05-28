@@ -1,7 +1,7 @@
-//! Commitment scheme для верификации AES-ключа
+//! Commitment scheme for AES key verification
 //!
-//! Используется для проверки что полученный ключ соответствует
-//! тому, что был использован при создании vault.
+//! Used to check that the received key matches
+//! the key that was used when creating the vault.
 
 use crate::aes::AesKey;
 use crate::error::{CryptoError, Result};
@@ -10,34 +10,34 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
-/// Размер nonce в байтах
+/// Nonce size in bytes
 pub const NONCE_SIZE: usize = 16;
 
-/// Размер commitment (SHA256 hash)
+/// Commitment size (SHA256 hash)
 pub const COMMITMENT_SIZE: usize = 32;
 
-/// Commitment для AES-ключа
+/// Commitment for an AES key
 ///
 /// commitment = SHA256(aes_key || nonce)
 ///
-/// Записывается в NFT URI при создании vault.
-/// Позволяет получателю проверить что ключ правильный.
+/// Written to the NFT URI when creating the vault.
+/// Allows the recipient to check that the key is correct.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyCommitment {
     /// SHA256(aes_key || nonce)
     commitment: [u8; COMMITMENT_SIZE],
-    /// Случайный nonce
+    /// Random nonce
     nonce: [u8; NONCE_SIZE],
 }
 
 impl KeyCommitment {
-    /// Создаёт commitment для AES-ключа
+    /// Creates a commitment for an AES key
     ///
     /// # Arguments
-    /// * `aes_key` - AES-256 ключ для которого создаётся commitment
+    /// * `aes_key` - AES-256 key for which the commitment is created
     ///
     /// # Returns
-    /// * KeyCommitment с случайным nonce
+    /// * KeyCommitment with a random nonce
     pub fn create(aes_key: &AesKey) -> Self {
         let mut nonce = [0u8; NONCE_SIZE];
         rand::thread_rng().fill_bytes(&mut nonce);
@@ -47,13 +47,13 @@ impl KeyCommitment {
         Self { commitment, nonce }
     }
 
-    /// Создаёт commitment с заданным nonce (для тестов)
+    /// Creates a commitment with a given nonce (for tests)
     pub fn create_with_nonce(aes_key: &AesKey, nonce: [u8; NONCE_SIZE]) -> Self {
         let commitment = Self::compute_hash(aes_key.as_bytes(), &nonce);
         Self { commitment, nonce }
     }
 
-    /// Вычисляет SHA256(aes_key || nonce)
+    /// Computes SHA256(aes_key || nonce)
     fn compute_hash(aes_key: &[u8], nonce: &[u8]) -> [u8; COMMITMENT_SIZE] {
         let mut hasher = Sha256::new();
         hasher.update(aes_key);
@@ -61,13 +61,13 @@ impl KeyCommitment {
         hasher.finalize().into()
     }
 
-    /// Проверяет что AES-ключ соответствует commitment
+    /// Checks that the AES key matches the commitment
     ///
     /// # Arguments
-    /// * `aes_key` - ключ для проверки
+    /// * `aes_key` - key to check
     ///
     /// # Returns
-    /// * true если ключ соответствует commitment
+    /// * true if the key matches the commitment
     pub fn verify(&self, aes_key: &AesKey) -> bool {
         let computed = Self::compute_hash(aes_key.as_bytes(), &self.nonce);
         // MED-01 FIX: Use subtle crate for constant-time comparison.
@@ -75,34 +75,34 @@ impl KeyCommitment {
         computed.ct_eq(&self.commitment).into()
     }
 
-    /// Возвращает commitment как hex строку
+    /// Returns the commitment as a hex string
     pub fn commitment_hex(&self) -> String {
         hex::encode(self.commitment)
     }
 
-    /// Возвращает nonce как hex строку
+    /// Returns the nonce as a hex string
     pub fn nonce_hex(&self) -> String {
         hex::encode(self.nonce)
     }
 
-    /// Возвращает commitment bytes
+    /// Returns commitment bytes
     pub fn commitment_bytes(&self) -> &[u8; COMMITMENT_SIZE] {
         &self.commitment
     }
 
-    /// Возвращает nonce bytes
+    /// Returns nonce bytes
     pub fn nonce_bytes(&self) -> &[u8; NONCE_SIZE] {
         &self.nonce
     }
 
-    /// Формирует URI для NFT
+    /// Builds the NFT URI
     ///
     /// Format: "xvault:{commitment_hex}"
     pub fn to_nft_uri(&self) -> String {
         format!("xvault:{}", self.commitment_hex())
     }
 
-    /// Создаёт из hex строк
+    /// Creates from hex strings
     pub fn from_hex(commitment_hex: &str, nonce_hex: &str) -> Result<Self> {
         let commitment_bytes = hex::decode(commitment_hex)
             .map_err(|e| CryptoError::InvalidData(format!("Invalid commitment hex: {}", e)))?;
@@ -135,7 +135,7 @@ impl KeyCommitment {
         Ok(Self { commitment, nonce })
     }
 
-    /// Парсит commitment из NFT URI
+    /// Parses the commitment from an NFT URI
     ///
     /// Format: "xvault:{commitment_hex}"
     pub fn parse_nft_uri(uri: &str) -> Result<[u8; COMMITMENT_SIZE]> {
@@ -173,7 +173,7 @@ mod tests {
         let aes_key = AesKey::generate();
         let commitment = KeyCommitment::create(&aes_key);
 
-        // Верификация должна пройти
+        // Verification should pass
         assert!(commitment.verify(&aes_key));
     }
 
@@ -183,7 +183,7 @@ mod tests {
         let aes_key2 = AesKey::generate();
         let commitment = KeyCommitment::create(&aes_key1);
 
-        // С другим ключом не пройдёт
+        // It should not pass with a different key
         assert!(!commitment.verify(&aes_key2));
     }
 
@@ -205,10 +205,10 @@ mod tests {
         let c1 = KeyCommitment::create(&aes_key);
         let c2 = KeyCommitment::create(&aes_key);
 
-        // Разные nonce → разные commitment
+        // Different nonces produce different commitments
         assert_ne!(c1.commitment_hex(), c2.commitment_hex());
 
-        // Но оба верифицируют тот же ключ
+        // But both verify the same key
         assert!(c1.verify(&aes_key));
         assert!(c2.verify(&aes_key));
     }
