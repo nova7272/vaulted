@@ -1,6 +1,6 @@
-//! HTTP клиент для Oracle API
+//! HTTP client for the Oracle API
 //!
-//! Все операции требуют JWT токен авторизации.
+//! All operations require a JWT authorization token.
 
 use reqwest::Client;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -8,7 +8,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use crate::crypto::FileManifest;
 use crate::error::{ClientError, Result};
 
-/// Конфигурация Oracle клиента
+/// Oracle client configuration
 #[derive(Debug, Clone)]
 pub struct OracleConfig {
     pub base_url: String,
@@ -30,7 +30,7 @@ impl Default for OracleConfig {
     }
 }
 
-/// HTTP клиент для Oracle API
+/// HTTP client for the Oracle API
 pub struct OracleClient {
     client: Client,
     config: OracleConfig,
@@ -39,7 +39,7 @@ pub struct OracleClient {
 }
 
 impl OracleClient {
-    /// Создаёт новый клиент с optional certificate pinning
+    /// Creates a new client with optional certificate pinning
     pub fn new(config: OracleConfig) -> Result<Self> {
         let mut builder = Client::builder()
             .timeout(std::time::Duration::from_secs(config.timeout_secs))
@@ -88,7 +88,7 @@ impl OracleClient {
         })
     }
 
-    /// Устанавливает токен авторизации
+    /// Sets the authorization token
     pub fn set_auth_token(&mut self, token: String) {
         self.auth_token = Some(token);
     }
@@ -98,7 +98,7 @@ impl OracleClient {
         self.device_fingerprint = Some(fingerprint);
     }
 
-    /// Возвращает базовый URL
+    /// Returns the base URL
     pub fn base_url(&self) -> &str {
         &self.config.base_url
     }
@@ -114,7 +114,7 @@ impl OracleClient {
         request
     }
 
-    /// Выполняет GET запрос
+    /// Performs a GET request
     async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         let url = format!("{}{}", self.config.base_url, path);
         let request = self.apply_headers(self.client.get(&url));
@@ -123,7 +123,7 @@ impl OracleClient {
         self.handle_response(response).await
     }
 
-    /// Выполняет POST запрос
+    /// Performs a POST request
     async fn post<T: DeserializeOwned, B: Serialize>(&self, path: &str, body: &B) -> Result<T> {
         let url = format!("{}{}", self.config.base_url, path);
         let request = self.apply_headers(self.client.post(&url).json(body));
@@ -132,7 +132,7 @@ impl OracleClient {
         self.handle_response(response).await
     }
 
-    /// Обрабатывает ответ
+    /// Handles the response
     async fn handle_response<T: DeserializeOwned>(&self, response: reqwest::Response) -> Result<T> {
         let status = response.status();
 
@@ -287,7 +287,7 @@ impl OracleClient {
 
     // ==================== User API ====================
 
-    /// Регистрирует пользователя (или обновляет PRE публичный ключ)
+    /// Registers a user (or updates the PRE public key)
     pub async fn register_user(
         &self,
         request: &RegisterUserRequest,
@@ -295,7 +295,7 @@ impl OracleClient {
         self.post("/api/v1/users/register", request).await
     }
 
-    /// Получает публичный ключ PRE пользователя
+    /// Gets the user PRE public key
     pub async fn get_user_public_key(&self, wallet_address: &str) -> Result<UserPublicKeyResponse> {
         self.get(&format!("/api/v1/users/{}/public-key", wallet_address))
             .await
@@ -471,7 +471,7 @@ impl OracleClient {
 
     // ==================== File API ====================
 
-    /// Регистрирует зашифрованный файл с привязкой к NFT
+    /// Registers an encrypted file linked to an NFT
     pub async fn register_file(
         &self,
         request: &RegisterFileRequest,
@@ -479,13 +479,13 @@ impl OracleClient {
         self.post("/api/v1/files/register", request).await
     }
 
-    /// Запрашивает доступ к файлу по NFT
+    /// Requests file access by NFT
     pub async fn request_file_access(&self, nft_token_id: &str) -> Result<FileAccessResponse> {
         self.get(&format!("/api/v1/files/{}/access", nft_token_id))
             .await
     }
 
-    /// Получает URL для загрузки фрагмента
+    /// Gets a fragment upload URL
     pub async fn get_fragment_upload_url(
         &self,
         request: &FragmentUploadRequest,
@@ -494,7 +494,7 @@ impl OracleClient {
             .await
     }
 
-    /// Подтверждает загрузку фрагмента
+    /// Confirms fragment upload
     pub async fn confirm_fragment_upload(&self, request: &ConfirmUploadRequest) -> Result<()> {
         self.post("/api/v1/files/fragments/confirm", request).await
     }
@@ -522,7 +522,7 @@ impl OracleClient {
         self.post("/api/v1/vault/finalize-mint", request).await
     }
 
-    /// Получает статус vault
+    /// Gets vault status
     pub async fn get_vault_status(&self, vault_id: &str) -> Result<VaultStatusResponse> {
         self.get(&format!("/api/v1/vault/{}", vault_id)).await
     }
@@ -538,7 +538,7 @@ impl OracleClient {
 
     // ==================== Transfer API ====================
 
-    /// Инициирует передачу NFT (PRE перешифровку)
+    /// Initiates NFT transfer (PRE re-encryption)
     pub async fn initiate_transfer(
         &self,
         nft_token_id: &str,
@@ -555,13 +555,13 @@ impl OracleClient {
         self.post("/api/v1/transfers/initiate", &request).await
     }
 
-    /// Проверяет статус передачи
+    /// Checks transfer status
     pub async fn get_transfer_status(&self, transfer_id: &str) -> Result<TransferStatusResponse> {
         self.get(&format!("/api/v1/transfers/{}/status", transfer_id))
             .await
     }
 
-    /// Завершает передачу после подтверждения на блокчейне
+    /// Completes transfer after blockchain confirmation
     pub async fn complete_transfer(
         &self,
         request: &CompleteTransferRequest,
@@ -585,7 +585,7 @@ impl OracleClient {
 
     // ==================== NFT API ====================
 
-    /// Получает метаданные NFT
+    /// Gets NFT metadata
     pub async fn get_nft_metadata(&self, nft_token_id: &str) -> Result<NftMetadataResponse> {
         self.get(&format!("/api/v1/nfts/{}/metadata", nft_token_id))
             .await
@@ -859,7 +859,7 @@ pub struct QrFileGrantConfirmResponse {
 
 // ==================== User Types ====================
 
-/// Запрос регистрации пользователя
+/// User registration request
 #[derive(Debug, Serialize)]
 pub struct RegisterUserRequest {
     pub wallet_address: String,
@@ -867,7 +867,7 @@ pub struct RegisterUserRequest {
     pub signature: String,
 }
 
-/// Ответ регистрации пользователя
+/// User registration response
 #[derive(Debug, Deserialize)]
 pub struct RegisterUserResponse {
     pub user_id: String,
@@ -875,7 +875,7 @@ pub struct RegisterUserResponse {
     pub created: bool,
 }
 
-/// Ответ с публичным ключом пользователя
+/// User public key response
 #[derive(Debug, Deserialize)]
 pub struct UserPublicKeyResponse {
     pub wallet_address: String,
@@ -1054,7 +1054,7 @@ pub struct GrantResponse {
 
 // ==================== File Types ====================
 
-/// Запрос регистрации файла
+/// File registration request
 #[derive(Debug, Serialize)]
 pub struct RegisterFileRequest {
     pub nft_token_id: String,
@@ -1063,7 +1063,7 @@ pub struct RegisterFileRequest {
     pub metadata_hash: String,
 }
 
-/// Ответ регистрации файла
+/// File registration response
 #[derive(Debug, Deserialize)]
 pub struct RegisterFileResponse {
     pub file_id: String,
@@ -1071,7 +1071,7 @@ pub struct RegisterFileResponse {
     pub fragments_count: u32,
 }
 
-/// Ответ с доступом к файлу
+/// File access response
 #[derive(Debug, Deserialize)]
 pub struct FileAccessResponse {
     pub nft_token_id: String,
@@ -1081,7 +1081,7 @@ pub struct FileAccessResponse {
     pub fragment_urls: Vec<FragmentDownloadInfo>,
 }
 
-/// Информация для скачивания фрагмента
+/// Fragment download information
 #[derive(Debug, Deserialize)]
 pub struct FragmentDownloadInfo {
     pub index: u32,
@@ -1090,7 +1090,7 @@ pub struct FragmentDownloadInfo {
     pub hash: String,
 }
 
-/// Запрос URL для загрузки фрагмента
+/// Fragment upload URL request
 #[derive(Debug, Serialize)]
 pub struct FragmentUploadRequest {
     pub file_id: String,
@@ -1099,7 +1099,7 @@ pub struct FragmentUploadRequest {
     pub fragment_size: u64,
 }
 
-/// Ответ с URL для загрузки
+/// Upload URL response
 #[derive(Debug, Deserialize)]
 pub struct FragmentUploadResponse {
     pub upload_url: String,
@@ -1107,7 +1107,7 @@ pub struct FragmentUploadResponse {
     pub storage_key: String,
 }
 
-/// Подтверждение загрузки фрагмента
+/// Fragment upload confirmation
 #[derive(Debug, Serialize)]
 pub struct ConfirmUploadRequest {
     pub file_id: String,
@@ -1118,7 +1118,7 @@ pub struct ConfirmUploadRequest {
 
 // ==================== Vault Types ====================
 
-/// Запрос создания vault
+/// Vault creation request
 #[derive(Debug, Serialize)]
 pub struct CreateVaultRequest {
     pub wallet_address: String,
@@ -1128,7 +1128,7 @@ pub struct CreateVaultRequest {
     pub manifest: VaultManifest,
 }
 
-/// Манифест для Vault API
+/// Manifest for the Vault API
 #[derive(Debug, Serialize)]
 pub struct VaultManifest {
     pub encrypted_filename: String,
@@ -1138,7 +1138,7 @@ pub struct VaultManifest {
     pub fragments: Vec<VaultFragment>,
 }
 
-/// Фрагмент для Vault API
+/// Fragment for the Vault API
 #[derive(Debug, Serialize)]
 pub struct VaultFragment {
     pub index: u32,
@@ -1148,7 +1148,7 @@ pub struct VaultFragment {
     pub size: u64,
 }
 
-/// Ответ подготовки vault. `nft_token_id` is a temporary upload key until local mint finalization.
+/// Vault preparation response. `nft_token_id` is a temporary upload key until local mint finalization.
 #[derive(Debug, Deserialize)]
 pub struct CreateVaultResponse {
     pub vault_id: String,
@@ -1193,7 +1193,7 @@ pub struct FinalizeVaultMintResponse {
     pub status: String,
 }
 
-/// Статус vault
+/// Vault status
 #[derive(Debug, Deserialize)]
 pub struct VaultStatusResponse {
     pub vault_id: String,
@@ -1214,7 +1214,7 @@ pub struct VaultMintRecoveryResponse {
 
 // ==================== Transfer Types ====================
 
-/// Запрос на передачу NFT
+/// NFT transfer request
 #[derive(Debug, Serialize)]
 pub struct TransferRequest {
     pub nft_token_id: String,
@@ -1223,7 +1223,7 @@ pub struct TransferRequest {
     pub re_encryption_key: String,
 }
 
-/// Ответ инициирования трансфера
+/// Transfer initiation response
 #[derive(Debug, Deserialize)]
 pub struct InitiateTransferResponse {
     pub transfer_id: String,
@@ -1231,7 +1231,7 @@ pub struct InitiateTransferResponse {
     pub signing_request_uri: Option<String>,
 }
 
-/// Статус передачи
+/// Transfer status
 #[derive(Debug, Deserialize)]
 pub struct TransferStatusResponse {
     pub transfer_id: String,
@@ -1240,14 +1240,14 @@ pub struct TransferStatusResponse {
     pub error: Option<String>,
 }
 
-/// Завершение передачи
+/// Transfer completion
 #[derive(Debug, Serialize)]
 pub struct CompleteTransferRequest {
     pub transfer_id: String,
     pub xrpl_tx_hash: String,
 }
 
-/// Ответ завершения передачи
+/// Transfer completion response
 #[derive(Debug, Deserialize)]
 pub struct CompleteTransferResponse {
     pub success: bool,
@@ -1278,7 +1278,7 @@ pub struct TransferLookupResponse {
 
 // ==================== NFT Types ====================
 
-/// Метаданные NFT
+/// NFT metadata
 #[derive(Debug, Deserialize)]
 pub struct NftMetadataResponse {
     pub nft_token_id: String,

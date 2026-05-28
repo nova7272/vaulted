@@ -39,7 +39,7 @@ export default function ProgressBar({ operationId, onComplete, hideOnScreens, cu
     const unlisten = listen<ProgressEvent>('file-progress', (event) => {
       const data = event.payload
 
-      // Фильтруем по operationId если указан
+      // Filter by operationId if specified
       if (operationId && data.operationId !== operationId) {
         return
       }
@@ -47,7 +47,7 @@ export default function ProgressBar({ operationId, onComplete, hideOnScreens, cu
       setProgress(data)
       setVisible(true)
 
-      // Скрываем через 2 секунды после завершения
+      // Hide 2 seconds after completion
       if (data.stage === 'complete') {
         setTimeout(() => {
           setVisible(false)
@@ -142,7 +142,7 @@ export default function ProgressBar({ operationId, onComplete, hideOnScreens, cu
   )
 }
 
-// Hook для использования в компонентах
+// Hook for use in components
 export function useFileProgress() {
   const [activeProgress, setActiveProgress] = useState<ProgressEvent | null>(null)
 

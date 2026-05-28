@@ -1,6 +1,6 @@
-//! XRPL интеграция
+//! XRPL integration
 //!
-//! Работа с XLS-20 NFT через WebSocket подключение к XRPL ноде.
+//! Works with XLS-20 NFTs through a WebSocket connection to an XRPL node.
 
 pub mod client;
 pub mod escrow;

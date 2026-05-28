@@ -1,6 +1,6 @@
-//! Управление криптографическими ключами
+//! Cryptographic key management
 //!
-//! Интеграция с crypto-core для PRE операций.
+//! Integration with crypto-core for PRE operations.
 
 use xrpl_vault_crypto_core::{
     DerivedKeys, EncryptedPreData, PreKeyPair, PrePublicKey, ProxyReEncryption,
@@ -8,32 +8,32 @@ use xrpl_vault_crypto_core::{
 
 use crate::error::Result;
 
-/// Менеджер ключей
+/// Key manager
 pub struct KeyManager {
     pre: ProxyReEncryption,
 }
 
 impl KeyManager {
-    /// Создаёт новый менеджер
+    /// Creates a new manager
     pub fn new() -> Self {
         Self {
             pre: ProxyReEncryption::new(),
         }
     }
 
-    /// Генерирует случайную пару ключей PRE
+    /// Generates a random PRE keypair
     pub fn generate_keypair(&self) -> PreKeyPair {
         self.pre.generate_keypair()
     }
 
-    /// Генерирует keypair из seed (детерминистично)
+    /// Generates a keypair from a seed (deterministically)
     pub fn generate_keypair_from_seed(&self, seed: &[u8; 32]) -> Result<PreKeyPair> {
         self.pre
             .generate_keypair_from_seed(seed)
             .map_err(Into::into)
     }
 
-    /// Деривирует PRE ключи из подписи XRPL кошелька
+    /// Derives PRE keys from an XRPL wallet signature
     pub fn derive_keys_from_signature(
         &self,
         signature: &[u8],
@@ -42,22 +42,22 @@ impl KeyManager {
         DerivedKeys::from_signature(signature, wallet_address).map_err(Into::into)
     }
 
-    /// Импортирует публичный ключ из bytes
+    /// Imports a public key from bytes
     pub fn import_public_key(&self, bytes: &[u8]) -> Result<PrePublicKey> {
         PrePublicKey::from_bytes(bytes).map_err(Into::into)
     }
 
-    /// Импортирует публичный ключ из hex
+    /// Imports a public key from hex
     pub fn import_public_key_hex(&self, hex_str: &str) -> Result<PrePublicKey> {
         PrePublicKey::from_hex(hex_str).map_err(Into::into)
     }
 
-    /// Шифрует данные для получателя
+    /// Encrypts data for the recipient
     pub fn encrypt(&self, public_key: &PrePublicKey, data: &[u8]) -> Result<EncryptedPreData> {
         self.pre.encrypt(public_key, data).map_err(Into::into)
     }
 
-    /// Расшифровывает данные
+    /// Decrypts data
     pub fn decrypt(&self, keypair: &PreKeyPair, encrypted: &EncryptedPreData) -> Result<Vec<u8>> {
         self.pre.decrypt(keypair, encrypted).map_err(Into::into)
     }
@@ -69,16 +69,16 @@ impl Default for KeyManager {
     }
 }
 
-/// Информация о передаче NFT
+/// NFT transfer information
 #[derive(Debug, Clone)]
 pub struct TransferInfo {
     /// NFT Token ID
     pub nft_token_id: String,
-    /// Адрес текущего владельца
+    /// Current owner address
     pub from_address: String,
-    /// Адрес нового владельца
+    /// New owner address
     pub to_address: String,
-    /// Публичный ключ PRE нового владельца (hex)
+    /// New owner PRE public key (hex)
     pub to_public_key: String,
 }
 

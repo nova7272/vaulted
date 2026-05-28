@@ -1,82 +1,82 @@
-//! Типы ошибок клиентского приложения
+//! Client application error types
 
 use thiserror::Error;
 
-/// Результат операций клиента
+/// Client operation result
 pub type Result<T> = std::result::Result<T, ClientError>;
 
-/// Ошибки клиентского приложения
+/// Client application errors
 #[derive(Error, Debug)]
 pub enum ClientError {
-    /// Ошибка авторизации
+    /// Authorization error
     #[error("Authentication failed: {0}")]
     Auth(String),
 
-    /// Ошибка валидации
+    /// Validation error
     #[error("Validation error: {0}")]
     Validation(String),
 
-    /// Ошибка внешнего wallet/signing layer
+    /// External wallet/signing layer error
     #[error("External wallet error: {0}")]
     ExternalWallet(String),
 
-    /// Сессия не найдена
+    /// Session not found
     #[error("No active session. Please login first.")]
     NoSession,
 
-    /// Сессия истекла
+    /// Session expired
     #[error("Session expired. Please login again.")]
     SessionExpired,
 
-    /// Ошибка криптографии
+    /// Cryptography error
     #[error("Crypto error: {0}")]
     Crypto(#[from] xrpl_vault_crypto_core::CryptoError),
 
-    /// Ошибка XRPL
+    /// XRPL error
     #[error("XRPL error: {0}")]
     Xrpl(String),
 
-    /// NFT не найден
+    /// NFT not found
     #[error("NFT not found: {0}")]
     NftNotFound(String),
 
-    /// Пользователь не владелец NFT
+    /// User is not the NFT owner
     #[error("You are not the owner of this NFT")]
     NotNftOwner,
 
-    /// Ошибка Oracle API
+    /// Oracle API error
     #[error("Oracle API error: {0}")]
     Oracle(String),
 
-    /// Ошибка HTTP
+    /// HTTP error
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
 
-    /// Ошибка WebSocket
+    /// WebSocket error
     #[error("WebSocket error: {0}")]
     WebSocket(String),
 
-    /// Ошибка файловой системы
+    /// File system error
     #[error("File system error: {0}")]
     FileSystem(#[from] std::io::Error),
 
-    /// Файл слишком большой
+    /// File too large
     #[error("File too large: {size} bytes (max: {max} bytes)")]
     FileTooLarge { size: u64, max: u64 },
 
-    /// Ошибка keystore
-    /// Неверные данные
+    /// Keystore error
+    /// Invalid data
     #[error("Invalid data: {0}")]
     InvalidData(String),
 
     #[error("Keystore error: {0}")]
     Keystore(String),
 
-    /// Ошибка сериализации
+    /// Serialization error
     #[error("Serialization error: {0}")]
     Serialization(String),
 
-    /// Неверная конфигурация
+    /// Invalid configuration
     #[error("Configuration error: {0}")]
     Config(String),
 }

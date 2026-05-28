@@ -1,9 +1,9 @@
 //! Secure file transfer with local re-encryption
 //!
-//! ВСЯ КРИПТОГРАФИЯ ВЫПОЛНЯЕТСЯ ЛОКАЛЬНО.
-//! Oracle НЕ участвует в перешифровке.
+//! ALL CRYPTOGRAPHY IS PERFORMED LOCALLY.
+//! Oracle does NOT participate in re-encryption.
 //!
-//! Использует типы из crypto-core.
+//! Uses types from crypto-core.
 
 use crate::error::Result;
 use xrpl_vault_crypto_core::{
@@ -11,27 +11,27 @@ use xrpl_vault_crypto_core::{
     TransferProof, TransferService,
 };
 
-/// Сервис локальной перешифровки
+/// Local re-encryption service
 ///
-/// Обёртка над crypto-core::TransferService для desktop client
+/// Wrapper over crypto-core::TransferService for the desktop client
 pub struct LocalTransfer {
     pre: ProxyReEncryption,
 }
 
 impl LocalTransfer {
-    /// Создаёт новый сервис
+    /// Creates a new service
     pub fn new() -> Self {
         Self {
             pre: ProxyReEncryption::new(),
         }
     }
 
-    /// Создаёт commitment для нового файла
+    /// Creates a commitment for a new file
     pub fn create_commitment(&self, aes_key: &AesKey) -> KeyCommitment {
         KeyCommitment::create(aes_key)
     }
 
-    /// Шифрует AES-ключ для владельца
+    /// Encrypts the AES key for the owner
     pub fn encrypt_aes_key(
         &self,
         aes_key: &AesKey,
@@ -40,7 +40,7 @@ impl LocalTransfer {
         Ok(self.pre.encrypt(owner_public_key, aes_key.as_bytes())?)
     }
 
-    /// Перешифровывает AES-ключ для нового получателя
+    /// Re-encrypts the AES key for a new recipient
     pub fn re_encrypt_for_recipient(
         &self,
         encrypted_aes_key: &EncryptedPreData,
@@ -58,7 +58,7 @@ impl LocalTransfer {
         )?)
     }
 
-    /// Получатель проверяет и извлекает AES-ключ из transfer proof
+    /// Recipient verifies and extracts the AES key from the transfer proof
     pub fn accept_transfer(
         &self,
         proof: &TransferProof,
@@ -70,7 +70,7 @@ impl LocalTransfer {
         Ok(service.accept_transfer(proof, my_keypair, expected_commitment)?)
     }
 
-    /// Расшифровывает AES-ключ (для владельца файла)
+    /// Decrypts the AES key (for the file owner)
     pub fn decrypt_aes_key(
         &self,
         encrypted_aes_key: &EncryptedPreData,
@@ -113,10 +113,10 @@ mod tests {
         let aes_key = AesKey::generate();
         let commitment = transfer.create_commitment(&aes_key);
 
-        // Верификация должна пройти
+        // Verification should pass
         assert!(commitment.verify(&aes_key));
 
-        // С другим ключом - нет
+        // With a different key, it should not pass
         let other_key = AesKey::generate();
         assert!(!commitment.verify(&other_key));
     }
@@ -126,7 +126,7 @@ mod tests {
         let transfer = LocalTransfer::new();
         let pre = ProxyReEncryption::new();
 
-        // Alice создаёт файл
+        // Alice creates a file
         let alice = pre.generate_keypair();
         let bob = pre.generate_keypair();
 
@@ -136,7 +136,7 @@ mod tests {
             .encrypt_aes_key(&aes_key, &alice.public_key())
             .unwrap();
 
-        // Alice передаёт Bob
+        // Alice transfers to Bob
         let proof = transfer
             .re_encrypt_for_recipient(
                 &encrypted_for_alice,
@@ -146,7 +146,7 @@ mod tests {
             )
             .unwrap();
 
-        // Bob принимает
+        // Bob accepts
         let (received_key, is_valid) = transfer
             .accept_transfer(&proof, &bob, commitment.commitment_bytes())
             .unwrap();

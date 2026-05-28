@@ -1,6 +1,6 @@
 //! XRPL Vault Desktop Application
 //!
-//! Точка входа Tauri приложения.
+//! Tauri application entry point.
 
 #![cfg_attr(
     all(not(debug_assertions), target_os = "windows"),
@@ -76,9 +76,9 @@ fn configure_linux_display_backend() {
 fn configure_linux_display_backend() {}
 
 fn main() {
-    // Загружаем .env файл
+    // Load the .env file
     dotenvy::dotenv().ok();
-    // Инициализируем логирование
+    // Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
@@ -90,10 +90,10 @@ fn main() {
     tracing::info!("Starting XRPL Vault Desktop...");
     configure_linux_display_backend();
 
-    // Загружаем конфигурацию
+    // Load configuration
     let config = AppConfig::from_env();
 
-    // Создаём состояние приложения
+    // Create application state
     let state = AppState::new(config).expect("Failed to create app state");
 
     tracing::info!(
@@ -104,7 +104,7 @@ fn main() {
         "tauri_builder_setup_started"
     );
 
-    // Запускаем Tauri
+    // Start Tauri
     let builder = tauri::Builder::default()
         .manage(state)
         .plugin(tauri_plugin_shell::init())

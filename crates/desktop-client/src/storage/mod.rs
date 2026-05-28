@@ -1,6 +1,6 @@
-//! Локальное хранилище
+//! Local storage
 //!
-//! Безопасное хранение PRE ключей и кэш данных.
+//! Secure storage for PRE keys and cached data.
 
 mod keystore;
 

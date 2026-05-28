@@ -1,31 +1,31 @@
-//! NFT операции XLS-20
+//! XLS-20 NFT operations
 //!
-//! Минтинг NFT с метаданными зашифрованных файлов.
+//! NFT minting with encrypted file metadata.
 
 use serde::{Deserialize, Serialize};
 
 use super::client::XrplClient;
 use crate::error::{ClientError, Result};
 
-/// Операции с NFT
+/// NFT operations
 pub struct NftOperations<'a> {
     client: &'a XrplClient,
 }
 
 impl<'a> NftOperations<'a> {
-    /// Создаёт новый объект операций
+    /// Creates a new operations object
     pub fn new(client: &'a XrplClient) -> Self {
         Self { client }
     }
 
-    /// Проверяет владение NFT
+    /// Checks NFT ownership
     pub async fn verify_ownership(&self, nft_token_id: &str, wallet_address: &str) -> Result<bool> {
         self.client
             .verify_nft_owner(nft_token_id, wallet_address)
             .await
     }
 
-    /// Получает информацию о NFT
+    /// Gets NFT information
     pub async fn get_nft_info(&self, nft_token_id: &str, owner: &str) -> Result<NftInfo> {
         let nfts = self.client.account_nfts(owner).await?;
 
@@ -47,7 +47,7 @@ impl<'a> NftOperations<'a> {
         })
     }
 
-    /// Получает все NFT пользователя
+    /// Gets all user NFTs
     pub async fn list_user_nfts(&self, wallet_address: &str) -> Result<Vec<NftInfo>> {
         let nfts = self.client.account_nfts(wallet_address).await?;
 
@@ -67,9 +67,9 @@ impl<'a> NftOperations<'a> {
             .collect())
     }
 
-    /// Создаёт данные для транзакции NFTokenMint
+    /// Creates data for an NFTokenMint transaction
     ///
-    /// Транзакция должна быть подписана локально через Vaulted XRPL wallet
+    /// The transaction must be signed locally through the Vaulted XRPL wallet
     pub fn create_mint_transaction(&self, request: &NftMintRequest) -> NftMintTransaction {
         let uri_hex = string_to_hex(&request.uri);
 
@@ -83,13 +83,13 @@ impl<'a> NftOperations<'a> {
         }
     }
 
-    /// Создаёт данные для транзакции NFTokenCreateOffer (продажа/передача)
+    /// Creates data for an NFTokenCreateOffer transaction (sale/transfer)
     pub fn create_sell_offer_transaction(
         &self,
         owner: &str,
         nft_token_id: &str,
         destination: &str,
-        amount: &str, // "0" для бесплатной передачи
+        amount: &str, // "0" for free transfer
     ) -> NftCreateOfferTransaction {
         NftCreateOfferTransaction {
             transaction_type: "NFTokenCreateOffer".to_string(),
@@ -101,7 +101,7 @@ impl<'a> NftOperations<'a> {
         }
     }
 
-    /// Создаёт данные для принятия offer
+    /// Creates data for accepting an offer
     pub fn create_accept_offer_transaction(
         &self,
         buyer: &str,
@@ -124,46 +124,46 @@ const NFT_FLAG_TRANSFERABLE: u32 = 0x0008;
 // Offer Flags
 const NFT_OFFER_FLAG_SELL: u32 = 0x0001;
 
-/// Информация о NFT
+/// NFT information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NftInfo {
     /// NFT Token ID
     pub token_id: String,
-    /// Текущий владелец
+    /// Current owner
     pub owner: String,
-    /// Issuer (создатель)
+    /// Issuer (creator)
     pub issuer: String,
-    /// URI (обычно hash метаданных)
+    /// URI (usually metadata hash)
     pub uri: Option<String>,
     /// Flags
     pub flags: u32,
-    /// Комиссия при передаче (basis points)
+    /// Transfer fee (basis points)
     pub transfer_fee: Option<u64>,
-    /// Серийный номер
+    /// Serial number
     pub serial: u32,
-    /// Можно ли передавать
+    /// Whether it can be transferred
     pub is_transferable: bool,
-    /// Можно ли сжечь
+    /// Whether it can be burned
     pub is_burnable: bool,
 }
 
-/// Запрос на минт NFT
+/// NFT mint request
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NftMintRequest {
-    /// Адрес создателя (issuer)
+    /// Creator address (issuer)
     pub issuer: String,
-    /// URI (hash метаданных: "sha256:...")
+    /// URI (metadata hash: "sha256:...")
     pub uri: String,
-    /// Taxon (категория NFT)
+    /// Taxon (NFT category)
     pub taxon: u32,
-    /// Flags (по умолчанию: transferable)
+    /// Flags (default: transferable)
     pub flags: Option<u32>,
-    /// Комиссия при передаче (0-50000, basis points)
+    /// Transfer fee (0-50000, basis points)
     pub transfer_fee: Option<u32>,
 }
 
 impl NftMintRequest {
-    /// Создаёт запрос для XRPL Vault NFT
+    /// Creates a request for an XRPL Vault NFT
     pub fn for_vault(issuer: &str, metadata_hash: &str) -> Self {
         Self {
             issuer: issuer.to_string(),
@@ -175,10 +175,10 @@ impl NftMintRequest {
     }
 }
 
-/// Taxon для XRPL Vault NFT
+/// Taxon for XRPL Vault NFT
 pub const XRPL_VAULT_TAXON: u32 = 0x5652_4C54; // "VRLT" in hex
 
-/// Транзакция NFTokenMint
+/// NFTokenMint transaction
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NftMintTransaction {
     #[serde(rename = "TransactionType")]
@@ -195,7 +195,7 @@ pub struct NftMintTransaction {
     pub nftoken_taxon: u32,
 }
 
-/// Транзакция NFTokenCreateOffer
+/// NFTokenCreateOffer transaction
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NftCreateOfferTransaction {
     #[serde(rename = "TransactionType")]
@@ -212,7 +212,7 @@ pub struct NftCreateOfferTransaction {
     pub destination: Option<String>,
 }
 
-/// Транзакция NFTokenAcceptOffer
+/// NFTokenAcceptOffer transaction
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NftAcceptOfferTransaction {
     #[serde(rename = "TransactionType")]
@@ -223,7 +223,7 @@ pub struct NftAcceptOfferTransaction {
     pub nftoken_sell_offer: String,
 }
 
-/// Конвертирует строку в hex
+/// Converts a string to hex
 fn string_to_hex(s: &str) -> String {
     hex::encode(s.as_bytes()).to_uppercase()
 }
