@@ -1,24 +1,24 @@
-//! Координация storage nodes
+//! Storage node coordination
 //!
-//! Управление распределением фрагментов по хранилищам.
+//! Manages fragment distribution across storage backends.
 
 use sqlx::PgPool;
 
 use crate::error::Result;
 use crate::models::StorageNode;
 
-/// Сервис управления хранилищами
+/// Storage management service
 pub struct StorageService {
     db: PgPool,
 }
 
 impl StorageService {
-    /// Создаёт новый сервис
+    /// Creates a new service
     pub fn new(db: PgPool) -> Self {
         Self { db }
     }
 
-    /// Получает список активных storage nodes
+    /// Gets the list of active storage nodes
     pub async fn get_active_nodes(&self) -> Result<Vec<StorageNode>> {
         let nodes = sqlx::query_as::<_, StorageNode>(
             r#"
@@ -36,7 +36,7 @@ impl StorageService {
         Ok(nodes)
     }
 
-    /// Выбирает оптимальную ноду для загрузки
+    /// Selects the optimal node for upload
     pub async fn select_node_for_upload(
         &self,
         region_hint: Option<&str>,
@@ -72,7 +72,7 @@ impl StorageService {
         Ok(node)
     }
 
-    /// Обновляет health check статус
+    /// Updates the health check status
     pub async fn update_health_status(&self, node_id: &str, healthy: bool) -> Result<()> {
         if healthy {
             sqlx::query(

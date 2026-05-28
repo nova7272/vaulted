@@ -23,7 +23,7 @@ use axum::{
 use crate::middleware::RateLimiter;
 use crate::services::AppState;
 
-/// Создаёт роутер API
+/// Creates the API router
 pub fn create_router(auth_rate_limiter: RateLimiter) -> Router<AppState> {
     Router::new()
         // Health

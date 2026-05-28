@@ -1,12 +1,12 @@
-//! Миграции базы данных
+//! Database migrations
 //!
-//! Автоматический запуск SQL миграций при старте сервера.
+//! Automatically runs SQL migrations when the server starts.
 
 use sqlx::PgPool;
 use std::path::Path;
 use tracing::{info, warn};
 
-/// Результат миграции
+/// Migration result
 #[derive(Debug)]
 pub struct MigrationResult {
     pub total: usize,
@@ -14,15 +14,15 @@ pub struct MigrationResult {
     pub skipped: usize,
 }
 
-/// Запускает миграции из директории
+/// Runs migrations from a directory
 pub async fn run_migrations(
     pool: &PgPool,
     migrations_dir: &Path,
 ) -> anyhow::Result<MigrationResult> {
-    // Создаём таблицу миграций если не существует
+    // Create the migrations table if it does not exist
     ensure_migrations_table(pool).await?;
 
-    // Получаем список применённых миграций
+    // Get the list of applied migrations
     let applied: Vec<String> =
         sqlx::query_scalar("SELECT name FROM _migrations ORDER BY applied_at")
             .fetch_all(pool)
@@ -30,7 +30,7 @@ pub async fn run_migrations(
 
     info!("Found {} previously applied migrations", applied.len());
 
-    // Читаем файлы миграций
+    // Read migration files
     let mut migration_files: Vec<_> = std::fs::read_dir(migrations_dir)?
         .filter_map(|entry| entry.ok())
         .filter(|entry| {
@@ -42,7 +42,7 @@ pub async fn run_migrations(
         })
         .collect();
 
-    // Сортируем по имени файла
+    // Sort by file name
     migration_files.sort_by_key(|entry| entry.file_name());
 
     let mut result = MigrationResult {
@@ -54,7 +54,7 @@ pub async fn run_migrations(
     for entry in migration_files {
         let filename = entry.file_name().to_string_lossy().to_string();
 
-        // Пропускаем Zone.Identifier файлы (Windows)
+        // Skip Zone.Identifier files (Windows)
         if filename.contains("Zone.Identifier") {
             continue;
         }
@@ -65,15 +65,15 @@ pub async fn run_migrations(
             continue;
         }
 
-        // Читаем и применяем миграцию
+        // Read and apply the migration
         let sql = std::fs::read_to_string(entry.path())?;
 
         info!("Applying migration: {}", filename);
 
-        // Выполняем в транзакции
+        // Execute in a transaction
         let mut tx = pool.begin().await?;
 
-        // Разделяем на отдельные statements
+        // Split into separate statements
         for statement in sql.split(';').filter(|s| !s.trim().is_empty()) {
             let trimmed = statement.trim();
             if trimmed.is_empty() || trimmed.starts_with("--") {
@@ -82,7 +82,7 @@ pub async fn run_migrations(
 
             if let Err(e) = sqlx::query(trimmed).execute(&mut *tx).await {
                 warn!("Statement failed: {}", e);
-                // Некоторые ошибки допустимы (IF NOT EXISTS, DROP IF EXISTS и т.д.)
+                // Some errors are acceptable (IF NOT EXISTS, DROP IF EXISTS, etc.)
                 if !is_ignorable_error(&e) {
                     tx.rollback().await?;
                     return Err(anyhow::anyhow!("Migration {} failed: {}", filename, e));
@@ -90,7 +90,7 @@ pub async fn run_migrations(
             }
         }
 
-        // Записываем что миграция применена
+        // Record that the migration was applied
         sqlx::query("INSERT INTO _migrations (name, applied_at) VALUES ($1, NOW())")
             .bind(&filename)
             .execute(&mut *tx)
@@ -105,7 +105,7 @@ pub async fn run_migrations(
     Ok(result)
 }
 
-/// Создаёт таблицу миграций
+/// Creates the migrations table
 async fn ensure_migrations_table(pool: &PgPool) -> anyhow::Result<()> {
     sqlx::query(
         r#"
@@ -122,18 +122,18 @@ async fn ensure_migrations_table(pool: &PgPool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Проверяет, можно ли игнорировать ошибку
+/// Checks whether an error can be ignored
 fn is_ignorable_error(error: &sqlx::Error) -> bool {
     let error_str = error.to_string().to_lowercase();
 
-    // Ошибки которые можно игнорировать
+    // Errors that can be ignored
     error_str.contains("already exists")
         || error_str.contains("does not exist")
         || error_str.contains("duplicate key")
         || error_str.contains("constraint") && error_str.contains("already exists")
 }
 
-/// Встроенные миграции (если файлы недоступны)
+/// Embedded migrations (if files are unavailable)
 pub async fn run_embedded_migrations(pool: &PgPool) -> anyhow::Result<MigrationResult> {
     ensure_migrations_table(pool).await?;
 
@@ -227,9 +227,9 @@ pub async fn run_embedded_migrations(pool: &PgPool) -> anyhow::Result<MigrationR
 
         let mut tx = pool.begin().await?;
 
-        // Важно: нельзя делить SQL по ';', потому что PostgreSQL функции
-        // используют блоки $$ ... $$ с внутренними ';'.
-        // Выполняем файл миграции целиком.
+        // Important: SQL cannot be split on ';' because PostgreSQL functions
+        // use $$ ... $$ blocks with internal ';' characters.
+        // Execute the migration file as a whole.
         if let Err(e) = sqlx::raw_sql(sql).execute(&mut *tx).await {
             tx.rollback().await?;
             return Err(anyhow::anyhow!("Migration {} failed: {}", name, e));
@@ -253,7 +253,7 @@ mod tests {
 
     #[test]
     fn test_ignorable_errors() {
-        // Тестируем определение игнорируемых ошибок
+        // Test ignored-error detection
         assert!(is_ignorable_error(&sqlx::Error::Database(Box::new(
             TestDbError("relation already exists".to_string())
         ))));

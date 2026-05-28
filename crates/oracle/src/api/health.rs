@@ -4,7 +4,7 @@ use axum::{extract::State, Json};
 
 use crate::{db, error::Result, models::HealthResponse, services::AppState};
 
-/// GET /health - базовый health check
+/// GET /health - basic health check
 pub async fn health_check() -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok".to_string(),
@@ -13,9 +13,9 @@ pub async fn health_check() -> Json<HealthResponse> {
     })
 }
 
-/// GET /ready - readiness check (включая БД)
+/// GET /ready - readiness check (including the database)
 pub async fn ready_check(State(state): State<AppState>) -> Result<Json<HealthResponse>> {
-    // Проверяем подключение к БД
+    // Check the database connection
     db::check_connection(&state.db).await?;
 
     Ok(Json(HealthResponse {

@@ -1,6 +1,6 @@
-//! Vault API - регистрация зашифрованных данных и получение NFT
+//! Vault API - registering encrypted data and obtaining NFTs
 //!
-//! Oracle НЕ шифрует данные! Клиент делает это сам.
+//! Oracle does NOT encrypt data. The client does that itself.
 
 use axum::{extract::State, Json};
 use serde::{Deserialize, Serialize};
@@ -13,34 +13,34 @@ use crate::{
     services::AppState,
 };
 
-/// Запрос на создание vault
-/// Клиент уже зашифровал файл и загрузил на storage nodes
+/// Vault creation request
+/// The client has already encrypted the file and uploaded it to storage nodes
 #[derive(Debug, Deserialize)]
 pub struct CreateVaultRequest {
-    /// XRPL адрес владельца
+    /// Owner XRPL address
     pub wallet_address: String,
-    /// PRE публичный ключ владельца
+    /// Owner PRE public key
     pub pre_public_key: String,
-    /// AES ключ, зашифрованный PRE публичным ключом (base64)
+    /// AES key encrypted with the PRE public key (base64)
     pub encrypted_aes_key: String,
-    /// Hash манифеста (для URI)
+    /// Manifest hash (for URI)
     pub metadata_hash: String,
-    /// Манифест с информацией о файле
+    /// Manifest with file information
     pub manifest: VaultManifest,
 }
 
-/// Манифест файла (метаданные)
+/// File manifest (metadata)
 #[derive(Debug, Deserialize, Serialize)]
 pub struct VaultManifest {
-    /// Оригинальное имя файла
+    /// Original file name
     pub encrypted_filename: String,
-    /// Размер до шифрования
+    /// Size before encryption
     pub original_size: u64,
-    /// MIME тип
+    /// MIME type
     pub mime_type: String,
-    /// Hash оригинального файла
+    /// Original file hash
     pub original_hash: String,
-    /// Фрагменты на storage nodes
+    /// Fragments on storage nodes
     pub fragments: Vec<FragmentInfo>,
 }
 
@@ -53,13 +53,13 @@ pub struct FragmentInfo {
     pub size: u64,
 }
 
-/// Ответ подготовки vault.
+/// Vault preparation response.
 ///
-/// Oracle больше не минтит NFT и не создаёт XRPL offer. `nft_token_id` здесь —
-/// временный 64-hex storage key для upload proxy до локального минта клиентом.
+/// Oracle no longer mints NFTs or creates XRPL offers. `nft_token_id` here is
+/// a temporary 64-hex storage key for the upload proxy before local client minting.
 #[derive(Debug, Serialize)]
 pub struct CreateVaultResponse {
-    /// ID записи в Oracle
+    /// Oracle record ID
     pub vault_id: Uuid,
     /// Temporary 64-hex storage token id until local XRPL mint is finalized.
     pub nft_token_id: String,
@@ -73,9 +73,9 @@ pub struct CreateVaultResponse {
 
 /// POST /api/v1/vault/create
 ///
-/// Подготавливает vault record для upload. Клиент сам генерирует metadata,
-/// локально подписывает NFTokenMint и затем вызывает finalize endpoint.
-/// Файл УЖЕ зашифрован клиентом!
+/// Prepares the vault record for upload. The client generates metadata itself,
+/// signs NFTokenMint locally, and then calls the finalize endpoint.
+/// The file has ALREADY been encrypted by the client.
 ///
 /// **Requires authentication** - wallet_address must match JWT
 pub async fn create_vault(
@@ -98,7 +98,7 @@ pub async fn create_vault(
         ));
     }
 
-    // Валидация
+    // Validation
     if !req.wallet_address.starts_with('r') {
         return Err(ApiError::Validation("Invalid XRPL address".into()));
     }
@@ -121,7 +121,7 @@ pub async fn create_vault(
     // We use metadata_hash as identifier because nft_token_id is not known until after client-side minting.
     let nft_uri = public_metadata_uri(&state, &req.metadata_hash);
 
-    // Получаем или создаём user
+    // Get or create the user
     let user_id = get_or_create_user(&state, &req.wallet_address, &req.pre_public_key).await?;
 
     // Local-mint-first model: create an Oracle row with a temporary 64-hex token id.
@@ -169,7 +169,7 @@ pub async fn create_vault(
         pending_token_id
     );
 
-    // Аудит — avoid plaintext filename/mime logging in Vaulted privacy mode.
+    // Audit - avoid plaintext filename/mime logging in Vaulted privacy mode.
     state
         .audit_log(
             Some(user_id),
@@ -496,8 +496,8 @@ pub struct FinalizeVaultMintResponse {
 
 /// POST /api/v1/vault/finalize-mint
 ///
-/// Финализирует vault после локального client-side NFTokenMint. Oracle обновляет
-/// pending storage key на реальный NFTokenID и остаётся registry/index service.
+/// Finalizes the vault after local client-side NFTokenMint. Oracle updates
+/// the pending storage key to the real NFTokenID and remains a registry/index service.
 pub async fn finalize_vault_mint(
     auth: AuthenticatedUser,
     State(state): State<AppState>,
@@ -698,9 +698,9 @@ fn finalize_vault_object_link_sql() -> &'static str {
     "#
 }
 
-/// Получает или создаёт пользователя
+/// Gets or creates a user
 async fn get_or_create_user(state: &AppState, wallet: &str, pre_key: &str) -> Result<Uuid> {
-    // Проверяем существует ли
+    // Check whether it exists
     if let Some(id) =
         sqlx::query_scalar::<_, Uuid>("SELECT id FROM users WHERE wallet_address = $1")
             .bind(wallet)
@@ -710,7 +710,7 @@ async fn get_or_create_user(state: &AppState, wallet: &str, pre_key: &str) -> Re
         return Ok(id);
     }
 
-    // Создаём нового
+    // Create a new one
     let id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO users (id, wallet_address, pre_public_key, created_at) VALUES ($1, $2, $3, NOW())"
@@ -724,7 +724,7 @@ async fn get_or_create_user(state: &AppState, wallet: &str, pre_key: &str) -> Re
     Ok(id)
 }
 
-/// GET /api/v1/vault/:id - статус vault
+/// GET /api/v1/vault/:id - vault status
 #[derive(Debug, Serialize)]
 pub struct VaultStatus {
     pub vault_id: Uuid,
@@ -854,7 +854,7 @@ pub async fn get_vault_mint_recovery(
         owner_identity_id,
     }))
 }
-/// Получение информации о файле по NFT token ID
+/// Gets file information by NFT token ID
 #[derive(Debug, Serialize)]
 pub struct FileDownloadInfo {
     pub nft_token_id: String,
@@ -898,7 +898,7 @@ pub async fn get_file_by_nft(
         _ => {},
     }
 
-    // Получаем метаданные NFT включая манифест
+    // Get NFT metadata including the manifest
     let row = sqlx::query_as::<_, (String, serde_json::Value)>(
         "SELECT encrypted_aes_key, manifest FROM nft_metadata WHERE nft_token_id = $1",
     )
@@ -910,7 +910,7 @@ pub async fn get_file_by_nft(
     let encrypted_aes_key = row.0;
     let manifest_json = row.1;
 
-    // Парсим манифест из JSON
+    // Parse the manifest from JSON
     let manifest: VaultManifest = serde_json::from_value(manifest_json)
         .map_err(|e| ApiError::Internal(format!("Failed to parse manifest: {}", e)))?;
 
@@ -925,10 +925,10 @@ pub async fn get_file_by_nft(
     }))
 }
 
-/// DELETE /api/v1/vault/:nft_token_id - удалить vault
+/// DELETE /api/v1/vault/:nft_token_id - delete vault
 ///
-/// Удаляет vault и связанные данные. NFT должен быть сожжён пользователем.
-/// Oracle удаляет: метаданные из БД, файлы со storage nodes.
+/// Deletes the vault and related data. The NFT must be burned by the user.
+/// Oracle deletes metadata from the database and files from storage nodes.
 ///
 /// **Requires authentication** - only owner can delete
 #[derive(Debug, Serialize)]
@@ -959,7 +959,7 @@ pub async fn delete_vault(
         ));
     }
 
-    // Получаем информацию о vault
+    // Get vault information
     let vault = sqlx::query_as::<_, (Uuid, Uuid, String, serde_json::Value)>(
         r#"
         SELECT nm.id, nm.owner_id, nm.status, nm.manifest
@@ -974,7 +974,7 @@ pub async fn delete_vault(
 
     let (nft_metadata_id, owner_id, status, manifest_json) = vault;
 
-    // Проверяем что запрос от владельца (DB check)
+    // Check that the request is from the owner (DB check)
     let owner_wallet =
         sqlx::query_scalar::<_, String>("SELECT wallet_address FROM users WHERE id = $1")
             .bind(owner_id)
@@ -1026,14 +1026,14 @@ pub async fn delete_vault(
         },
     }
 
-    // Проверяем статус - нельзя удалить vault в процессе передачи
+    // Check status - cannot delete a vault during transfer
     if status == "transferring" {
         return Err(ApiError::BadRequest(
             "Cannot delete vault while transfer is in progress".to_string(),
         ));
     }
 
-    // Парсим манифест для получения информации о фрагментах
+    // Parse the manifest to get fragment information
     let manifest: VaultManifest = serde_json::from_value(manifest_json)
         .map_err(|e| ApiError::Internal(format!("Failed to parse manifest: {}", e)))?;
 
@@ -1094,25 +1094,25 @@ pub async fn delete_vault(
         }
     }
 
-    // Удаляем связанные transfer_requests
+    // Delete related transfer_requests
     sqlx::query("DELETE FROM transfer_requests WHERE nft_metadata_id = $1")
         .bind(nft_metadata_id)
         .execute(&state.db)
         .await?;
 
-    // Удаляем file_manifests (если есть отдельная таблица)
+    // Delete file_manifests (if there is a separate table)
     let _ = sqlx::query("DELETE FROM file_manifests WHERE nft_metadata_id = $1")
         .bind(nft_metadata_id)
         .execute(&state.db)
         .await;
 
-    // Удаляем nft_metadata
+    // Delete it nft_metadata
     sqlx::query("DELETE FROM nft_metadata WHERE id = $1")
         .bind(nft_metadata_id)
         .execute(&state.db)
         .await?;
 
-    // Аудит
+    // Audit
     state
         .audit_log(
             Some(owner_id),
@@ -1147,7 +1147,7 @@ pub async fn delete_vault(
 // CLAIM STATUS & CANCEL OFFER
 // =============================================================================
 
-/// Ответ на проверку статуса claim
+/// Claim status check response
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClaimStatusResponse {
@@ -1158,7 +1158,7 @@ pub struct ClaimStatusResponse {
 
 /// GET /api/vault/claim-status/{nft_token_id}/{offer_index}
 ///
-/// Проверяет, был ли NFT получен (offer принят)
+/// Checks whether the NFT was received (offer accepted)
 pub async fn check_claim_status(
     State(state): State<AppState>,
     axum::extract::Path((nft_token_id, offer_index)): axum::extract::Path<(String, String)>,
@@ -1171,11 +1171,11 @@ pub async fn check_claim_status(
 
     let xrpl = &state.xrpl;
 
-    // Проверяем есть ли NFT на Oracle кошельке
+    // Check whether the NFT is on the Oracle wallet
     match xrpl.check_nft_on_oracle(&nft_token_id).await {
         Ok(on_oracle) => {
             if on_oracle {
-                // NFT всё ещё на Oracle - не claimed
+                // NFT is still on Oracle - not claimed
                 tracing::info!("NFT {} still on Oracle wallet", nft_token_id);
                 Ok(Json(ClaimStatusResponse {
                     claimed: false,
@@ -1183,17 +1183,17 @@ pub async fn check_claim_status(
                     owner_address: None,
                 }))
             } else {
-                // NFT не на Oracle - значит claimed!
+                // NFT is not on Oracle - it has been claimed.
                 tracing::info!("NFT {} claimed (not on Oracle)", nft_token_id);
                 Ok(Json(ClaimStatusResponse {
                     claimed: true,
                     expired: false,
-                    owner_address: None, // Не знаем точно кому
+                    owner_address: None, // We do not know exactly by whom
                 }))
             }
         },
         Err(e) => {
-            // Ошибка проверки
+            // Verification error
             tracing::warn!("Error checking NFT {}: {}", nft_token_id, e);
             Ok(Json(ClaimStatusResponse {
                 claimed: false,
@@ -1204,7 +1204,7 @@ pub async fn check_claim_status(
     }
 }
 
-/// Запрос на отмену offer
+/// Offer cancellation request
 #[derive(Debug, Deserialize)]
 pub struct CancelOfferRequest {
     pub nft_token_id: String,
@@ -1212,7 +1212,7 @@ pub struct CancelOfferRequest {
     pub wallet_address: String,
 }
 
-/// Ответ на отмену offer
+/// Offer cancellation response
 #[derive(Debug, Serialize)]
 pub struct CancelOfferResponse {
     pub success: bool,
@@ -1221,7 +1221,7 @@ pub struct CancelOfferResponse {
 
 /// POST /api/vault/cancel-offer
 ///
-/// Отменяет offer и сжигает NFT (если он ещё на Oracle)
+/// Cancels the offer and burns the NFT (if it is still on Oracle)
 ///
 /// **Requires authentication** - only original creator can cancel
 pub async fn cancel_offer(
@@ -1266,7 +1266,7 @@ pub async fn cancel_offer(
 
     let xrpl = &state.xrpl;
 
-    // 1. Проверяем, что NFT всё ещё на Oracle
+    // 1. Check that the NFT is still on Oracle
     let on_oracle = match xrpl.check_nft_on_oracle(&req.nft_token_id).await {
         Ok(v) => v,
         Err(e) => {
@@ -1289,30 +1289,30 @@ pub async fn cancel_offer(
         }));
     }
 
-    // 2. Отменяем offer
+    // 2. Cancel the offer
     match xrpl.cancel_offer(&req.offer_index).await {
         Ok(_) => {
             tracing::info!("Offer {} cancelled", req.offer_index);
         },
         Err(e) => {
-            // Offer может быть уже отменён или принят
+            // Offer may already be cancelled or accepted
             tracing::warn!("Failed to cancel offer {}: {}", req.offer_index, e);
         },
     }
 
-    // 3. Сжигаем NFT
+    // 3. Burn the NFT
     match xrpl.burn_nft(&req.nft_token_id).await {
         Ok(_) => {
             tracing::info!("NFT {} burned", req.nft_token_id);
 
-            // Обновляем статус в БД
+            // Update the status in the database
             let _ =
                 sqlx::query("UPDATE nft_metadata SET status = 'burned' WHERE nft_token_id = $1")
                     .bind(&req.nft_token_id)
                     .execute(&state.db)
                     .await;
 
-            // Аудит
+            // Audit
             state
                 .audit_log(
                     None,

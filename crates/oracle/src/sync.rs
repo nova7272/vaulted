@@ -1,7 +1,7 @@
 //! XRPL Sync Service
 //!
-//! Периодически синхронизирует владельцев NFT между Oracle и XRPL.
-//! Нужен когда NFT передают вне приложения (напрямую на XRPL).
+//! Periodically synchronizes NFT owners between Oracle and XRPL.
+//! Needed when NFTs are transferred outside the app (directly on XRPL).
 
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -12,28 +12,28 @@ use tracing::{error, info, warn};
 use crate::error::Result;
 use crate::xrpl::XrplService;
 
-/// Конфигурация синхронизации
+/// Synchronization configuration
 #[derive(Debug, Clone)]
 pub struct SyncConfig {
-    /// Интервал синхронизации в секундах
+    /// Synchronization interval in seconds
     pub interval_secs: u64,
-    /// Максимальное количество NFT за один цикл
+    /// Maximum number of NFTs per cycle
     pub batch_size: i64,
-    /// Включена ли синхронизация
+    /// Whether synchronization is enabled
     pub enabled: bool,
 }
 
 impl Default for SyncConfig {
     fn default() -> Self {
         Self {
-            interval_secs: 300, // 5 минут
+            interval_secs: 300, // 5 minutes
             batch_size: 100,
             enabled: true,
         }
     }
 }
 
-/// Сервис синхронизации
+/// Synchronization service
 pub struct XrplSyncService {
     db: PgPool,
     xrpl: Arc<XrplService>,
@@ -45,7 +45,7 @@ impl XrplSyncService {
         Self { db, xrpl, config }
     }
 
-    /// Запускает фоновую синхронизацию
+    /// Starts background synchronization
     pub async fn start_background_sync(self: Arc<Self>) {
         if !self.config.enabled {
             info!("XRPL sync disabled");
@@ -68,12 +68,12 @@ impl XrplSyncService {
         }
     }
 
-    /// Выполняет один цикл синхронизации
+    /// Runs one synchronization cycle
     pub async fn sync_cycle(&self) -> Result<SyncStats> {
         let start = std::time::Instant::now();
         let mut stats = SyncStats::default();
 
-        // Получаем список активных NFT из БД
+        // Get the list of active NFTs from the database
         let nfts = sqlx::query_as::<_, (uuid::Uuid, String, uuid::Uuid)>(
             r#"
             SELECT nm.id, nm.nft_token_id, nm.owner_id
@@ -134,28 +134,28 @@ impl XrplSyncService {
         Ok(stats)
     }
 
-    /// Синхронизирует один NFT
+    /// Synchronizes one NFT
     async fn sync_single_nft(
         &self,
         nft_id: &uuid::Uuid,
         nft_token_id: &str,
         current_owner_id: &uuid::Uuid,
     ) -> Result<SyncAction> {
-        // Получаем текущий wallet address владельца из Oracle БД
+        // Get the current owner wallet address from the Oracle database
         let current_owner_wallet: String =
             sqlx::query_scalar("SELECT wallet_address FROM users WHERE id = $1")
                 .bind(current_owner_id)
                 .fetch_one(&self.db)
                 .await?;
 
-        // Проверяем владеет ли текущий owner этим NFT на XRPL
+        // Check whether the current owner owns this NFT on XRPL
         let still_owns = self
             .xrpl
             .verify_nft_owner(nft_token_id, &current_owner_wallet)
             .await?;
 
         if still_owns {
-            // Обновляем timestamp для round-robin
+            // Update timestamp for round-robin
             sqlx::query("UPDATE nft_metadata SET updated_at = NOW() WHERE id = $1")
                 .bind(nft_id)
                 .execute(&self.db)
@@ -163,13 +163,13 @@ impl XrplSyncService {
             return Ok(SyncAction::NoChange);
         }
 
-        // Владелец изменился - ищем нового владельца
-        // Для этого нужно найти кто сейчас владеет NFT
+        // Owner changed - look for the new owner
+        // To do this, find who currently owns the NFT
         let new_owner_wallet = self.find_nft_owner_on_xrpl(nft_token_id).await?;
 
         match new_owner_wallet {
             Some(new_wallet) => {
-                // Проверяем зарегистрирован ли новый владелец в Oracle
+                // Check whether the new owner is registered in Oracle
                 let new_owner_id: Option<uuid::Uuid> =
                     sqlx::query_scalar("SELECT id FROM users WHERE wallet_address = $1")
                         .bind(&new_wallet)
@@ -178,9 +178,9 @@ impl XrplSyncService {
 
                 match new_owner_id {
                     Some(new_id) => {
-                        // Обновляем владельца в БД
-                        // ВАЖНО: НЕ обновляем encrypted_aes_key - это должно делаться через PRE transfer
-                        // Помечаем что ключ устарел (новый владелец не сможет расшифровать)
+                        // Update the owner in the database
+                        // IMPORTANT: do NOT update encrypted_aes_key - this must be done through PRE transfer
+                        // Mark the key as stale (the new owner will not be able to decrypt)
                         sqlx::query(
                             r#"
                             UPDATE nft_metadata
@@ -195,7 +195,7 @@ impl XrplSyncService {
                         .execute(&self.db)
                         .await?;
 
-                        // Логируем в audit
+                        // Log to audit
                         sqlx::query(
                             r#"
                             INSERT INTO audit_log (user_id, action, nft_token_id, details)
@@ -218,26 +218,26 @@ impl XrplSyncService {
                         })
                     },
                     None => {
-                        // Новый владелец не зарегистрирован - ничего не делаем
-                        // Он должен сначала зарегистрироваться в приложении
+                        // New owner is not registered - do nothing
+                        // They must register in the app first
                         Ok(SyncAction::NewOwnerNotRegistered(new_wallet))
                     },
                 }
             },
             None => {
-                // NFT не найден ни у кого - возможно сожжён или ошибка
+                // NFT not found for anyone - possibly burned or an error occurred
                 Ok(SyncAction::NotFoundOnXrpl)
             },
         }
     }
 
-    /// Ищет текущего владельца NFT на XRPL
+    /// Looks for the current NFT owner on XRPL
     ///
-    /// XRPL не имеет прямого API для этого, поэтому:
-    /// 1. Проверяем всех известных пользователей из Oracle
-    /// 2. Если не нашли - возвращаем None
+    /// XRPL has no direct API for this, so:
+    /// 1. Check all known users from Oracle
+    /// 2. If not found, return None
     async fn find_nft_owner_on_xrpl(&self, nft_token_id: &str) -> Result<Option<String>> {
-        // Получаем все wallet addresses из Oracle
+        // Get all wallet addresses from Oracle
         let wallets: Vec<String> = sqlx::query_scalar("SELECT wallet_address FROM users")
             .fetch_all(&self.db)
             .await?;
@@ -251,13 +251,13 @@ impl XrplSyncService {
         Ok(None)
     }
 
-    /// Ручной запуск синхронизации (для API endpoint)
+    /// Manual synchronization trigger (for API endpoint)
     pub async fn trigger_sync(&self) -> Result<SyncStats> {
         info!("Manual sync triggered");
         self.sync_cycle().await
     }
 
-    /// Синхронизирует конкретный NFT (для API endpoint)
+    /// Synchronizes a specific NFT (for API endpoint)
     pub async fn sync_nft(&self, nft_token_id: &str) -> Result<SyncAction> {
         let nft = sqlx::query_as::<_, (uuid::Uuid, uuid::Uuid)>(
             "SELECT id, owner_id FROM nft_metadata WHERE nft_token_id = $1",
@@ -275,20 +275,20 @@ impl XrplSyncService {
     }
 }
 
-/// Результат синхронизации одного NFT
+/// Single-NFT synchronization result
 #[derive(Debug)]
 pub enum SyncAction {
-    /// Владелец не изменился
+    /// Owner did not change
     NoChange,
-    /// Владелец обновлён
+    /// Owner updated
     OwnerUpdated { old: String, new: String },
-    /// NFT не найден на XRPL
+    /// NFT not found on XRPL
     NotFoundOnXrpl,
-    /// Новый владелец не зарегистрирован в Oracle
+    /// New owner is not registered in Oracle
     NewOwnerNotRegistered(String),
 }
 
-/// Статистика цикла синхронизации
+/// Synchronization cycle statistics
 #[derive(Debug, Default)]
 pub struct SyncStats {
     pub total: usize,

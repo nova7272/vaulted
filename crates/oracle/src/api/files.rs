@@ -1,4 +1,4 @@
-//! Endpoints для файлов
+//! File endpoints
 
 use axum::{
     extract::{Path, State},
@@ -16,25 +16,25 @@ use crate::{
     services::AppState,
 };
 
-/// POST /api/v1/files/register - регистрация файла
+/// POST /api/v1/files/register - register a file
 /// **Requires authentication**
 pub async fn register_file(
     auth: AuthenticatedUser,
     State(state): State<AppState>,
     Json(request): Json<RegisterFileRequest>,
 ) -> Result<Json<RegisterFileResponse>> {
-    // Валидация NFT Token ID
+    // Validate the NFT Token ID
     if request.nft_token_id.len() != 64
         || !request.nft_token_id.chars().all(|c| c.is_ascii_hexdigit())
     {
         return Err(ApiError::Validation("Invalid NFT Token ID".to_string()));
     }
 
-    // Получаем пользователя по NFT (через XRPL верификацию)
-    // TODO: Реализовать реальную проверку через XRPL
-    // Пока используем placeholder
+    // Get the user by NFT (through XRPL verification)
+    // TODO: Implement real verification through XRPL
+    // Use a placeholder for now
 
-    // Проверяем, не зарегистрирован ли уже этот NFT
+    // Check whether this NFT is already registered
     let existing =
         sqlx::query_scalar::<_, uuid::Uuid>("SELECT id FROM nft_metadata WHERE nft_token_id = $1")
             .bind(&request.nft_token_id)
@@ -58,10 +58,10 @@ pub async fn register_file(
                 ApiError::NotFound("Authenticated user not found in database".to_string())
             })?;
 
-    // Начинаем транзакцию
+    // Start a transaction
     let mut tx = state.db.begin().await?;
 
-    // Создаём запись NFT metadata
+    // Create the NFT metadata record
     let nft_metadata_id = sqlx::query_scalar::<_, uuid::Uuid>(
         r#"
         INSERT INTO nft_metadata (nft_token_id, owner_id, encrypted_aes_key, metadata_hash)
@@ -76,7 +76,7 @@ pub async fn register_file(
     .fetch_one(&mut *tx)
     .await?;
 
-    // Создаём манифест
+    // Create the manifest
     let manifest_id = sqlx::query_scalar::<_, uuid::Uuid>(
         r#"
         INSERT INTO file_manifests (nft_metadata_id, encrypted_filename, original_size, mime_type, original_hash, fragment_count)
@@ -93,7 +93,7 @@ pub async fn register_file(
         .fetch_one(&mut *tx)
         .await?;
 
-    // Создаём записи фрагментов (пока без storage info)
+    // Create fragment records (without storage info for now)
     for fragment in &request.manifest.fragments {
         sqlx::query(
             r#"
@@ -124,7 +124,7 @@ pub async fn register_file(
     }))
 }
 
-/// GET /api/v1/files/:nft_token_id/access - запрос доступа к файлу
+/// GET /api/v1/files/:nft_token_id/access - request file access
 /// **Requires authentication** - verifies NFT ownership (CRIT-03)
 pub async fn request_access(
     auth: AuthenticatedUser,
@@ -182,7 +182,7 @@ pub async fn request_access(
         },
     }
 
-    // Получаем метаданные NFT включая manifest (encrypted or plain)
+    // Get NFT metadata including the manifest (encrypted or plain)
     let manifest_json: serde_json::Value = if let Some(ref enc_key) = state.config.db_encryption_key
     {
         // Try encrypted manifest first
@@ -263,7 +263,7 @@ pub async fn request_access(
             plain_manifest_json
         };
 
-    // Парсим манифест из JSON
+    // Parse the manifest from JSON
     let encrypted_filename = final_manifest["encrypted_filename"]
         .as_str()
         .unwrap_or("unknown")
@@ -278,7 +278,7 @@ pub async fn request_access(
         .unwrap_or("")
         .to_string();
 
-    // Получаем фрагменты из JSON
+    // Get fragments from JSON
     let fragments_json = final_manifest["fragments"].as_array();
 
     let mut fragment_urls = Vec::new();
@@ -328,7 +328,7 @@ pub async fn request_access(
         }
     }
 
-    // Аудит доступа к файлу
+    // Audit file access
     state
         .audit_log(
             None,
@@ -447,7 +447,7 @@ pub async fn get_upload_url(
     State(state): State<AppState>,
     Json(request): Json<FragmentUploadRequest>,
 ) -> Result<Json<FragmentUploadResponse>> {
-    // Выбираем storage node с наименьшей загрузкой
+    // Select the storage node with the lowest load
     let storage_node = sqlx::query_as::<_, (String, String)>(
         r#"
         SELECT id, endpoint_url
@@ -463,7 +463,7 @@ pub async fn get_upload_url(
 
     let (storage_node_id, endpoint_url) = storage_node;
 
-    // Генерируем уникальный ключ для хранения
+    // Generate a unique storage key
     let storage_key = format!(
         "{}/{}/{}",
         request.file_id,
@@ -471,7 +471,7 @@ pub async fn get_upload_url(
         uuid::Uuid::new_v4()
     );
 
-    // Формируем URL для загрузки
+    // Build the upload URL
     let upload_url = format!("{}/upload/{}", endpoint_url, storage_key);
 
     Ok(Json(FragmentUploadResponse {
@@ -481,14 +481,14 @@ pub async fn get_upload_url(
     }))
 }
 
-/// POST /api/v1/files/fragments/confirm - подтвердить загрузку
+/// POST /api/v1/files/fragments/confirm - confirm upload
 /// **Requires authentication**
 pub async fn confirm_upload(
     _auth: AuthenticatedUser,
     State(state): State<AppState>,
     Json(request): Json<ConfirmUploadRequest>,
 ) -> Result<Json<()>> {
-    // Обновляем информацию о фрагменте
+    // Update fragment information
     let updated = sqlx::query(
         r#"
         UPDATE file_fragments
@@ -507,8 +507,8 @@ pub async fn confirm_upload(
         return Err(ApiError::NotFound("Fragment not found".to_string()));
     }
 
-    // Обновляем статистику storage node
-    // TODO: Получить реальный размер фрагмента
+    // Update storage node statistics
+    // TODO: Get the real fragment size
     sqlx::query(
         r#"
         UPDATE storage_nodes

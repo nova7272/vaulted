@@ -1,6 +1,6 @@
-//! Endpoints для передачи NFT
+//! NFT transfer endpoints
 //!
-//! Oracle выполняет PRE re-encryption с использованием kfrag от клиента
+//! Oracle performs PRE re-encryption using the kfrag from the client
 
 use axum::{
     extract::{Path, State},
@@ -20,10 +20,10 @@ use crate::{
     services::AppState,
 };
 
-/// POST /api/v1/transfers/initiate - инициировать передачу NFT
+/// POST /api/v1/transfers/initiate - initiate NFT transfer
 ///
-/// Oracle получает kfrag от клиента и выполняет re-encryption.
-/// Статус NFT НЕ меняется здесь - он изменится только после подтверждения на XRPL.
+/// Oracle receives the kfrag from the client and performs re-encryption.
+/// NFT status does NOT change here; it changes only after confirmation on XRPL.
 ///
 /// **Requires authentication** - from_address must match JWT
 pub async fn initiate_transfer(
@@ -41,7 +41,7 @@ pub async fn initiate_transfer(
         ));
     }
 
-    // Валидация
+    // Validation
     if !request.from_address.starts_with('r') || !request.to_address.starts_with('r') {
         return Err(ApiError::Validation("Invalid wallet address".to_string()));
     }
@@ -52,7 +52,7 @@ pub async fn initiate_transfer(
         ));
     }
 
-    // Получаем NFT metadata с encrypted_aes_key
+    // Get NFT metadata with encrypted_aes_key
     let nft_row = sqlx::query_as::<_, (Uuid, Uuid, String)>(
         r#"
         SELECT nm.id, nm.owner_id, nm.encrypted_aes_key
@@ -68,7 +68,7 @@ pub async fn initiate_transfer(
 
     let (nft_metadata_id, from_user_id, encrypted_aes_key_base64) = nft_row;
 
-    // Проверяем что from_address совпадает с owner
+    // Check that from_address matches the owner
     let from_wallet =
         sqlx::query_scalar::<_, String>("SELECT wallet_address FROM users WHERE id = $1")
             .bind(from_user_id)
@@ -81,7 +81,7 @@ pub async fn initiate_transfer(
         ));
     }
 
-    // Получаем to_user_id и pre_public_key получателя
+    // Get the recipient to_user_id and pre_public_key
     let to_user = sqlx::query_as::<_, (Uuid, String)>(
         "SELECT id, pre_public_key FROM users WHERE wallet_address = $1",
     )
@@ -94,19 +94,19 @@ pub async fn initiate_transfer(
 
     let (to_user_id, recipient_pre_public_key_hex) = to_user;
 
-    // Парсим публичный ключ получателя для верификации kfrag
+    // Parse the recipient public key for kfrag verification
     let recipient_pk_bytes = hex::decode(&recipient_pre_public_key_hex)
         .map_err(|e| ApiError::Internal(format!("Invalid recipient pre_public_key hex: {}", e)))?;
 
-    // Десериализуем encrypted_aes_key
+    // Deserialize encrypted_aes_key
     let encrypted_data = EncryptedPreData::from_base64(&encrypted_aes_key_base64)
         .map_err(|e| ApiError::Internal(format!("Failed to parse encrypted_aes_key: {}", e)))?;
 
-    // Десериализуем kfrag из request
+    // Deserialize kfrag from the request
     let re_key_data = deserialize_re_key(&request.re_encryption_key)
         .map_err(|e| ApiError::Validation(format!("Invalid re_encryption_key: {}", e)))?;
 
-    // Выполняем re-encryption с публичным ключом получателя для верификации
+    // Perform re-encryption with the recipient public key for verification
     let pre = ProxyReEncryption::new();
     let re_encrypted = perform_reencryption(
         &pre,
@@ -116,16 +116,16 @@ pub async fn initiate_transfer(
     )
     .map_err(|e| ApiError::Internal(format!("Re-encryption failed: {}", e)))?;
 
-    // Сериализуем результат
+    // Serialize the result
     let re_encrypted_base64 = re_encrypted
         .to_base64()
         .map_err(|e| ApiError::Internal(format!("Failed to serialize re-encrypted data: {}", e)))?;
 
-    // НЕ меняем статус NFT здесь!
-    // Статус изменится на 'transferring' когда offer будет подписан,
-    // и на 'active' с новым owner когда transfer будет завершён.
+    // Do NOT change NFT status here.
+    // Status changes to 'transferring' when the offer is signed,
+    // and to 'active' with the new owner when the transfer is completed.
 
-    // Создаём запрос на передачу со статусом 'pending'
+    // Create a transfer request with status 'pending'
     let transfer_id = sqlx::query_scalar::<_, Uuid>(
         r#"
         INSERT INTO transfer_requests
@@ -149,7 +149,7 @@ pub async fn initiate_transfer(
         transfer_id
     );
 
-    // Аудит
+    // Audit
     state
         .audit_log(
             Some(from_user_id),
@@ -168,7 +168,7 @@ pub async fn initiate_transfer(
     }))
 }
 
-/// Десериализует re_encryption_key (kfrag + sender_pk + sender_verifying_key)
+/// Deserializes re_encryption_key (kfrag + sender_pk + sender_verifying_key)
 fn deserialize_re_key(base64_data: &str) -> std::result::Result<ReKeyData, String> {
     use base64::Engine;
 
@@ -221,10 +221,10 @@ struct ReKeyData {
     sender_verifying_key: Option<Vec<u8>>,
 }
 
-/// Выполняет re-encryption с обязательной верификацией kfrag (CRIT-01)
+/// Performs re-encryption with mandatory kfrag verification (CRIT-01)
 ///
-/// sender_verifying_key ОБЯЗАТЕЛЕН — без него невозможно верифицировать
-/// kfrag и cfrag, что позволяет MITM-подмену данных.
+/// sender_verifying_key is REQUIRED; without it verification is impossible
+/// for kfrag and cfrag, which would allow MITM data substitution.
 fn perform_reencryption(
     pre: &ProxyReEncryption,
     encrypted_data: &EncryptedPreData,
@@ -234,17 +234,17 @@ fn perform_reencryption(
     use umbral_pre::{DefaultDeserialize, KeyFrag, PublicKey as UmbralPublicKey};
     use xrpl_vault_crypto_core::pre::PrePublicKey;
 
-    // CRIT-01: sender_verifying_key обязателен для верификации kfrag и cfrag
+    // CRIT-01: sender_verifying_key is required to verify kfrag and cfrag
     let vk_bytes = re_key_data.sender_verifying_key.as_ref().ok_or(
         "Missing sender_verifying_key — required for cryptographic verification. \
                 Please update client to send verifying key with re-encryption request.",
     )?;
 
-    // Восстанавливаем sender public key
+    // Reconstruct the sender public key
     let sender_pk = PrePublicKey::from_bytes(&re_key_data.sender_pk)
         .map_err(|e| format!("Invalid sender_pk: {}", e))?;
 
-    // Восстанавливаем первый kfrag
+    // Reconstruct the first kfrag
     let kfrag_bytes = re_key_data.kfrags.first().ok_or("No kfrags provided")?;
 
     let kfrag = KeyFrag::from_bytes(kfrag_bytes).map_err(|e| format!("Invalid kfrag: {:?}", e))?;
@@ -281,22 +281,22 @@ fn perform_reencryption(
             },
         };
 
-    // Выполняем re-encryption
+    // Perform re-encryption
     let mut re_encrypted = pre
         .perform_reencryption_with_kfrag(encrypted_data, verified_kfrag, &sender_pk)
         .map_err(|e| format!("Re-encryption error: {}", e))?;
 
-    // CRIT-01: Прокидываем sender_verifying_key в результат,
-    // чтобы получатель мог верифицировать cfrag при расшифровке
+    // CRIT-01: Propagate sender_verifying_key into the result,
+    // so the recipient can verify cfrag during decryption
     re_encrypted.sender_verifying_key = Some(vk_bytes.clone());
 
     Ok(re_encrypted)
 }
 
-/// POST /api/v1/transfers/confirm-signed - подтвердить подписание offer
+/// POST /api/v1/transfers/confirm-signed - confirm offer signing
 ///
-/// Вызывается после успешного подписания NFTokenCreateOffer через Vaulted wallet signing.
-/// Меняет статус NFT на 'transferring'.
+/// Called after successful NFTokenCreateOffer signing through Vaulted wallet signing.
+/// Changes NFT status to 'transferring'.
 ///
 /// **Requires authentication** - must be from_address of the transfer
 pub async fn confirm_offer_signed(
@@ -304,7 +304,7 @@ pub async fn confirm_offer_signed(
     State(state): State<AppState>,
     Json(request): Json<ConfirmOfferSignedRequest>,
 ) -> Result<Json<serde_json::Value>> {
-    // Получаем transfer с from_user для проверки авторизации
+    // Get the transfer with from_user for authorization checks
     let transfer = sqlx::query_as::<_, (Uuid, String, String)>(
         r#"
         SELECT tr.nft_metadata_id, tr.status, u.wallet_address as from_wallet
@@ -334,13 +334,13 @@ pub async fn confirm_offer_signed(
         )));
     }
 
-    // Обновляем статус NFT на 'transferring'
+    // Update NFT status to 'transferring'
     sqlx::query("UPDATE nft_metadata SET status = 'transferring' WHERE id = $1")
         .bind(nft_metadata_id)
         .execute(&state.db)
         .await?;
 
-    // Обновляем transfer_request
+    // Update transfer_request
     sqlx::query(
         "UPDATE transfer_requests SET status = 'completed', nft_offer_index = $1, completed_at = NOW() WHERE id = $2"
     )
@@ -349,14 +349,14 @@ pub async fn confirm_offer_signed(
         .execute(&state.db)
         .await?;
 
-    // Получаем nft_token_id для audit log
+    // Get nft_token_id for the audit log
     let nft_token_id =
         sqlx::query_scalar::<_, String>("SELECT nft_token_id FROM nft_metadata WHERE id = $1")
             .bind(nft_metadata_id)
             .fetch_optional(&state.db)
             .await?;
 
-    // Аудит
+    // Audit
     state
         .audit_log(
             None,
@@ -438,9 +438,9 @@ pub async fn get_status(
     }))
 }
 
-/// POST /api/v1/transfers/finalize-by-offer - простая финализация по offer_index
+/// POST /api/v1/transfers/finalize-by-offer - simple finalization by offer_index
 ///
-/// Вызывается после успешного claim NFT для пометки transfer как завершённого
+/// Called after a successful NFT claim to mark the transfer as finalized
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FinalizeByOfferRequest {
@@ -453,7 +453,7 @@ pub async fn finalize_transfer_by_offer(
     State(state): State<AppState>,
     Json(request): Json<FinalizeByOfferRequest>,
 ) -> Result<Json<serde_json::Value>> {
-    // Находим transfer по offer_index
+    // Find the transfer by offer_index
     let transfer = sqlx::query_as::<_, (Uuid, String)>(
         "SELECT id, status FROM transfer_requests WHERE nft_offer_index = $1",
     )
@@ -470,7 +470,7 @@ pub async fn finalize_transfer_by_offer(
                 })));
             }
 
-            // Просто меняем статус на finalized
+            // Just change the status to finalized
             sqlx::query(
                 "UPDATE transfer_requests SET status = 'completed', xrpl_tx_hash = $1, nft_offer_index = NULL WHERE id = $2"
             )
@@ -492,7 +492,7 @@ pub async fn finalize_transfer_by_offer(
             })))
         },
         None => {
-            // Нет transfer для этого offer — возможно это claim собственного NFT
+            // No transfer for this offer - this may be a claim of the user's own NFT
             tracing::info!(
                 "No transfer found for offer_index {}, ignoring",
                 request.offer_index
@@ -505,16 +505,16 @@ pub async fn finalize_transfer_by_offer(
     }
 }
 
-/// POST /api/v1/transfers/complete - завершить передачу
+/// POST /api/v1/transfers/complete - complete transfer
 ///
-/// Вызывается после подтверждения передачи NFT на блокчейне (claim)
+/// Called after NFT transfer confirmation on-chain (claim)
 /// **Requires authentication** - must be the recipient (CRIT-04)
 pub async fn complete_transfer(
     auth: AuthenticatedUser,
     State(state): State<AppState>,
     Json(request): Json<CompleteTransferRequest>,
 ) -> Result<Json<CompleteTransferResponse>> {
-    // Получаем данные передачи
+    // Get transfer data
     let transfer = sqlx::query_as::<_, (Uuid, Uuid, String, Option<String>)>(
         r#"
         SELECT nft_metadata_id, to_user_id, status, re_encrypted_aes_key
@@ -542,7 +542,7 @@ pub async fn complete_transfer(
         ));
     }
 
-    // Проверяем статус - должен быть 'completed' (offer подписан)
+    // Check status - must be 'completed' (offer signed)
     if status != "completed" {
         return Err(ApiError::BadRequest(format!(
             "Transfer is not ready: status = {}",
@@ -553,7 +553,7 @@ pub async fn complete_transfer(
     let re_encrypted = re_encrypted_aes_key
         .ok_or_else(|| ApiError::Internal("Missing re-encrypted key".to_string()))?;
 
-    // Обновляем NFT metadata - новый владелец, новый ключ, флаг re-encrypted
+    // Update NFT metadata - new owner, new key, re-encrypted flag
     sqlx::query(
         r#"
         UPDATE nft_metadata
@@ -567,7 +567,7 @@ pub async fn complete_transfer(
         .execute(&state.db)
         .await?;
 
-    // Обновляем transfer request
+    // Update the transfer request
     sqlx::query(
         "UPDATE transfer_requests SET xrpl_tx_hash = $1, status = 'completed' WHERE id = $2",
     )
@@ -576,7 +576,7 @@ pub async fn complete_transfer(
     .execute(&state.db)
     .await?;
 
-    // Получаем адрес нового владельца
+    // Get the new owner address
     let new_owner =
         sqlx::query_scalar::<_, String>("SELECT wallet_address FROM users WHERE id = $1")
             .bind(to_user_id)
@@ -589,7 +589,7 @@ pub async fn complete_transfer(
         new_owner
     );
 
-    // Аудит
+    // Audit
     state
         .audit_log(
             Some(to_user_id),
@@ -608,7 +608,7 @@ pub async fn complete_transfer(
     }))
 }
 
-/// GET /api/v1/transfers/by-nft/:nft_token_id - найти последний transfer по NFT
+/// GET /api/v1/transfers/by-nft/:nft_token_id - find the latest transfer by NFT
 pub async fn get_transfer_by_nft(
     _auth: AuthenticatedUser,
     State(state): State<AppState>,
@@ -635,7 +635,7 @@ pub async fn get_transfer_by_nft(
     })))
 }
 
-/// GET /api/v1/transfers/by-offer/:offer_index - найти transfer по offer_index
+/// GET /api/v1/transfers/by-offer/:offer_index - find transfer by offer_index
 pub async fn get_transfer_by_offer(
     _auth: AuthenticatedUser,
     State(state): State<AppState>,
@@ -661,7 +661,7 @@ pub async fn get_transfer_by_offer(
     })))
 }
 /// GET /api/v1/transfers/incoming/:wallet_address
-/// Возвращает pending transfers где пользователь - получатель
+/// Returns pending transfers where the user is the recipient
 /// **Requires authentication** - can only view own transfers (HIGH-03)
 pub async fn get_incoming_transfers(
     auth: AuthenticatedUser,
@@ -674,7 +674,7 @@ pub async fn get_incoming_transfers(
             "Can only view your own incoming transfers".into(),
         ));
     }
-    // Находим user_id по wallet
+    // Find user_id by wallet
     let user = sqlx::query_as::<_, (Uuid,)>("SELECT id FROM users WHERE wallet_address = $1")
         .bind(&wallet_address)
         .fetch_optional(&state.db)
@@ -685,7 +685,7 @@ pub async fn get_incoming_transfers(
         None => return Ok(Json(vec![])),
     };
 
-    // Ищем completed transfers (offer подписан, ждёт claim)
+    // Find completed transfers (offer signed, waiting for claim)
     let transfers = sqlx::query_as::<_, (String, String, String, String)>(
         r#"
         SELECT
@@ -730,7 +730,7 @@ pub struct IncomingTransferInfo {
 }
 
 /// GET /api/v1/transfers/history/:wallet_address
-/// Возвращает историю всех transfers пользователя (отправленных и полученных)
+/// Returns the user's full transfer history (sent and received)
 /// **Requires authentication** - can only view own history (HIGH-03)
 pub async fn get_transfer_history(
     auth: AuthenticatedUser,
@@ -743,7 +743,7 @@ pub async fn get_transfer_history(
             "Can only view your own transfer history".into(),
         ));
     }
-    // Находим user_id по wallet
+    // Find user_id by wallet
     let user = sqlx::query_as::<_, (Uuid,)>("SELECT id FROM users WHERE wallet_address = $1")
         .bind(&wallet_address)
         .fetch_optional(&state.db)
@@ -759,7 +759,7 @@ pub async fn get_transfer_history(
         },
     };
 
-    // Получаем отправленные transfers
+    // Get sent transfers
     let sent = sqlx::query_as::<_, (Uuid, String, String, String, String, Option<String>)>(
         r#"
         SELECT
@@ -782,7 +782,7 @@ pub async fn get_transfer_history(
     .fetch_all(&state.db)
     .await?;
 
-    // Получаем полученные transfers
+    // Get received transfers
     let received = sqlx::query_as::<_, (Uuid, String, String, String, String, Option<String>)>(
         r#"
         SELECT
@@ -860,9 +860,9 @@ pub struct TransferHistoryItem {
     pub filename: Option<String>,
 }
 
-/// POST /api/v1/transfers/:transfer_id/cancel - отменить трансфер
+/// POST /api/v1/transfers/:transfer_id/cancel - cancel transfer
 ///
-/// Только отправитель может отменить трансфер до того как получатель примет offer.
+/// Only the sender can cancel the transfer before the recipient accepts the offer.
 #[derive(Debug, serde::Deserialize)]
 pub struct CancelTransferRequest {
     pub wallet_address: String,
@@ -894,7 +894,7 @@ pub async fn cancel_transfer(
         ));
     }
 
-    // Получаем информацию о трансфере
+    // Get transfer information
     let transfer = sqlx::query_as::<_, (Uuid, Uuid, String, Option<String>, String)>(
         r#"
         SELECT
@@ -915,7 +915,7 @@ pub async fn cancel_transfer(
 
     let (from_user_id, nft_metadata_id, status, offer_index, nft_token_id) = transfer;
 
-    // Проверяем что запрос от владельца
+    // Check that the request is from the owner
     let from_wallet =
         sqlx::query_scalar::<_, String>("SELECT wallet_address FROM users WHERE id = $1")
             .bind(from_user_id)
@@ -928,7 +928,7 @@ pub async fn cancel_transfer(
         ));
     }
 
-    // Проверяем статус - можно отменить только pending или completed (до finalize)
+    // Check status - only pending or completed can be cancelled (before finalize)
     if status != "pending" && status != "completed" {
         return Err(ApiError::BadRequest(format!(
             "Cannot cancel transfer with status: {}",
@@ -938,17 +938,17 @@ pub async fn cancel_transfer(
 
     let tx_hash = None;
 
-    // Если есть offer_index и статус completed - нужно отменить offer на XRPL
-    // НО: offer принадлежит отправителю (пользователю), не Oracle!
-    // Oracle не может отменить чужой offer.
-    // Пользователь должен сам отменить offer через Vaulted wallet signing.
+    // If offer_index exists and status is completed, the offer must be cancelled on XRPL
+    // BUT: the offer belongs to the sender (user), not Oracle.
+    // Oracle cannot cancel someone else's offer.
+    // The user must cancel the offer through Vaulted wallet signing.
     //
-    // Что мы можем сделать:
-    // 1. Обновить статус в БД на 'cancelled'
-    // 2. Вернуть NFT в статус 'active'
-    // 3. Сообщить пользователю что нужно отменить offer через активный wallet
+    // What we can do:
+    // 1. Update the database status to 'cancelled'
+    // 2. Return NFT to 'active' status
+    // 3. Tell the user they need to cancel the offer through the active wallet
 
-    // Обновляем статус трансфера
+    // Update transfer status
     sqlx::query(
         "UPDATE transfer_requests SET status = 'cancelled', completed_at = NOW() WHERE id = $1",
     )
@@ -956,13 +956,13 @@ pub async fn cancel_transfer(
     .execute(&state.db)
     .await?;
 
-    // Возвращаем NFT в активный статус
+    // Return NFT to active status
     sqlx::query("UPDATE nft_metadata SET status = 'active' WHERE id = $1")
         .bind(nft_metadata_id)
         .execute(&state.db)
         .await?;
 
-    // Аудит
+    // Audit
     state
         .audit_log(
             Some(from_user_id),

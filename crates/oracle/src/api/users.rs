@@ -1,4 +1,4 @@
-//! Endpoints для пользователей
+//! User endpoints
 
 use axum::{
     extract::{Path, State},
@@ -12,7 +12,7 @@ use crate::{
     services::AppState,
 };
 
-/// POST /api/v1/users/register - регистрация нового пользователя
+/// POST /api/v1/users/register - register a new user
 ///
 /// PUBLIC endpoint - new users can register without auth.
 /// CANNOT update existing user's pre_public_key (HIGH-06 protection).
@@ -21,12 +21,12 @@ pub async fn register_user(
     State(state): State<AppState>,
     Json(request): Json<RegisterUserRequest>,
 ) -> Result<Json<RegisterUserResponse>> {
-    // Валидация адреса кошелька (должен начинаться с 'r')
+    // Validate the wallet address (must start with 'r')
     if !request.wallet_address.starts_with('r') || request.wallet_address.len() < 25 {
         return Err(ApiError::Validation("Invalid wallet address".to_string()));
     }
 
-    // Валидация публичного ключа (должен быть hex, 66 or 128 символов)
+    // Validate the public key (must be hex, 66 or 128 characters)
     if (request.pre_public_key.len() != 66 && request.pre_public_key.len() != 128)
         || !request
             .pre_public_key
@@ -59,7 +59,7 @@ pub async fn register_user(
         }));
     }
 
-    // Создаём нового пользователя
+    // Create a new user
     let user_id = sqlx::query_scalar::<_, uuid::Uuid>(
         r#"
         INSERT INTO users (wallet_address, pre_public_key)
@@ -74,7 +74,7 @@ pub async fn register_user(
 
     tracing::info!("Registered new user: {}", request.wallet_address);
 
-    // Аудит
+    // Audit
     state
         .audit_log(
             Some(user_id),
@@ -152,7 +152,7 @@ pub struct UpdateKeyRequest {
     pub pre_public_key: String,
 }
 
-/// GET /api/v1/users/:wallet_address/public-key - получить публичный ключ
+/// GET /api/v1/users/:wallet_address/public-key - get the public key
 pub async fn get_public_key(
     State(state): State<AppState>,
     Path(wallet_address): Path<String>,

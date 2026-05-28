@@ -1,20 +1,20 @@
 //! XRPL Vault Oracle Server
 //!
-//! Центральный сервер для управления зашифрованными файлами
-//! с NFT-based access control.
+//! Central server for managing encrypted files
+//! with NFT-based access control.
 //!
-//! ## Ответственности Oracle
+//! ## Oracle Responsibilities
 //!
-//! 1. **Хранение метаданных** — связь NFT ↔ зашифрованные файлы
-//! 2. **PRE перешифровка** — при передаче NFT трансформирует encrypted_aes_key
-//! 3. **Координация хранения** — распределяет фрагменты по storage nodes
-//! 4. **Верификация доступа** — проверяет владение NFT перед выдачей данных
+//! 1. **Metadata storage** - links NFTs to encrypted files
+//! 2. **PRE re-encryption** - transforms encrypted_aes_key during NFT transfer
+//! 3. **Storage coordination** - distributes fragments across storage nodes
+//! 4. **Access verification** - checks NFT ownership before returning data
 //!
-//! ## Что Oracle НЕ видит
+//! ## What Oracle Does NOT See
 //!
-//! - Приватные ключи пользователей
-//! - AES-ключи в открытом виде
-//! - Расшифрованное содержимое файлов
+//! - User private keys
+//! - Plaintext AES keys
+//! - Decrypted file content
 
 pub mod api;
 pub mod auth;

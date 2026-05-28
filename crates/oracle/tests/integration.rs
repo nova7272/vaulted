@@ -1,9 +1,9 @@
-//! Интеграционные тесты XRPL Vault
+//! XRPL Vault integration tests
 //!
-//! Требует запущенных сервисов:
-//! - PostgreSQL на localhost:5432
-//! - Storage Node на localhost:9001
-//! - Oracle на localhost:3000
+//! Requires running services:
+//! - PostgreSQL on localhost:5432
+//! - Storage Node on localhost:9001
+//! - Oracle on localhost:3000
 
 use reqwest::Client;
 use serde_json::json;
@@ -11,7 +11,7 @@ use serde_json::json;
 const ORACLE_URL: &str = "http://localhost:3000";
 const STORAGE_URL: &str = "http://localhost:9001";
 
-/// Проверяет что Oracle работает
+/// Checks that Oracle is running
 #[tokio::test]
 async fn test_oracle_health() {
     let client = Client::new();
@@ -30,7 +30,7 @@ async fn test_oracle_health() {
     }
 }
 
-/// Проверяет что Storage Node работает
+/// Checks that Storage Node is running
 #[tokio::test]
 async fn test_storage_health() {
     let client = Client::new();
@@ -49,19 +49,19 @@ async fn test_storage_health() {
     }
 }
 
-/// Тест загрузки фрагмента на Storage Node
+/// Tests fragment upload to Storage Node
 #[tokio::test]
 async fn test_storage_upload_download() {
     let client = Client::new();
 
-    // Проверяем что storage работает
+    // Check that storage is running
     let health = client.get(format!("{}/health", STORAGE_URL)).send().await;
     if health.is_err() {
         println!("⚠ Skipping test: Storage Node not running");
         return;
     }
 
-    // Загружаем тестовый фрагмент
+    // Upload a test fragment
     let test_data = b"Hello, XRPL Vault! This is a test fragment.";
     let key = format!("test_fragment_{}", uuid::Uuid::new_v4());
 
@@ -76,7 +76,7 @@ async fn test_storage_upload_download() {
     assert!(upload_resp.status().is_success(), "Upload failed");
     println!("✓ Fragment uploaded: {}", key);
 
-    // Скачиваем обратно
+    // Download it back
     let download_resp = client
         .get(format!("{}/fragments/{}", STORAGE_URL, key))
         .send()
@@ -89,7 +89,7 @@ async fn test_storage_upload_download() {
     assert_eq!(downloaded.as_ref(), test_data, "Downloaded data mismatch");
     println!("✓ Fragment downloaded and verified");
 
-    // Удаляем
+    // Delete it
     let delete_resp = client
         .delete(format!("{}/fragments/{}", STORAGE_URL, key))
         .send()
@@ -100,19 +100,19 @@ async fn test_storage_upload_download() {
     println!("✓ Fragment deleted");
 }
 
-/// Тест регистрации пользователя через Oracle
+/// Tests user registration through Oracle
 #[tokio::test]
 async fn test_user_registration() {
     let client = Client::new();
 
-    // Проверяем что oracle работает
+    // Check that Oracle is running
     let health = client.get(format!("{}/health", ORACLE_URL)).send().await;
     if health.is_err() {
         println!("⚠ Skipping test: Oracle not running");
         return;
     }
 
-    // Генерируем тестовые данные
+    // Generate test data
     let wallet_address = format!("rTest{}", &uuid::Uuid::new_v4().to_string()[..20]);
     let pre_public_key = hex::encode(vec![0u8; 33]); // Dummy key
 
@@ -140,14 +140,14 @@ async fn test_user_registration() {
     }
 }
 
-/// Полный тест flow: шифрование → загрузка → vault → NFT
+/// Full flow test: encryption -> upload -> vault -> NFT
 #[tokio::test]
 async fn test_full_vault_flow() {
     use xrpl_vault_crypto_core::{AesKey, FileManifest, ProxyReEncryption};
 
     let client = Client::new();
 
-    // Проверяем сервисы
+    // Check services
     let oracle_ok = client
         .get(format!("{}/health", ORACLE_URL))
         .send()
@@ -168,7 +168,7 @@ async fn test_full_vault_flow() {
 
     println!("\n=== Full Vault Flow Test ===\n");
 
-    // 1. Генерируем PRE ключи
+    // 1. Generate PRE keys
     let pre = ProxyReEncryption::new();
     let keypair = pre.generate_keypair();
     let public_key_hex = hex::encode(keypair.export_public_key_bytes());
@@ -176,14 +176,14 @@ async fn test_full_vault_flow() {
     println!("1. Generated PRE keypair");
     println!("   Public key: {}...", &public_key_hex[..32]);
 
-    // 2. Генерируем AES ключ и шифруем данные
+    // 2. Generate an AES key and encrypt data
     let aes_key = AesKey::generate();
     let test_data = b"This is secret file content for XRPL Vault test!";
     let encrypted = aes_key.encrypt(test_data).expect("Encryption failed");
 
     println!("2. Encrypted test data ({} bytes)", test_data.len());
 
-    // 3. Шифруем AES ключ публичным ключом
+    // 3. Encrypt the AES key with the public key
     let encrypted_aes = pre
         .encrypt(&keypair.public_key(), aes_key.as_bytes())
         .expect("PRE encryption failed");
@@ -191,7 +191,7 @@ async fn test_full_vault_flow() {
 
     println!("3. Encrypted AES key with PRE");
 
-    // 4. Загружаем зашифрованные данные на Storage
+    // 4. Upload encrypted data to Storage
     let fragment_key = format!("test_vault_{}", uuid::Uuid::new_v4());
     let fragment_data = encrypted.to_bytes().expect("Serialization failed");
 
@@ -209,7 +209,7 @@ async fn test_full_vault_flow() {
         fragment_key
     );
 
-    // 5. Создаём манифест (using current FileManifest struct)
+    // 5. Create a manifest (using current FileManifest struct)
     let encrypted_hash_str = format!(
         "blake3:{}",
         hex::encode(blake3::hash(&fragment_data).as_bytes())
@@ -226,7 +226,7 @@ async fn test_full_vault_flow() {
     let metadata_hash = manifest.compute_hash();
     println!("5. Created manifest, hash: {}...", &metadata_hash[..32]);
 
-    // 6. Регистрируем пользователя
+    // 6. Register the user
     let wallet_address = format!("rTestVault{}", &uuid::Uuid::new_v4().to_string()[..12]);
 
     let user_req = json!({
@@ -244,7 +244,7 @@ async fn test_full_vault_flow() {
 
     println!("6. User registration: {}", user_resp.status());
 
-    // 7. Создаём vault (это минтит NFT)
+    // 7. Create a vault (this mints the NFT)
     let vault_req = json!({
         "wallet_address": wallet_address,
         "pre_public_key": public_key_hex,
@@ -302,41 +302,41 @@ async fn test_full_vault_flow() {
     println!("\n=== Test Complete ===\n");
 }
 
-/// Тест криптографии: шифрование и расшифровка
+/// Cryptography test: encryption and decryption
 #[tokio::test]
 async fn test_crypto_roundtrip() {
     use xrpl_vault_crypto_core::{AesKey, ProxyReEncryption};
 
     println!("\n=== Crypto Roundtrip Test ===\n");
 
-    // 1. Генерируем ключи
+    // 1. Generate keys
     let pre = ProxyReEncryption::new();
     let alice = pre.generate_keypair();
 
     println!("1. Generated keypair for Alice");
 
-    // 2. Alice шифрует файл
+    // 2. Alice encrypts the file
     let secret_data = b"Super secret document content!";
     let aes_key = AesKey::generate();
     let encrypted_data = aes_key.encrypt(secret_data).expect("AES encrypt failed");
 
     println!("2. Alice encrypted data with AES");
 
-    // 3. Alice шифрует AES ключ своим публичным ключом
+    // 3. Alice encrypts the AES key with her public key
     let encrypted_aes = pre
         .encrypt(&alice.public_key(), aes_key.as_bytes())
         .expect("PRE encrypt failed");
 
     println!("3. Alice encrypted AES key with her PRE public key");
 
-    // 4. Сериализация и десериализация
+    // 4. Serialization and deserialization
     let serialized = encrypted_aes.to_base64().expect("Serialization failed");
     let deserialized = xrpl_vault_crypto_core::EncryptedPreData::from_base64(&serialized)
         .expect("Deserialization failed");
 
     println!("4. Serialized and deserialized encrypted key");
 
-    // 5. Alice расшифровывает
+    // 5. Alice decrypts
     let decrypted_aes = pre
         .decrypt(&alice, &deserialized)
         .expect("PRE decrypt failed");
@@ -352,5 +352,5 @@ async fn test_crypto_roundtrip() {
     println!("\n✓ Crypto roundtrip successful!\n");
 }
 
-// Helper для SHA256
+// SHA256 helper
 use sha2::Digest;

@@ -1,11 +1,11 @@
-//! Модели данных Oracle
+//! Oracle data models
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use uuid::Uuid;
 
-/// Пользователь (кошелёк XRPL)
+/// User (XRPL wallet)
 #[derive(Debug, Clone, Serialize)]
 pub struct User {
     pub id: Uuid,
@@ -16,7 +16,7 @@ pub struct User {
     pub last_seen_at: Option<DateTime<Utc>>,
 }
 
-/// Метаданные NFT
+/// NFT metadata
 #[derive(Debug, Clone, Serialize)]
 pub struct NftMetadata {
     pub id: Uuid,
@@ -30,7 +30,7 @@ pub struct NftMetadata {
     pub updated_at: DateTime<Utc>,
 }
 
-/// Манифест файла
+/// File manifest
 #[derive(Debug, Clone, Serialize)]
 pub struct FileManifestRow {
     pub id: Uuid,
@@ -43,7 +43,7 @@ pub struct FileManifestRow {
     pub created_at: DateTime<Utc>,
 }
 
-/// Фрагмент файла
+/// File fragment
 #[derive(Debug, Clone, Serialize)]
 pub struct FileFragment {
     pub id: Uuid,
@@ -72,7 +72,7 @@ pub struct StorageNode {
     pub updated_at: DateTime<Utc>,
 }
 
-/// Запрос на передачу NFT
+/// NFT transfer request
 #[derive(Debug, Clone, Serialize)]
 pub struct TransferRequest {
     pub id: Uuid,
@@ -88,7 +88,7 @@ pub struct TransferRequest {
     pub completed_at: Option<DateTime<Utc>>,
 }
 
-/// Статус передачи
+/// Transfer status
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TransferStatus {
@@ -126,7 +126,7 @@ impl std::str::FromStr for TransferStatus {
     }
 }
 
-/// Статус NFT
+/// NFT status
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NftStatus {
@@ -145,7 +145,7 @@ impl std::fmt::Display for NftStatus {
     }
 }
 
-/// Запись аудита
+/// Audit record
 #[derive(Debug, Clone, Serialize)]
 pub struct AuditEntry {
     pub user_id: Option<Uuid>,
@@ -158,7 +158,7 @@ pub struct AuditEntry {
 
 // ==================== API DTOs ====================
 
-/// Запрос регистрации пользователя
+/// User registration request
 #[derive(Debug, Deserialize)]
 pub struct RegisterUserRequest {
     pub wallet_address: String,
@@ -166,7 +166,7 @@ pub struct RegisterUserRequest {
     pub signature: String,
 }
 
-/// Ответ регистрации пользователя
+/// User registration response
 #[derive(Debug, Serialize)]
 pub struct RegisterUserResponse {
     pub user_id: Uuid,
@@ -174,7 +174,7 @@ pub struct RegisterUserResponse {
     pub created: bool,
 }
 
-/// Запрос регистрации файла
+/// File registration request
 #[derive(Debug, Deserialize)]
 pub struct RegisterFileRequest {
     pub nft_token_id: String,
@@ -183,7 +183,7 @@ pub struct RegisterFileRequest {
     pub metadata_hash: String,
 }
 
-/// DTO манифеста файла
+/// File manifest DTO
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileManifestDto {
     pub encrypted_filename: String,
@@ -193,7 +193,7 @@ pub struct FileManifestDto {
     pub fragments: Vec<FileFragmentDto>,
 }
 
-/// DTO фрагмента файла
+/// File fragment DTO
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileFragmentDto {
     pub index: u32,
@@ -205,7 +205,7 @@ pub struct FileFragmentDto {
     pub storage_key: String,
 }
 
-/// Ответ регистрации файла
+/// File registration response
 #[derive(Debug, Serialize)]
 pub struct RegisterFileResponse {
     pub file_id: Uuid,
@@ -213,7 +213,7 @@ pub struct RegisterFileResponse {
     pub fragments_count: u32,
 }
 
-/// Ответ с доступом к файлу
+/// File access response
 #[derive(Debug, Serialize)]
 pub struct FileAccessResponse {
     pub nft_token_id: String,
@@ -234,7 +234,7 @@ pub struct FileAccessResponse {
     pub onchain_owner: Option<String>,
 }
 
-/// Информация для скачивания фрагмента
+/// Fragment download information
 #[derive(Debug, Serialize)]
 pub struct FragmentDownloadInfo {
     pub index: u32,
@@ -243,7 +243,7 @@ pub struct FragmentDownloadInfo {
     pub hash: String,
 }
 
-/// Запрос URL для загрузки фрагмента
+/// Fragment upload URL request
 #[derive(Debug, Deserialize)]
 pub struct FragmentUploadRequest {
     pub file_id: Uuid,
@@ -252,7 +252,7 @@ pub struct FragmentUploadRequest {
     pub fragment_size: u64,
 }
 
-/// Ответ с URL для загрузки
+/// Upload URL response
 #[derive(Debug, Serialize)]
 pub struct FragmentUploadResponse {
     pub upload_url: String,
@@ -260,7 +260,7 @@ pub struct FragmentUploadResponse {
     pub storage_key: String,
 }
 
-/// Подтверждение загрузки
+/// Upload confirmation
 #[derive(Debug, Deserialize)]
 pub struct ConfirmUploadRequest {
     pub file_id: Uuid,
@@ -269,7 +269,7 @@ pub struct ConfirmUploadRequest {
     pub storage_key: String,
 }
 
-/// Запрос на передачу NFT
+/// NFT transfer request
 #[derive(Debug, Deserialize)]
 pub struct InitiateTransferRequest {
     pub nft_token_id: String,
@@ -279,14 +279,14 @@ pub struct InitiateTransferRequest {
     pub re_encryption_key: String,
 }
 
-/// Ответ на инициацию передачи
+/// Transfer initiation response
 #[derive(Debug, Serialize)]
 pub struct InitiateTransferResponse {
     pub transfer_id: Uuid,
     pub status: String,
 }
 
-/// Статус передачи
+/// Transfer status
 #[derive(Debug, Serialize)]
 pub struct TransferStatusResponse {
     pub transfer_id: Uuid,
@@ -295,21 +295,21 @@ pub struct TransferStatusResponse {
     pub error: Option<String>,
 }
 
-/// Завершение передачи
+/// Transfer completion
 #[derive(Debug, Deserialize)]
 pub struct CompleteTransferRequest {
     pub transfer_id: Uuid,
     pub xrpl_tx_hash: String,
 }
 
-/// Ответ завершения передачи
+/// Transfer completion response
 #[derive(Debug, Serialize)]
 pub struct CompleteTransferResponse {
     pub success: bool,
     pub new_owner: String,
 }
 
-/// Публичный ключ пользователя
+/// User public key
 #[derive(Debug, Serialize)]
 pub struct UserPublicKeyResponse {
     pub wallet_address: String,
