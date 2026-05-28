@@ -1,6 +1,6 @@
-# Vaulted — быстрый старт
+# Vaulted - Quick Start
 
-## 1. Подготовка
+## 1. Preparation
 
 ```bash
 git clone <your-repo>
@@ -8,9 +8,9 @@ cd xrpl-vault
 cp .env.example .env
 ```
 
-Минимально для локальной разработки обычно достаточно PostgreSQL/Redis из `docker-compose.yml` и Oracle URL по умолчанию.
+For local development, PostgreSQL/Redis from `docker-compose.yml` and the default Oracle URL are usually enough.
 
-## 2. Настройка `.env`
+## 2. Configure `.env`
 
 ```bash
 DATABASE_URL=postgres://vaulted:vaulted@localhost:5432/vaulted
@@ -20,21 +20,21 @@ XRPL_RPC_URL=https://s.altnet.rippletest.net:51234
 ORACLE_URL=http://localhost:3000
 ```
 
-Для live XRPL testnet flow нужен активированный testnet account. Seed/identity/wallet material создаётся локально Vaulted desktop клиентом и не должен храниться в `.env` для production.
+The live XRPL testnet flow requires an activated testnet account. Seed/identity/wallet material is created locally by the Vaulted desktop client and must not be stored in `.env` for production.
 
-## 3. Запуск инфраструктуры
+## 3. Start Infrastructure
 
 ```bash
 make dev
 ```
 
-Проверка:
+Check:
 
 ```bash
 docker compose ps
 ```
 
-## 4. Запуск сервисов
+## 4. Start Services
 
 Oracle:
 
@@ -73,7 +73,7 @@ cargo check --workspace
 cargo test --workspace
 ```
 
-## 8. Основные dev flows
+## 8. Main Dev Flows
 
 - Create or restore Vaulted seed phrase.
 - Check Wallet balance, receive QR, and Send XRP on testnet.
@@ -87,4 +87,4 @@ cargo test --workspace
 - Share file access with recipient identity using fingerprint confirmation and `KeyEnvelope` grants.
 - Approve device pairing / XRPL signing / file grants through signed QR payloads.
 
-Текущий XRPL Grants runtime checkpoint и финальный checklist описаны в `docs/RUNTIME_VERIFICATION.md`.
+The current XRPL Grants runtime checkpoint and final checklist are described in `docs/RUNTIME_VERIFICATION.md`.
