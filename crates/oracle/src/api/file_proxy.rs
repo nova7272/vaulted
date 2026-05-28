@@ -42,6 +42,24 @@ pub struct ReplicaInfo {
     pub status: String,
 }
 
+fn classify_reqwest_error(error: &reqwest::Error) -> &'static str {
+    if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connect"
+    } else if error.is_request() {
+        "request"
+    } else if error.is_body() {
+        "body"
+    } else if error.is_decode() {
+        "decode"
+    } else if error.is_status() {
+        "status"
+    } else {
+        "unknown"
+    }
+}
+
 // ==================== Handlers ====================
 
 /// POST /api/v1/files/upload?nft_token_id=...
@@ -194,11 +212,25 @@ pub async fn upload_file(
                 "active".to_string()
             },
             Ok(resp) => {
-                tracing::warn!("Upload to {} failed: HTTP {}", node.id, resp.status());
+                tracing::warn!(
+                    operation = "upload",
+                    storage_node_id = %node.id,
+                    nft_token_id = %params.nft_token_id,
+                    endpoint_status = resp.status().as_u16(),
+                    bytes = file_size,
+                    "Upload to storage node returned non-success"
+                );
                 "failed".to_string()
             },
             Err(e) => {
-                tracing::warn!("Upload to {} failed: {}", node.id, e);
+                tracing::warn!(
+                    operation = "upload",
+                    storage_node_id = %node.id,
+                    nft_token_id = %params.nft_token_id,
+                    error_class = classify_reqwest_error(&e),
+                    bytes = file_size,
+                    "Upload to storage node failed"
+                );
                 "failed".to_string()
             },
         };
@@ -463,9 +495,10 @@ pub async fn download_file(
             },
             Err(e) => {
                 tracing::warn!(
+                    operation = "download",
                     storage_node_id = %node_id,
                     nft_token_id = %nft_token_id,
-                    error = %e,
+                    error_class = classify_reqwest_error(&e),
                     "Failed to fetch encrypted file fragment from storage node"
                 );
             },
@@ -564,10 +597,22 @@ pub async fn delete_file_storage(
                 );
             },
             Ok(resp) => {
-                tracing::warn!("Delete from {} returned: {}", node_id, resp.status());
+                tracing::warn!(
+                    operation = "delete",
+                    storage_node_id = %node_id,
+                    nft_token_id = %nft_token_id,
+                    endpoint_status = resp.status().as_u16(),
+                    "Delete from storage node returned non-success"
+                );
             },
             Err(e) => {
-                tracing::warn!("Failed to delete from {}: {}", node_id, e);
+                tracing::warn!(
+                    operation = "delete",
+                    storage_node_id = %node_id,
+                    nft_token_id = %nft_token_id,
+                    error_class = classify_reqwest_error(&e),
+                    "Failed to delete from storage node"
+                );
             },
         }
     }
@@ -653,4 +698,32 @@ pub struct FileStatusResponse {
     pub active_replicas: usize,
     pub target_replicas: usize,
     pub healthy: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::classify_reqwest_error;
+
+    fn assert_safe_error_class(label: &str) {
+        const ALLOWED: &[&str] = &[
+            "timeout", "connect", "request", "body", "decode", "status", "unknown",
+        ];
+
+        assert!(ALLOWED.contains(&label));
+        assert!(!label.contains("token="));
+        assert!(!label.contains("/fragments/"));
+        assert!(!label.contains("file_nft_r0"));
+    }
+
+    #[tokio::test]
+    async fn classify_reqwest_error_returns_only_safe_labels() {
+        let error = reqwest::Client::new()
+            .get("http://127.0.0.1:9/fragments/file_nft_r0?token=secret")
+            .send()
+            .await
+            .expect_err("unused local port should fail");
+
+        let label = classify_reqwest_error(&error);
+        assert_safe_error_class(label);
+    }
 }
