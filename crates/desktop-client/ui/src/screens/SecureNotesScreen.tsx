@@ -71,7 +71,9 @@ export function SecureNotesScreen({ oracleConnected }: { oracleConnected?: boole
             setLoadingNotes(true);
             const nfts = await invoke<NftInfo[]>('list_my_nfts');
             setStoredNotes(nfts.filter(n => n.filename?.toLowerCase().endsWith('.secure') && n.fileStatus !== 'deleted'));
-        } catch (e) { console.error('Failed to load secure notes:', e); } finally { setLoadingNotes(false); }
+        } catch {
+            // Secure notes list refresh is best-effort; existing state remains visible.
+        } finally { setLoadingNotes(false); }
     };
 
     const viewNote = async (nft: NftInfo) => {

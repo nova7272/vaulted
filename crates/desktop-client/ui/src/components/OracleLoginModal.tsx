@@ -109,11 +109,11 @@ const classifyQrError = (error: unknown): QrErrorClassification => {
 }
 
 const qrDebug = (details: Record<string, string | boolean | number | null | undefined>) => {
-    console.debug('[qr-login]', details)
+    void details
 }
 
 const qrWarn = (details: Record<string, string | boolean | number | null | undefined>) => {
-    console.warn('[qr-login]', details)
+    void details
 }
 
 export function OracleLoginModal({ isOpen, onClose, onSuccess, startOnOpen = false }: OracleLoginModalProps) {

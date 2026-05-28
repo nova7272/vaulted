@@ -166,8 +166,8 @@ export default function SettingsScreen({ user }: Props) {
     try {
       setLoading(true);
       setBalance(await invoke<string>("get_xrp_balance"));
-    } catch (e) {
-      console.error(e);
+    } catch {
+      // Balance refresh is best-effort; the previous value remains visible.
     } finally {
       setLoading(false);
     }
@@ -178,8 +178,8 @@ export default function SettingsScreen({ user }: Props) {
       setOracleStatus(
         await invoke<OracleStatus>("get_oracle_auth_status_extended"),
       );
-    } catch (e) {
-      console.error(e);
+    } catch {
+      // Oracle status refresh is best-effort; the previous status remains visible.
     }
   };
 
@@ -193,7 +193,6 @@ export default function SettingsScreen({ user }: Props) {
         }),
       );
     } catch (e) {
-      console.error(e);
       setDevicesError(String(e));
     } finally {
       setDevicesLoading(false);
@@ -208,7 +207,6 @@ export default function SettingsScreen({ user }: Props) {
       const request = await invoke<DevicePairingRequest>("start_vaulted_device_pairing", {});
       setPairingRequest(request);
     } catch (e) {
-      console.error(e);
       setPairingError(String(e));
     } finally {
       setPairingLoading(false);
@@ -241,7 +239,6 @@ export default function SettingsScreen({ user }: Props) {
       });
       setXrplSigningRequest(request);
     } catch (e) {
-      console.error(e);
       setXrplSigningError(String(e));
     } finally {
       setXrplSigningLoading(false);
@@ -341,7 +338,6 @@ export default function SettingsScreen({ user }: Props) {
       });
       await fetchDevices();
     } catch (e) {
-      console.error(e);
       setDevicesError(String(e));
     }
   };
