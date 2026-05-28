@@ -3,12 +3,12 @@
 -- Version: 1.0.0
 -- ============================================
 
--- Расширения
+-- Extensions
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
 -- ============================================
--- Пользователи (кошельки XRPL)
+-- Users (XRPL wallets)
 -- ============================================
 CREATE TABLE users (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -16,10 +16,10 @@ CREATE TABLE users (
     -- XRPL wallet address (rXXX...)
     wallet_address VARCHAR(35) NOT NULL UNIQUE,
     
-    -- Публичный ключ PRE (hex-encoded, 64 bytes = 128 chars)
+    -- PRE public key (hex-encoded, 64 bytes = 128 chars)
     pre_public_key VARCHAR(130) NOT NULL,
     
-    -- Метаданные
+    -- Metadata
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_seen_at TIMESTAMPTZ
@@ -28,7 +28,7 @@ CREATE TABLE users (
 CREATE INDEX idx_users_wallet_address ON users(wallet_address);
 
 -- ============================================
--- NFT метаданные
+-- NFT metadata
 -- ============================================
 CREATE TABLE nft_metadata (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -36,23 +36,23 @@ CREATE TABLE nft_metadata (
     -- XRPL NFT TokenID
     nft_token_id VARCHAR(64) NOT NULL UNIQUE,
     
-    -- Текущий владелец
+    -- Current owner
     owner_id UUID NOT NULL REFERENCES users(id),
     
-    -- Зашифрованный AES-ключ (base64, PRE encrypted)
+    -- Encrypted AES key (base64, PRE encrypted)
     encrypted_aes_key TEXT NOT NULL,
     
-    -- Hash метаданных (для верификации, хранится в URI NFT)
+    -- Metadata hash (for verification, stored in the NFT URI)
     metadata_hash VARCHAR(71) NOT NULL, -- "sha256:" + 64 hex chars
     
-    -- Версия криптографической схемы
+    -- Cryptographic scheme version
     crypto_version SMALLINT NOT NULL DEFAULT 1,
     
-    -- Статус
+    -- Status
     status VARCHAR(20) NOT NULL DEFAULT 'active'
         CHECK (status IN ('active', 'transferring', 'archived')),
     
-    -- Временные метки
+    -- Timestamps
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -62,23 +62,23 @@ CREATE INDEX idx_nft_metadata_owner ON nft_metadata(owner_id);
 CREATE INDEX idx_nft_metadata_status ON nft_metadata(status);
 
 -- ============================================
--- Манифест файлов
+-- File manifest
 -- ============================================
 CREATE TABLE file_manifests (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     
-    -- Связь с NFT
+    -- NFT link
     nft_metadata_id UUID NOT NULL REFERENCES nft_metadata(id) ON DELETE CASCADE,
     
-    -- Информация о файле
+    -- File information
     encrypted_filename VARCHAR(512) NOT NULL,
     original_size BIGINT NOT NULL,
     mime_type VARCHAR(127) NOT NULL,
     
-    -- Hash оригинального файла (для верификации после расшифровки)
+    -- Original file hash (for verification after decryption)
     original_hash VARCHAR(71) NOT NULL,
     
-    -- Количество фрагментов
+    -- Fragment count
     fragment_count INT NOT NULL,
     
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -87,28 +87,28 @@ CREATE TABLE file_manifests (
 CREATE INDEX idx_file_manifests_nft ON file_manifests(nft_metadata_id);
 
 -- ============================================
--- Фрагменты файлов
+-- File fragments
 -- ============================================
 CREATE TABLE file_fragments (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     
-    -- Связь с манифестом
+    -- Manifest link
     manifest_id UUID NOT NULL REFERENCES file_manifests(id) ON DELETE CASCADE,
     
-    -- Порядковый номер фрагмента
+    -- Fragment sequence number
     fragment_index INT NOT NULL,
     
-    -- Размер фрагмента
+    -- Fragment size
     fragment_size BIGINT NOT NULL,
     
-    -- Hash зашифрованного фрагмента
+    -- Encrypted fragment hash
     encrypted_hash VARCHAR(71) NOT NULL,
     
-    -- Информация о хранении
-    storage_node_id VARCHAR(64) NOT NULL,  -- ID ноды хранения
-    storage_key VARCHAR(255) NOT NULL,      -- Ключ/путь в хранилище
+    -- Storage information
+    storage_node_id VARCHAR(64) NOT NULL,  -- Storage node ID
+    storage_key VARCHAR(255) NOT NULL,      -- Storage key/path
     
-    -- Статус репликации
+    -- Replication status
     replication_count INT NOT NULL DEFAULT 1,
     
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -120,7 +120,7 @@ CREATE INDEX idx_file_fragments_manifest ON file_fragments(manifest_id);
 CREATE INDEX idx_file_fragments_storage ON file_fragments(storage_node_id);
 
 -- ============================================
--- Storage Nodes (серверы хранения)
+-- Storage Nodes (storage servers)
 -- ============================================
 CREATE TABLE storage_nodes (
     id VARCHAR(64) PRIMARY KEY,
@@ -129,7 +129,7 @@ CREATE TABLE storage_nodes (
     endpoint_url VARCHAR(255) NOT NULL,
     region VARCHAR(50) NOT NULL,  -- 'eu-central', 'us-east', 'ap-northeast'
     
-    -- Статус и метрики
+    -- Status and metrics
     status VARCHAR(20) NOT NULL DEFAULT 'active'
         CHECK (status IN ('active', 'maintenance', 'offline')),
     total_space_bytes BIGINT NOT NULL DEFAULT 0,
@@ -147,7 +147,7 @@ CREATE INDEX idx_storage_nodes_status ON storage_nodes(status);
 CREATE INDEX idx_storage_nodes_region ON storage_nodes(region);
 
 -- ============================================
--- Запросы на передачу NFT
+-- NFT transfer requests
 -- ============================================
 CREATE TABLE transfer_requests (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -155,27 +155,27 @@ CREATE TABLE transfer_requests (
     -- NFT
     nft_metadata_id UUID NOT NULL REFERENCES nft_metadata(id),
     
-    -- Участники
+    -- Participants
     from_user_id UUID NOT NULL REFERENCES users(id),
     to_user_id UUID NOT NULL REFERENCES users(id),
     
-    -- Re-encryption key (сериализованный, base64)
+    -- Re-encryption key (serialized, base64)
     re_encryption_key TEXT NOT NULL,
     
-    -- Статус процесса
+    -- Process status
     status VARCHAR(20) NOT NULL DEFAULT 'pending'
         CHECK (status IN ('pending', 'processing', 'completed', 'failed', 'cancelled')),
     
-    -- Результат перешифровки (новый encrypted_aes_key)
+    -- Re-encryption result (new encrypted_aes_key)
     re_encrypted_aes_key TEXT,
     
-    -- Информация об ошибке (если failed)
+    -- Error information (if failed)
     error_message TEXT,
     
-    -- XRPL transaction hash (подтверждение передачи NFT)
+    -- XRPL transaction hash (NFT transfer confirmation)
     xrpl_tx_hash VARCHAR(64),
     
-    -- Временные метки
+    -- Timestamps
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     processed_at TIMESTAMPTZ,
     completed_at TIMESTAMPTZ
@@ -187,30 +187,30 @@ CREATE INDEX idx_transfer_requests_from ON transfer_requests(from_user_id);
 CREATE INDEX idx_transfer_requests_to ON transfer_requests(to_user_id);
 
 -- ============================================
--- Audit Log (журнал операций)
+-- Audit Log (operation log)
 -- ============================================
 CREATE TABLE audit_log (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     
-    -- Кто выполнил действие
+    -- Actor who performed the action
     user_id UUID REFERENCES users(id),
     
-    -- Тип действия
+    -- Action type
     action VARCHAR(50) NOT NULL,
     -- 'file_upload', 'file_download', 'nft_mint', 'nft_transfer_init',
     -- 'nft_transfer_complete', 'pre_re_encrypt', 'user_register'
     
-    -- Связанные сущности
+    -- Related entities
     nft_token_id VARCHAR(64),
     
-    -- Детали (JSON)
+    -- Details (JSON)
     details JSONB,
     
-    -- IP и User-Agent
+    -- IP and User-Agent
     ip_address INET,
     user_agent TEXT,
     
-    -- Время
+    -- Time
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -220,10 +220,10 @@ CREATE INDEX idx_audit_log_nft ON audit_log(nft_token_id);
 CREATE INDEX idx_audit_log_created ON audit_log(created_at DESC);
 
 -- ============================================
--- Функции и триггеры
+-- Functions and triggers
 -- ============================================
 
--- Автоматическое обновление updated_at
+-- Automatic updated_at update
 CREATE OR REPLACE FUNCTION update_updated_at_column()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -248,17 +248,17 @@ CREATE TRIGGER update_storage_nodes_updated_at
     EXECUTE FUNCTION update_updated_at_column();
 
 -- ============================================
--- Начальные данные (dev)
+-- Initial data (dev)
 -- ============================================
 
--- Тестовые storage nodes
+-- Test storage nodes
 INSERT INTO storage_nodes (id, endpoint_url, region, status, total_space_bytes) VALUES
     ('node-eu-1', 'http://localhost:9001', 'eu-central', 'active', 107374182400),   -- 100GB
     ('node-us-1', 'http://localhost:9002', 'us-east', 'active', 107374182400),
     ('node-ap-1', 'http://localhost:9003', 'ap-northeast', 'active', 107374182400);
 
 -- ============================================
--- Комментарии к таблицам
+-- Table comments
 -- ============================================
 COMMENT ON TABLE users IS 'XRPL wallet users with PRE public keys';
 COMMENT ON TABLE nft_metadata IS 'NFT metadata with encrypted AES keys';

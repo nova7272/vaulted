@@ -1,33 +1,33 @@
 -- Migration: 005_replication.sql
--- Добавляет поддержку репликации файлов на несколько storage nodes
+-- Adds support for file replication across multiple storage nodes
 
 -- ============================================
--- Таблица реплик файлов
+-- File replicas table
 -- ============================================
 CREATE TABLE IF NOT EXISTS file_replicas (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     
-    -- NFT Token ID (файл привязан к NFT)
+    -- NFT Token ID (file is linked to an NFT)
     nft_token_id VARCHAR(64) NOT NULL,
     
     -- Storage node
     storage_node_id VARCHAR(64) NOT NULL REFERENCES storage_nodes(id),
     storage_key VARCHAR(255) NOT NULL,
     
-    -- Размер файла
+    -- File size
     size_bytes BIGINT NOT NULL DEFAULT 0,
     
-    -- Статус реплики
+    -- Replica status
     status VARCHAR(20) NOT NULL DEFAULT 'pending'
         CHECK (status IN ('pending', 'uploading', 'active', 'failed', 'deleted')),
     
-    -- Метаданные
-    verified_at TIMESTAMPTZ,  -- Когда последний раз проверяли целостность
+    -- Metadata
+    verified_at TIMESTAMPTZ,  -- When integrity was last checked
     
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     
-    -- Уникальность: один файл - один storage node
+    -- Uniqueness: one file - one storage node
     UNIQUE (nft_token_id, storage_node_id)
 );
 
@@ -36,33 +36,33 @@ CREATE INDEX idx_file_replicas_storage ON file_replicas(storage_node_id);
 CREATE INDEX idx_file_replicas_status ON file_replicas(status);
 
 -- ============================================
--- Настройки репликации (глобальные)
+-- Replication settings (global)
 -- ============================================
 CREATE TABLE IF NOT EXISTS replication_settings (
     id VARCHAR(64) PRIMARY KEY DEFAULT 'default',
     
-    -- Количество копий каждого файла
+    -- Number of copies of each file
     replication_factor INT NOT NULL DEFAULT 2,
     
-    -- Стратегия выбора nodes
-    -- 'region_diverse' - разные регионы
-    -- 'load_balanced' - наименьшая загрузка
-    -- 'mixed' - комбинация (предпочтительно)
+    -- Node selection strategy
+    -- 'region_diverse' - different regions
+    -- 'load_balanced' - lowest load
+    -- 'mixed' - combination (preferred)
     strategy VARCHAR(32) NOT NULL DEFAULT 'mixed',
     
-    -- Минимальное количество активных реплик для доступа к файлу
+    -- Minimum number of active replicas for file access
     min_active_replicas INT NOT NULL DEFAULT 1,
     
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Дефолтные настройки
+-- Default settings
 INSERT INTO replication_settings (id, replication_factor, strategy, min_active_replicas)
 VALUES ('default', 2, 'mixed', 1)
 ON CONFLICT (id) DO NOTHING;
 
 -- ============================================
--- Триггер обновления updated_at
+-- updated_at update trigger
 -- ============================================
 CREATE OR REPLACE FUNCTION update_file_replicas_updated_at()
 RETURNS TRIGGER AS $$
@@ -79,7 +79,7 @@ CREATE TRIGGER update_file_replicas_updated_at
     EXECUTE FUNCTION update_file_replicas_updated_at();
 
 -- ============================================
--- View для удобного доступа к репликам
+-- View for convenient replica access
 -- ============================================
 CREATE OR REPLACE VIEW file_replicas_view AS
 SELECT 
