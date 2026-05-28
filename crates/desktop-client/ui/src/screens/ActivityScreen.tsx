@@ -137,8 +137,8 @@ export default function ActivityScreen({ oracleConnected }: ActivityScreenProps)
             setIncomingOffers(incoming)
             setOutgoingOffers(outgoing)
             setTransferHistory(history)
-        } catch (e) {
-            console.error('Failed to load activity data:', e)
+        } catch {
+            // Individual activity requests already fall back to empty lists.
         } finally {
             setLoading(false)
         }

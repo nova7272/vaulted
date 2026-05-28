@@ -90,7 +90,6 @@ export function OracleAuthProvider({ children, onLoginRequired }: OracleAuthProv
 
                 return basicStatus.authenticated
             } catch (e2) {
-                console.error('Failed to check Oracle auth:', e2)
                 setState(prev => ({
                     ...prev,
                     isAuthenticated: false,
@@ -104,16 +103,13 @@ export function OracleAuthProvider({ children, onLoginRequired }: OracleAuthProv
 
     const refreshToken = useCallback(async (): Promise<boolean> => {
         try {
-            console.log('Attempting token refresh...')
             const success = await invoke<boolean>('oracle_refresh_token')
             if (success) {
-                console.log('Token refreshed successfully')
                 await checkAuth()
                 return true
             }
             return false
-        } catch (e) {
-            console.error('Token refresh failed:', e)
+        } catch {
             setState(prev => ({
                 ...prev,
                 isAuthenticated: false,
@@ -144,14 +140,12 @@ export function OracleAuthProvider({ children, onLoginRequired }: OracleAuthProv
                     }>('get_oracle_auth_status_extended')
 
                     if (status.needsRefresh && status.hasRefreshToken) {
-                        console.log('Token expires soon, auto-refreshing...')
                         await refreshToken()
                     } else if (!status.authenticated && status.hasRefreshToken) {
-                        console.log('Token expired, attempting refresh...')
                         await refreshToken()
                     }
-                } catch (e) {
-                    console.error('Auto-refresh check failed:', e)
+                } catch {
+                    // Auto-refresh status checks are best-effort between user actions.
                 }
             }, 30000)
         }
@@ -194,7 +188,6 @@ export function OracleAuthProvider({ children, onLoginRequired }: OracleAuthProv
                 throw new Error('Login failed')
             }
         } catch (e) {
-            console.error('Oracle login failed:', e)
             setState(prev => ({
                 ...prev,
                 isLoading: false,
@@ -217,8 +210,8 @@ export function OracleAuthProvider({ children, onLoginRequired }: OracleAuthProv
                 needsRefresh: false,
                 deviceFingerprint: prev.deviceFingerprint,
             }))
-        } catch (e) {
-            console.error('Oracle logout failed:', e)
+        } catch {
+            // Oracle logout is best-effort; callers can retry auth actions.
         }
     }, [])
 

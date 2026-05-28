@@ -156,7 +156,9 @@ export default function UploadScreen({ onNavigate }: { oracleConnected?: boolean
         nftTokenId: r.nft_token_id,
         offerIndex: r.offer_index,
       })
-    } catch (e) { console.error('Failed to cancel/burn on oracle:', e) }
+    } catch {
+      // Server-side cancel/burn cleanup is best-effort after local upload flow changes.
+    }
   }, [])
 
   // --- File progress listener ---
@@ -185,7 +187,9 @@ export default function UploadScreen({ onNavigate }: { oracleConnected?: boolean
             }
           } else if (event.payload.type === 'cancelled') setDragOver(false)
         })
-      } catch(e) { console.warn('Drag-drop not available:', e) }
+      } catch {
+        // Drag-drop registration is optional; file picker remains available.
+      }
     }
     setup()
     return () => { if (cleanup) cleanup() }

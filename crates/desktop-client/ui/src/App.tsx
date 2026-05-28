@@ -92,8 +92,7 @@ function App() {
                 walletAddress: string | null
             }>('get_oracle_auth_status')
             setOracleAuthed(status.authenticated)
-        } catch (e) {
-            console.error('Failed to check Oracle auth:', e)
+        } catch {
             setOracleAuthed(false)
         }
     }, [])
@@ -110,15 +109,17 @@ function App() {
                 // Check Oracle auth after Vaulted auth
                 checkOracleAuth()
             }
-        } catch(e){ console.error(e) } finally{ setLoading(false) }
+        } catch {
+            // Startup auth restore is best-effort; loading state is cleared below.
+        } finally { setLoading(false) }
     })() },[checkOracleAuth])
 
     const handleLogout = useCallback(async () => {
         try {
             await invoke('oracle_logout').catch(() => {})
             await invoke('logout')
-        } catch (e) {
-            console.error('Failed to log out:', e)
+        } catch {
+            // Logout cleanup is best-effort; local UI state is reset below.
         }
         setUser(null)
         setAuthed(false)
@@ -155,9 +156,8 @@ function App() {
                 if (cancelled) return
                 setOracleAuthed(authStatus.authenticated)
                 if (fullStatus) setSystemStatus(fullStatus)
-            } catch (e) {
+            } catch {
                 if (cancelled) return
-                console.error('Failed to check system status:', e)
                 setOracleAuthed(false)
             }
         }
