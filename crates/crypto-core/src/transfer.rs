@@ -1,11 +1,11 @@
-//! Transfer proof для передачи файлов между пользователями
+//! Transfer proof for transferring files between users
 //!
-//! При передаче файла User A → User B:
-//! 1. A расшифровывает AES-ключ своим sk_A
-//! 2. A шифрует AES-ключ для pk_B
-//! 3. A создаёт TransferProof
-//! 4. TransferProof записывается в XRPL Memo
-//! 5. B извлекает proof, расшифровывает ключ, проверяет commitment
+//! When transferring a file from User A to User B:
+//! 1. A decrypts the AES key with sk_A
+//! 2. A encrypts the AES key for pk_B
+//! 3. A creates a TransferProof
+//! 4. TransferProof is written to the XRPL Memo
+//! 5. B extracts the proof, decrypts the key, and verifies the commitment
 
 use crate::aes::AesKey;
 use crate::commitment::KeyCommitment;
@@ -13,43 +13,43 @@ use crate::error::{CryptoError, Result};
 use crate::pre::{EncryptedPreData, PreKeyPair, ProxyReEncryption};
 use serde::{Deserialize, Serialize};
 
-/// Версия протокола transfer
+/// Transfer protocol version
 pub const TRANSFER_PROTOCOL_VERSION: u8 = 1;
 
-/// Proof передачи файла
+/// File transfer proof
 ///
-/// Содержит всю информацию для получателя:
-/// - Зашифрованный AES-ключ
-/// - Nonce для верификации commitment
-/// - Метаданные
+/// Contains all information for the recipient:
+/// - Encrypted AES key
+/// - Nonce for commitment verification
+/// - Metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransferProof {
-    /// Версия протокола
+    /// Protocol version
     pub version: u8,
 
-    /// Зашифрованный AES-ключ для получателя (base64)
+    /// Encrypted AES key for the recipient (base64)
     pub encrypted_key: String,
 
-    /// Nonce из оригинального commitment (hex)
+    /// Nonce from the original commitment (hex)
     pub nonce: String,
 
-    /// Commitment из NFT URI для проверки (hex)
+    /// Commitment from the NFT URI for verification (hex)
     pub commitment: String,
 
-    /// Публичный ключ получателя (hex) - для верификации
+    /// Recipient public key (hex) - for verification
     pub recipient_public_key: String,
 
-    /// Timestamp создания proof
+    /// Proof creation timestamp
     pub created_at: u64,
 }
 
 impl TransferProof {
-    /// Создаёт новый TransferProof
+    /// Creates a new TransferProof
     ///
     /// # Arguments
-    /// * `encrypted_key` - AES-ключ зашифрованный для получателя
-    /// * `commitment` - оригинальный KeyCommitment из vault
-    /// * `recipient_pk_hex` - публичный ключ получателя
+    /// * `encrypted_key` - AES key encrypted for the recipient
+    /// * `commitment` - original KeyCommitment from the vault
+    /// * `recipient_pk_hex` - recipient public key
     pub fn new(
         encrypted_key: &EncryptedPreData,
         commitment: &KeyCommitment,
@@ -72,14 +72,14 @@ impl TransferProof {
         })
     }
 
-    /// Сериализует для записи в XRPL Memo
+    /// Serializes for writing to an XRPL Memo
     pub fn to_memo_data(&self) -> Result<String> {
         let json =
             serde_json::to_string(self).map_err(|e| CryptoError::Serialization(e.to_string()))?;
         Ok(hex::encode(json.as_bytes()))
     }
 
-    /// Десериализует из XRPL Memo
+    /// Deserializes from an XRPL Memo
     pub fn from_memo_data(memo_hex: &str) -> Result<Self> {
         let json_bytes = hex::decode(memo_hex)
             .map_err(|e| CryptoError::InvalidData(format!("Invalid memo hex: {}", e)))?;
@@ -90,35 +90,35 @@ impl TransferProof {
         serde_json::from_str(&json_str).map_err(|e| CryptoError::Deserialization(e.to_string()))
     }
 
-    /// Возвращает encrypted_key как EncryptedPreData
+    /// Returns encrypted_key as EncryptedPreData
     pub fn encrypted_key_data(&self) -> Result<EncryptedPreData> {
         EncryptedPreData::from_base64(&self.encrypted_key)
     }
 }
 
-/// Сервис для выполнения transfer операций
+/// Service for performing transfer operations
 pub struct TransferService<'a> {
     pre: &'a ProxyReEncryption,
 }
 
 impl<'a> TransferService<'a> {
-    /// Создаёт новый сервис с заданным PRE контекстом
+    /// Creates a new service with the given PRE context
     pub fn new(pre: &'a ProxyReEncryption) -> Self {
         Self { pre }
     }
 
-    /// Перешифровывает AES-ключ для нового получателя
+    /// Re-encrypts the AES key for a new recipient
     ///
-    /// Выполняется ЛОКАЛЬНО на устройстве отправителя.
+    /// Runs LOCALLY on the sender device.
     ///
     /// # Arguments
-    /// * `encrypted_aes_key` - текущий зашифрованный ключ (для sender)
-    /// * `sender_keypair` - keypair отправителя
-    /// * `recipient_pk` - публичный ключ получателя (bytes)
-    /// * `commitment` - оригинальный commitment
+    /// * `encrypted_aes_key` - current encrypted key (for the sender)
+    /// * `sender_keypair` - sender keypair
+    /// * `recipient_pk` - recipient public key (bytes)
+    /// * `commitment` - original commitment
     ///
     /// # Returns
-    /// * TransferProof для записи в XRPL Memo
+    /// * TransferProof for writing to an XRPL Memo
     pub fn create_transfer_proof(
         &self,
         encrypted_aes_key: &EncryptedPreData,
@@ -126,10 +126,10 @@ impl<'a> TransferService<'a> {
         recipient_pk: &[u8],
         commitment: &KeyCommitment,
     ) -> Result<TransferProof> {
-        // 1. Расшифровываем AES-ключ (порядок: keypair, encrypted)
+        // 1. Decrypt the AES key (order: keypair, encrypted)
         let aes_key_bytes = self.pre.decrypt(sender_keypair, encrypted_aes_key)?;
 
-        // 2. Проверяем что ключ соответствует commitment
+        // 2. Check that the key matches the commitment
         let aes_key = AesKey::from_bytes(&aes_key_bytes)?;
         if !commitment.verify(&aes_key) {
             return Err(CryptoError::InvalidData(
@@ -137,40 +137,40 @@ impl<'a> TransferService<'a> {
             ));
         }
 
-        // 3. Шифруем для получателя
+        // 3. Encrypt for the recipient
         let recipient_public_key = crate::pre::PrePublicKey::from_bytes(recipient_pk)?;
         let encrypted_for_recipient = self.pre.encrypt(&recipient_public_key, &aes_key_bytes)?;
 
-        // 4. Создаём proof
+        // 4. Create the proof
         let recipient_pk_hex = hex::encode(recipient_pk);
         TransferProof::new(&encrypted_for_recipient, commitment, &recipient_pk_hex)
     }
 
-    /// Принимает transfer и извлекает AES-ключ
+    /// Accepts a transfer and extracts the AES key
     ///
-    /// Выполняется ЛОКАЛЬНО на устройстве получателя.
+    /// Runs LOCALLY on the recipient device.
     ///
     /// # Arguments
-    /// * `proof` - TransferProof из XRPL Memo
-    /// * `recipient_keypair` - keypair получателя
-    /// * `expected_commitment` - commitment из NFT URI
+    /// * `proof` - TransferProof from the XRPL Memo
+    /// * `recipient_keypair` - recipient keypair
+    /// * `expected_commitment` - commitment from the NFT URI
     ///
     /// # Returns
-    /// * (AesKey, is_valid) - ключ и результат верификации
+    /// * (AesKey, is_valid) - key and verification result
     pub fn accept_transfer(
         &self,
         proof: &TransferProof,
         recipient_keypair: &PreKeyPair,
         expected_commitment: &[u8; 32],
     ) -> Result<(AesKey, bool)> {
-        // 1. Декодируем encrypted key
+        // 1. Decode encrypted key
         let encrypted_data = proof.encrypted_key_data()?;
 
-        // 2. Расшифровываем (порядок: keypair, encrypted)
+        // 2. Decrypt (order: keypair, encrypted)
         let aes_key_bytes = self.pre.decrypt(recipient_keypair, &encrypted_data)?;
         let aes_key = AesKey::from_bytes(&aes_key_bytes)?;
 
-        // 3. Восстанавливаем commitment для проверки
+        // 3. Recreate the commitment for verification
         let nonce_bytes = hex::decode(&proof.nonce)
             .map_err(|e| CryptoError::InvalidData(format!("Invalid nonce hex: {}", e)))?;
 
@@ -183,26 +183,26 @@ impl<'a> TransferService<'a> {
 
         let commitment = KeyCommitment::create_with_nonce(&aes_key, nonce);
 
-        // 4. Проверяем commitment
+        // 4. Verify the commitment
         let is_valid = commitment.commitment_bytes() == expected_commitment;
 
         Ok((aes_key, is_valid))
     }
 }
 
-/// Результат верификации transfer
+/// Transfer verification result
 #[derive(Debug, Clone)]
 pub struct TransferVerification {
-    /// AES-ключ (если расшифровка успешна)
+    /// AES key (if decryption succeeds)
     pub aes_key: Option<AesKey>,
-    /// Commitment совпадает?
+    /// Does the commitment match?
     pub commitment_valid: bool,
-    /// Сообщение об ошибке (если есть)
+    /// Error message (if any)
     pub error: Option<String>,
 }
 
 impl TransferVerification {
-    /// Успешная верификация
+    /// Successful verification
     pub fn success(aes_key: AesKey) -> Self {
         Self {
             aes_key: Some(aes_key),
@@ -211,7 +211,7 @@ impl TransferVerification {
         }
     }
 
-    /// Неуспешная верификация
+    /// Failed verification
     pub fn failure(reason: &str) -> Self {
         Self {
             aes_key: None,
@@ -220,7 +220,7 @@ impl TransferVerification {
         }
     }
 
-    /// Ключ расшифрован, но commitment не совпадает
+    /// Key decrypted, but commitment does not match
     pub fn commitment_mismatch(aes_key: AesKey) -> Self {
         Self {
             aes_key: Some(aes_key),
@@ -229,7 +229,7 @@ impl TransferVerification {
         }
     }
 
-    /// Проверка успешна?
+    /// Was verification successful?
     pub fn is_valid(&self) -> bool {
         self.aes_key.is_some() && self.commitment_valid
     }
@@ -245,7 +245,7 @@ mod tests {
         let sender = pre.generate_keypair();
         let recipient = pre.generate_keypair();
 
-        // Используем фиксированные данные для стабильности
+        // Use fixed data for stability
         let aes_key_bytes: [u8; 32] = [
             0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
             0xff, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c,
@@ -254,12 +254,12 @@ mod tests {
         let aes_key = AesKey::from_bytes(&aes_key_bytes).unwrap();
         let commitment = KeyCommitment::create(&aes_key);
 
-        // Шифруем для sender
+        // Encrypt for the sender
         let encrypted = pre
             .encrypt(&sender.public_key(), aes_key.as_bytes())
             .unwrap();
 
-        // Создаём transfer proof
+        // Create the transfer proof
         let service = TransferService::new(&pre);
         let proof = service
             .create_transfer_proof(
@@ -270,10 +270,10 @@ mod tests {
             )
             .unwrap();
 
-        // Сериализуем в memo
+        // Serialize to memo
         let memo = proof.to_memo_data().unwrap();
 
-        // Десериализуем
+        // Deserialize
         let restored = TransferProof::from_memo_data(&memo).unwrap();
 
         assert_eq!(proof.version, restored.version);
@@ -283,15 +283,15 @@ mod tests {
 
     #[test]
     fn test_full_transfer_flow() {
-        // NOTE: recrypt библиотека имеет нестабильный RNG.
-        // В реальном приложении используется retry логика.
-        // Здесь используем фиксированные данные для стабильности теста.
+        // NOTE: the recrypt library has an unstable RNG.
+        // A real application uses retry logic.
+        // Here we use fixed data for test stability.
 
         let pre = ProxyReEncryption::new();
         let alice = pre.generate_keypair();
         let bob = pre.generate_keypair();
 
-        // Используем фиксированные данные вместо случайных
+        // Use fixed data instead of random data
         let aes_key_bytes: [u8; 32] = [
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
             0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c,
@@ -300,12 +300,12 @@ mod tests {
         let aes_key = AesKey::from_bytes(&aes_key_bytes).unwrap();
         let commitment = KeyCommitment::create(&aes_key);
 
-        // Alice шифрует AES-ключ для себя
+        // Alice encrypts the AES key for herself
         let encrypted_for_alice = pre
             .encrypt(&alice.public_key(), aes_key.as_bytes())
             .unwrap();
 
-        // Alice передаёт Bob
+        // Alice transfers to Bob
         let service = TransferService::new(&pre);
         let proof = service
             .create_transfer_proof(
@@ -316,12 +316,12 @@ mod tests {
             )
             .unwrap();
 
-        // Bob принимает transfer
+        // Bob accepts the transfer
         let (received_key, is_valid) = service
             .accept_transfer(&proof, &bob, commitment.commitment_bytes())
             .unwrap();
 
-        // Проверяем
+        // Verify
         assert!(is_valid, "Commitment should be valid");
         assert_eq!(
             received_key.as_bytes(),
@@ -332,8 +332,8 @@ mod tests {
 
     #[test]
     fn test_invalid_commitment_detected() {
-        // Этот тест проверяет только логику верификации commitment,
-        // без использования PRE операций
+        // This test checks only the commitment verification logic,
+        // without using PRE operations
 
         let aes_key_bytes: [u8; 32] = [
             0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
@@ -345,10 +345,10 @@ mod tests {
         let aes_key = AesKey::from_bytes(&aes_key_bytes).unwrap();
         let commitment = KeyCommitment::create_with_nonce(&aes_key, nonce);
 
-        // Правильный commitment должен пройти проверку
+        // The correct commitment should pass verification
         assert!(commitment.verify(&aes_key), "Correct key should verify");
 
-        // Неправильный ключ не должен пройти
+        // The wrong key should not pass
         let wrong_key_bytes: [u8; 32] = [0xff; 32];
         let wrong_key = AesKey::from_bytes(&wrong_key_bytes).unwrap();
         assert!(

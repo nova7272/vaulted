@@ -1,21 +1,21 @@
-//! Общие типы для криптографического модуля
+//! Shared types for the crypto module
 
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
-/// Зашифрованные данные с метаданными
+/// Encrypted data with metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncryptedData {
-    /// Версия криптографической схемы
+    /// Cryptographic scheme version
     pub version: u8,
-    /// Nonce (IV) для AES-GCM
+    /// Nonce (IV) for AES-GCM
     pub nonce: Vec<u8>,
-    /// Зашифрованные данные с authentication tag
+    /// Encrypted data with authentication tag
     pub ciphertext: Vec<u8>,
 }
 
 impl EncryptedData {
-    /// Создаёт новый контейнер зашифрованных данных
+    /// Creates a new encrypted data container
     pub fn new(version: u8, nonce: Vec<u8>, ciphertext: Vec<u8>) -> Self {
         Self {
             version,
@@ -24,18 +24,18 @@ impl EncryptedData {
         }
     }
 
-    /// Сериализует в бинарный формат
+    /// Serializes to binary format
     pub fn to_bytes(&self) -> crate::Result<Vec<u8>> {
         serde_json::to_vec(self).map_err(|e| crate::CryptoError::Serialization(e.to_string()))
     }
 
-    /// Десериализует из бинарного формата
+    /// Deserializes from binary format
     pub fn from_bytes(bytes: &[u8]) -> crate::Result<Self> {
         serde_json::from_slice(bytes)
             .map_err(|e| crate::CryptoError::Deserialization(e.to_string()))
     }
 
-    /// Сериализует в base64 (для хранения в JSON/метаданных NFT)
+    /// Serializes to base64 (for storage in JSON/NFT metadata)
     pub fn to_base64(&self) -> crate::Result<String> {
         let bytes = self.to_bytes()?;
         Ok(base64::Engine::encode(
@@ -44,7 +44,7 @@ impl EncryptedData {
         ))
     }
 
-    /// Десериализует из base64
+    /// Deserializes from base64
     pub fn from_base64(s: &str) -> crate::Result<Self> {
         let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, s)
             .map_err(|e| crate::CryptoError::Deserialization(e.to_string()))?;
@@ -52,28 +52,28 @@ impl EncryptedData {
     }
 }
 
-/// Секретные байты с автоматическим обнулением при drop
+/// Secret bytes that are automatically zeroized on drop
 #[derive(Clone, Zeroize)]
 #[zeroize(drop)]
 pub struct SecretBytes(Vec<u8>);
 
 impl SecretBytes {
-    /// Создаёт из вектора байт
+    /// Creates from a byte vector
     pub fn new(bytes: Vec<u8>) -> Self {
         Self(bytes)
     }
 
-    /// Возвращает срез байт
+    /// Returns a byte slice
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
 
-    /// Возвращает длину
+    /// Returns the length
     pub fn len(&self) -> usize {
         self.0.len()
     }
 
-    /// Проверяет на пустоту
+    /// Checks whether it is empty
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
@@ -91,44 +91,44 @@ impl AsRef<[u8]> for SecretBytes {
     }
 }
 
-/// Метаданные NFT с криптографической информацией
+/// NFT metadata with cryptographic information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NftCryptoMetadata {
-    /// Версия схемы
+    /// Scheme version
     pub version: u8,
-    /// ID NFT в XRPL
+    /// NFT ID in XRPL
     pub nft_id: String,
-    /// Зашифрованный AES-ключ (ECIES/PRE) - base64 encoded
+    /// Encrypted AES key (ECIES/PRE) - base64 encoded
     pub encrypted_aes_key: String,
-    /// Манифест файлов (хеши фрагментов)
+    /// File manifest (fragment hashes)
     pub file_manifest: FileManifest,
-    /// Публичный ключ текущего владельца
+    /// Current owner public key
     pub owner_public_key: String,
-    /// Временная метка создания
+    /// Creation timestamp
     pub created_at: i64,
-    /// Временная метка последнего обновления
+    /// Last update timestamp
     pub updated_at: i64,
 }
 
-/// Манифест файлов (информация о фрагментах)
+/// File manifest (fragment information)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileManifest {
-    /// Зашифрованное имя файла (AES-256-GCM, base64)
+    /// Encrypted file name (AES-256-GCM, base64)
     pub encrypted_filename: String,
-    /// Размер оригинального файла в байтах
+    /// Original file size in bytes
     pub original_size: u64,
-    /// MIME тип
+    /// MIME type
     pub mime_type: String,
-    /// Хеш оригинального файла (для верификации после расшифровки)
+    /// Original file hash (for verification after decryption)
     pub original_hash: String,
-    /// Размер зашифрованных данных
+    /// Encrypted data size
     pub encrypted_size: u64,
-    /// Хеш зашифрованных данных (blake3)
+    /// Encrypted data hash (blake3)
     pub encrypted_hash: String,
 }
 
 impl FileManifest {
-    /// Вычисляет хеш манифеста (для URI NFT)
+    /// Computes the manifest hash (for the NFT URI)
     pub fn compute_hash(&self) -> String {
         use sha2::{Digest, Sha256};
         let json = serde_json::to_string(self).unwrap_or_default();
@@ -170,7 +170,7 @@ mod tests {
         let secret = SecretBytes::new(vec![1, 2, 3, 4, 5]);
         assert_eq!(secret.len(), 5);
         assert!(!secret.is_empty());
-        // При drop значения будут обнулены
+        // Values will be zeroized on drop
     }
 
     #[test]

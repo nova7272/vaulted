@@ -13,34 +13,34 @@ const DERIVATION_CHALLENGE: &str = "xrpl-vault-key-derivation-v1";
 pub struct KeyDerivation;
 
 impl KeyDerivation {
-    /// Challenge который пользователь подписывает во внешнем wallet
+    /// Challenge that the user signs in an external wallet
     ///
-    /// Этот challenge фиксированный - одна и та же подпись
-    /// на любом устройстве даст одинаковые PRE-ключи.
+    /// This challenge is fixed - the same signature
+    /// on any device will produce the same PRE keys.
     pub fn get_derivation_challenge() -> &'static str {
         DERIVATION_CHALLENGE
     }
 
-    /// Генерирует derivation challenge с дополнительным контекстом
+    /// Generates a derivation challenge with additional context
     ///
-    /// Формат: "xrpl-vault-key-derivation-v1:{wallet_address}"
+    /// Format: "xrpl-vault-key-derivation-v1:{wallet_address}"
     pub fn get_challenge_for_wallet(wallet_address: &str) -> String {
         format!("{}:{}", DERIVATION_CHALLENGE, wallet_address)
     }
 
-    /// Деривация PRE keypair из подписи внешнего wallet
+    /// Derives a PRE keypair from an external wallet signature
     ///
     /// # Arguments
-    /// * `signature` - Подпись challenge от внешнего wallet (hex или bytes)
-    /// * `wallet_address` - XRPL адрес для дополнительной привязки
+    /// * `signature` - challenge signature from the external wallet (hex or bytes)
+    /// * `wallet_address` - XRPL address for additional binding
     ///
     /// # Returns
-    /// * Детерминистичный PRE keypair
+    /// * Deterministic PRE keypair
     ///
     /// # Security
-    /// * Подпись детерминистична для данного private key
-    /// * Один и тот же wallet даст одинаковые PRE-ключи
-    /// * Seed никогда не покидает wallet
+    /// * The signature is deterministic for the given private key
+    /// * The same wallet will produce the same PRE keys
+    /// * The seed never leaves the wallet
     pub fn derive_pre_keypair_from_signature(
         _signature: &[u8],
         _wallet_address: &str,
@@ -50,7 +50,7 @@ impl KeyDerivation {
         ))
     }
 
-    /// Деривация из hex-encoded signature
+    /// Derivation from a hex-encoded signature
     pub fn derive_from_hex_signature(
         signature_hex: &str,
         wallet_address: &str,
@@ -59,14 +59,14 @@ impl KeyDerivation {
         Self::derive_pre_keypair_from_signature(&signature, wallet_address)
     }
 
-    /// Вычисляет fingerprint публичного ключа для отображения пользователю
+    /// Computes the public key fingerprint for display to the user
     pub fn public_key_fingerprint(public_key: &[u8]) -> String {
         let hash = Sha256::digest(public_key);
-        // Первые 8 символов hex
+        // First 8 hex characters
         hex::encode(&hash[..4]).to_uppercase()
     }
 
-    /// Проверяет что деривированные ключи совпадают с ожидаемыми
+    /// Checks that derived keys match the expected value
     pub fn verify_derivation(
         signature: &[u8],
         wallet_address: &str,
@@ -76,9 +76,9 @@ impl KeyDerivation {
         Ok(derived.export_public_key_bytes() == expected_public_key)
     }
 
-    /// Возвращает seed из подписи (для сохранения в keystore)
+    /// Returns the seed from the signature (for storing in the keystore)
     ///
-    /// Этот seed можно использовать для восстановления PRE keypair
+    /// This seed can be used to restore the PRE keypair
     pub fn derive_seed_from_signature(_signature: &[u8], _wallet_address: &str) -> [u8; 32] {
         panic!(
             "External wallet/XRPL signatures must not be used as Vaulted encryption seed material"
@@ -86,19 +86,19 @@ impl KeyDerivation {
     }
 }
 
-/// Результат деривации с метаданными
+/// Derivation result with metadata
 
 pub struct DerivedKeys {
     /// PRE keypair
     pub keypair: PreKeyPair,
-    /// Fingerprint для отображения пользователю
+    /// Fingerprint for display to the user
     pub fingerprint: String,
-    /// Wallet address с которого деривировано
+    /// Wallet address from which it was derived
     pub wallet_address: String,
 }
 
 impl DerivedKeys {
-    /// Создаёт DerivedKeys из подписи
+    /// Creates DerivedKeys from a signature
     pub fn from_signature(signature: &[u8], wallet_address: &str) -> Result<Self> {
         let keypair = KeyDerivation::derive_pre_keypair_from_signature(signature, wallet_address)?;
         let fingerprint = KeyDerivation::public_key_fingerprint(&keypair.export_public_key_bytes());

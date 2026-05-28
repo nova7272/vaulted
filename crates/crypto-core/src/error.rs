@@ -1,96 +1,96 @@
-//! Типы ошибок криптографического модуля
+//! Crypto module error types
 
 use thiserror::Error;
 
-/// Результат криптографических операций
+/// Result type for cryptographic operations
 pub type Result<T> = std::result::Result<T, CryptoError>;
 
-/// Ошибки криптографических операций
+/// Cryptographic operation errors
 #[derive(Error, Debug)]
 pub enum CryptoError {
-    /// Ошибка шифрования AES
+    /// AES encryption error
     #[error("AES encryption failed: {0}")]
     AesEncryption(String),
 
-    /// Ошибка расшифровки AES
+    /// AES decryption error
     #[error("AES decryption failed: {0}")]
     AesDecryption(String),
 
-    /// Неверный размер ключа
+    /// Invalid key size
     #[error("Invalid key size: expected {expected}, got {actual}")]
     InvalidKeySize {
-        /// Ожидаемый размер в байтах
+        /// Expected size in bytes
         expected: usize,
-        /// Фактический размер в байтах
+        /// Actual size in bytes
         actual: usize,
     },
 
-    /// Неверный размер nonce
+    /// Invalid nonce size
     #[error("Invalid nonce size: expected {expected}, got {actual}")]
     InvalidNonceSize {
-        /// Ожидаемый размер в байтах
+        /// Expected size in bytes
         expected: usize,
-        /// Фактический размер в байтах
+        /// Actual size in bytes
         actual: usize,
     },
 
-    /// Ошибка Proxy Re-Encryption
+    /// Proxy Re-Encryption error
     #[error("PRE operation failed: {0}")]
     PreError(String),
 
-    /// Ошибка PRE шифрования
+    /// PRE encryption error
     #[error("PRE encryption failed: {0}")]
     PreEncryption(String),
 
-    /// Ошибка PRE расшифровки
+    /// PRE decryption error
     #[error("PRE decryption failed: {0}")]
     PreDecryption(String),
 
-    /// Ошибка генерации PRE ключа
+    /// PRE key generation error
     #[error("PRE key generation failed: {0}")]
     PreKeyGeneration(String),
 
-    /// Ошибка PRE перешифровки
+    /// PRE re-encryption error
     #[error("PRE re-encryption failed: {0}")]
     PreReEncryption(String),
 
-    /// Неверный ключ
+    /// Invalid key
     #[error("Invalid key: {0}")]
     InvalidKey(String),
 
-    /// Неверные данные
+    /// Invalid data
     #[error("Invalid data: {0}")]
     InvalidData(String),
 
-    /// Ошибка генерации re-encryption key
+    /// Re-encryption key generation error
     #[error("Failed to generate re-encryption key: {0}")]
     ReKeyGeneration(String),
 
-    /// Ошибка перешифровки
+    /// Re-encryption error
     #[error("Re-encryption failed: {0}")]
     ReEncryption(String),
 
-    /// Неверный формат данных
+    /// Invalid data format
     #[error("Invalid data format: {0}")]
     InvalidFormat(String),
 
-    /// Ошибка сериализации
+    /// Serialization error
     #[error("Serialization error: {0}")]
     Serialization(String),
 
-    /// Ошибка десериализации
+    /// Deserialization error
     #[error("Deserialization error: {0}")]
     Deserialization(String),
 
-    /// Ошибка верификации подписи
+    /// Signature verification error
     #[error("Signature verification failed")]
     SignatureVerification,
 
-    /// Ошибка генерации случайных чисел
+    /// Random number generation error
     #[error("Random number generation failed: {0}")]
     Rng(String),
 
-    /// Неверная версия криптографической схемы
+    /// Invalid cryptographic scheme version
     #[error("Unsupported crypto version: {0}")]
     UnsupportedVersion(u8),
 

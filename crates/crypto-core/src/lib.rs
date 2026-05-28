@@ -21,12 +21,12 @@ pub mod transfer;
 pub mod types;
 pub mod xrpl_wallet;
 
-// Константы
-/// Размер AES-256 ключа в байтах
+// Constants
+/// AES-256 key size in bytes
 pub const AES_KEY_SIZE: usize = 32;
-/// Размер nonce для AES-GCM
+/// Nonce size for AES-GCM
 pub const AES_NONCE_SIZE: usize = 12;
-/// Текущая версия криптографической схемы
+/// Current cryptographic scheme version
 pub const CRYPTO_VERSION: u8 = 1;
 
 pub use aes::{AesKey, AesStreamEncryptor};
