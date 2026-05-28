@@ -1,4 +1,4 @@
-//! Endpoints для NFT
+//! NFT endpoints
 
 use axum::{
     extract::{Path, State},
@@ -11,7 +11,7 @@ use crate::{
     services::AppState,
 };
 
-/// Метаданные NFT
+/// NFT metadata
 #[derive(serde::Serialize)]
 pub struct NftMetadataResponse {
     pub nft_token_id: String,
@@ -50,7 +50,7 @@ pub async fn get_metadata(
         ));
     }
 
-    // Получаем метаданные
+    // Get metadata
     let row = sqlx::query_as::<_, (String, String, String, String)>(
         r#"
         SELECT 
@@ -70,7 +70,7 @@ pub async fn get_metadata(
 
     let (encrypted_aes_key, owner_address, created_at, updated_at) = row;
 
-    // Получаем манифест
+    // Get the manifest
     let manifest_row = sqlx::query_as::<_, (String, i64, String, String)>(
         r#"
         SELECT fm.encrypted_filename, fm.original_size, fm.mime_type, fm.original_hash
@@ -83,7 +83,7 @@ pub async fn get_metadata(
     .fetch_one(&state.db)
     .await?;
 
-    // Получаем фрагменты
+    // Get fragments
     let fragments = sqlx::query_as::<_, (i32, i64, String, String, String)>(
         r#"
         SELECT ff.fragment_index, ff.fragment_size, ff.encrypted_hash, ff.storage_node_id, ff.storage_key
@@ -102,7 +102,7 @@ pub async fn get_metadata(
         nft_token_id,
         owner_address,
         encrypted_aes_key,
-        is_re_encrypted: false, // TODO: Добавить флаг
+        is_re_encrypted: false, // TODO: Add a flag
         manifest: FileManifestDto {
             encrypted_filename: manifest_row.0,
             original_size: manifest_row.1 as u64,
@@ -126,7 +126,7 @@ pub async fn get_metadata(
     }))
 }
 
-/// Результат верификации
+/// Verification result
 #[derive(serde::Serialize)]
 pub struct VerifyOwnershipResponse {
     pub nft_token_id: String,
@@ -140,7 +140,7 @@ pub async fn verify_ownership(
     Path(nft_token_id): Path<String>,
     axum::extract::Query(params): axum::extract::Query<VerifyParams>,
 ) -> Result<Json<VerifyOwnershipResponse>> {
-    // Получаем текущего владельца из БД
+    // Get the current owner from the database
     let owner = sqlx::query_scalar::<_, String>(
         r#"
         SELECT u.wallet_address
@@ -154,7 +154,7 @@ pub async fn verify_ownership(
     .await?
     .ok_or_else(|| ApiError::NftNotFound(nft_token_id.clone()))?;
 
-    // TODO: Дополнительно верифицировать через XRPL
+    // TODO: Also verify through XRPL
     // state.xrpl.verify_nft_owner(&nft_token_id, &params.wallet).await?
 
     let is_owner = owner.eq_ignore_ascii_case(&params.wallet);

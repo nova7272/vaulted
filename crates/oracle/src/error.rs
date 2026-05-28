@@ -1,4 +1,4 @@
-//! Типы ошибок Oracle API
+//! Oracle API error types
 
 use axum::{
     http::StatusCode,
@@ -8,90 +8,90 @@ use axum::{
 use serde::Serialize;
 use thiserror::Error;
 
-/// Результат API операций
+/// API operation result
 pub type Result<T> = std::result::Result<T, ApiError>;
 
-/// Ошибки API
+/// API errors
 #[derive(Error, Debug)]
 pub enum ApiError {
-    /// Неавторизован
+    /// Unauthorized
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
 
-    /// Запрещено
+    /// Forbidden
     #[error("Forbidden: {0}")]
     Forbidden(String),
 
-    /// Не найдено
+    /// Not found
     #[error("Not found: {0}")]
     NotFound(String),
 
-    /// Неверный запрос
+    /// Bad request
     #[error("Bad request: {0}")]
     BadRequest(String),
 
-    /// Конфликт
+    /// Conflict
     #[error("Conflict: {0}")]
     Conflict(String),
 
-    /// Слишком много запросов
+    /// Too many requests
     #[error("Rate limit exceeded")]
     RateLimitExceeded,
 
-    /// Файл слишком большой
+    /// File too large
     #[error("File too large: {size} bytes (max: {max} bytes)")]
     FileTooLarge { size: u64, max: u64 },
 
-    /// Ошибка криптографии
+    /// Cryptography error
     #[error("Crypto error: {0}")]
     Crypto(String),
 
-    /// Ошибка PRE
+    /// PRE error
     #[error("PRE error: {0}")]
     PreError(String),
 
-    /// Ошибка XRPL
+    /// XRPL error
     #[error("XRPL error: {0}")]
     Xrpl(String),
 
-    /// NFT не найден
+    /// NFT not found
     #[error("NFT not found: {0}")]
     NftNotFound(String),
 
-    /// Пользователь не владелец NFT
+    /// User is not the NFT owner
     #[error("Not NFT owner")]
     NotNftOwner,
 
-    /// Ошибка базы данных
+    /// Database error
     #[error("Database error: {0}")]
     Database(String),
 
-    /// Ошибка storage node
+    /// Storage node error
     #[error("Storage error: {0}")]
     Storage(String),
 
-    /// Внутренняя ошибка
+    /// Internal error
     #[error("Internal error: {0}")]
     Internal(String),
 
-    /// Ошибка валидации
+    /// Validation error
     #[error("Validation error: {0}")]
     Validation(String),
 
     // === Transfer-related errors ===
-    /// Transfer не найден
+    /// Transfer not found
     #[error("Transfer not found: {0}")]
     TransferNotFound(uuid::Uuid),
 
-    /// Transfer уже существует для этого NFT
+    /// Transfer already exists for this NFT
     #[error("Active transfer already exists for this NFT")]
     TransferAlreadyExists,
 
-    /// Неверный статус transfer
+    /// Invalid transfer status
     #[error("Invalid transfer status: expected {expected}, got {actual}")]
     InvalidTransferStatus { expected: String, actual: String },
 
-    /// Не авторизован для этой операции
+    /// Not authorized for this operation
     #[error("Unauthorized for this transfer operation")]
     TransferUnauthorized,
 }
@@ -117,7 +117,7 @@ impl From<reqwest::Error> for ApiError {
     }
 }
 
-/// Ответ с ошибкой
+/// Error response
 #[derive(Serialize)]
 pub struct ErrorResponse {
     pub error: String,

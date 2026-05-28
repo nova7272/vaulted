@@ -1,4 +1,4 @@
-//! Middleware для Oracle API
+//! Middleware for the Oracle API
 
 use axum::{
     extract::{ConnectInfo, Request, State},
@@ -269,7 +269,7 @@ pub async fn auth_rate_limit_middleware(
     Ok(response)
 }
 
-/// Middleware для логирования запросов с IP
+/// Middleware for logging requests with IP addresses
 pub async fn logging_middleware(
     connect_info: Option<ConnectInfo<SocketAddr>>,
     headers: HeaderMap,

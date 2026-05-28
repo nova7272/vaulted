@@ -1,35 +1,35 @@
-//! Конфигурация Oracle сервера
+//! Oracle server configuration
 
 use std::env;
 
 pub const DEFAULT_XRPL_RPC_URL: &str = "https://s.altnet.rippletest.net:51234/";
 
-/// Конфигурация приложения
+/// Application configuration
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Хост сервера
+    /// Server host
     pub host: String,
-    /// Порт сервера
+    /// Server port
     pub port: u16,
-    /// URL базы данных PostgreSQL
+    /// PostgreSQL database URL
     pub database_url: String,
-    /// URL Redis (опционально)
+    /// Redis URL (optional)
     pub redis_url: Option<String>,
     /// XRPL node URL used by clients that need WebSocket access.
     pub xrpl_node_url: Option<String>,
     /// XRPL HTTP JSON-RPC URL used by Oracle ledger verification.
     pub xrpl_rpc_url: Option<String>,
-    /// XRPL wallet seed для минтинга NFT (опционально)
+    /// XRPL wallet seed for minting NFTs (optional)
     pub xrpl_wallet_seed: Option<String>,
-    /// Секретный ключ для JWT
+    /// JWT secret key
     pub jwt_secret: String,
-    /// Время жизни JWT токена (часы)
+    /// JWT token lifetime (hours)
     pub jwt_expiration_hours: i64,
-    /// Максимальный размер файла (bytes)
+    /// Maximum file size (bytes)
     pub max_file_size: u64,
-    /// Минимальный фактор репликации
+    /// Minimum replication factor
     pub min_replication: u32,
-    /// Rate limit (запросов в минуту)
+    /// Rate limit (requests per minute)
     pub rate_limit_rpm: u32,
     /// Allowed CORS origins (comma-separated, empty = permissive in dev)
     pub cors_origins: Vec<String>,
@@ -56,7 +56,7 @@ pub struct Config {
 }
 
 impl Config {
-    /// Загружает конфигурацию из переменных окружения
+    /// Loads configuration from environment variables
     pub fn from_env() -> Result<Self, ConfigError> {
         let environment = env::var("ENVIRONMENT").unwrap_or_else(|_| "development".to_string());
 
@@ -214,7 +214,7 @@ impl Config {
         Ok(None)
     }
 
-    /// Возвращает адрес для прослушивания
+    /// Returns the listening address
     pub fn listen_addr(&self) -> String {
         format!("{}:{}", self.host, self.port)
     }
@@ -270,7 +270,7 @@ impl Config {
     }
 }
 
-/// Ошибки конфигурации
+/// Configuration errors
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     #[error("Missing required environment variable: {0}")]

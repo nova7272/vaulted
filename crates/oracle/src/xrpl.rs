@@ -1,6 +1,6 @@
-//! XRPL сервис для Oracle
+//! XRPL service for Oracle
 //!
-//! Минтинг NFT, создание offers, проверка балансов.
+//! NFT minting, offer creation, and balance checks.
 
 use crate::error::{ApiError, Result};
 use serde::Serialize;
@@ -18,7 +18,7 @@ use xrpl_mithril::tx::sign_transaction;
 use xrpl_mithril::types::{AccountId, Amount, Blob, Hash256, XrpAmount};
 use xrpl_mithril::wallet::Wallet;
 
-/// Конфигурация XRPL
+/// XRPL configuration
 #[derive(Debug, Clone)]
 pub struct XrplConfig {
     /// Primary XRPL node URL (JSON-RPC)
@@ -39,14 +39,14 @@ impl Default for XrplConfig {
     }
 }
 
-/// Результат минта NFT
+/// NFT mint result
 #[derive(Debug, Serialize)]
 pub struct MintResult {
     pub nft_token_id: String,
     pub tx_hash: String,
 }
 
-/// Результат создания offer
+/// Offer creation result
 #[derive(Debug, Serialize)]
 pub struct OfferResult {
     pub offer_index: String,
@@ -62,7 +62,7 @@ pub struct LocalMintVerification {
     pub validated: bool,
 }
 
-/// XRPL сервис
+/// XRPL service
 pub struct XrplService {
     config: XrplConfig,
     http: reqwest::Client,
@@ -70,7 +70,7 @@ pub struct XrplService {
 }
 
 impl XrplService {
-    /// Создаёт сервис без кошелька (только чтение)
+    /// Creates a service without a wallet (read-only)
     pub fn new(node_url: &str) -> Result<Self> {
         validate_json_rpc_url(node_url)?;
         Ok(Self {
@@ -87,7 +87,7 @@ impl XrplService {
         })
     }
 
-    /// Создаёт сервис с кошельком
+    /// Creates a service with a wallet
     pub fn with_wallet(config: XrplConfig) -> Result<Self> {
         validate_json_rpc_url(&config.node_url)?;
         let wallet = if let Some(ref seed) = config.wallet_seed {
@@ -116,19 +116,19 @@ impl XrplService {
         })
     }
 
-    /// Адрес Oracle кошелька
+    /// Oracle wallet address
     pub fn oracle_address(&self) -> Option<String> {
         self.wallet.as_ref().map(|w| w.account_id().to_string())
     }
 
-    /// Создаёт JSON-RPC клиент
+    /// Creates a JSON-RPC client
     #[allow(dead_code)]
     fn client(&self) -> Result<JsonRpcClient> {
         JsonRpcClient::new(&self.config.node_url)
             .map_err(|e| ApiError::Xrpl(format!("Client error: {}", e)))
     }
 
-    /// JSON-RPC вызов с retry
+    /// JSON-RPC call with retry
     async fn rpc(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
         let mut last_error = None;
 
@@ -150,7 +150,7 @@ impl XrplService {
         Err(last_error.unwrap_or_else(|| ApiError::Xrpl("RPC failed after retries".into())))
     }
 
-    /// Один RPC вызов без retry
+    /// One RPC call without retry
     async fn rpc_once(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
         let resp = self
             .http
@@ -393,7 +393,7 @@ impl XrplService {
         Err(ApiError::Xrpl("Transaction validation timeout".into()))
     }
 
-    /// Получает баланс аккаунта в XRP
+    /// Gets the account balance in XRP
     pub async fn get_balance(&self, address: &str) -> Result<f64> {
         let data = self
             .rpc(
@@ -416,7 +416,7 @@ impl XrplService {
         Ok(drops as f64 / 1_000_000.0)
     }
 
-    /// Проверяет баланс Oracle
+    /// Checks the Oracle balance
     pub async fn check_oracle_balance(&self) -> Result<f64> {
         let address = self
             .oracle_address()
@@ -437,7 +437,7 @@ impl XrplService {
         Ok(balance)
     }
 
-    /// Минтит NFT с указанным URI
+    /// Mints an NFT with the specified URI
     pub async fn mint_nft(&self, uri: &str, transfer_fee: u16) -> Result<MintResult> {
         let wallet = self
             .wallet
@@ -448,10 +448,10 @@ impl XrplService {
 
         let client = self.client()?;
 
-        // URI в hex
+        // URI in hex
         let uri_bytes = uri.as_bytes().to_vec();
 
-        // Создаём NFTokenMint транзакцию
+        // Create the NFTokenMint transaction
         let fields = NFTokenMint {
             nftoken_taxon: 0,
             issuer: None,
@@ -498,7 +498,7 @@ impl XrplService {
         // Submit and wait for validation via HTTP polling
         self.submit_and_wait_validation(&tx_blob, &tx_hash).await?;
 
-        // Получаем NFT ID из метаданных транзакции - retry несколько раз
+        // Get the NFT ID from transaction metadata - retry several times
         let mut nft_token_id = None;
         for _ in 0..5 {
             if let Ok(tx_meta) = self
@@ -530,7 +530,7 @@ impl XrplService {
         })
     }
 
-    /// Создаёт sell offer для передачи NFT пользователю бесплатно
+    /// Creates a sell offer to transfer the NFT to the user for free
     pub async fn create_sell_offer(
         &self,
         nft_token_id: &str,
@@ -592,7 +592,7 @@ impl XrplService {
         // Submit and wait for validation
         self.submit_and_wait_validation(&tx_blob, &tx_hash).await?;
 
-        // Получаем offer index - retry несколько раз
+        // Get the offer index - retry several times
         let mut offer_index = None;
         for _ in 0..5 {
             if let Ok(tx_meta) = self
@@ -766,7 +766,7 @@ impl XrplService {
             .unwrap_or_default())
     }
 
-    /// Верифицирует владение NFT
+    /// Verifies NFT ownership
     pub async fn verify_nft_owner(&self, nft_token_id: &str, expected_owner: &str) -> Result<bool> {
         let data = self
             .rpc(
@@ -789,7 +789,7 @@ impl XrplService {
         Ok(false)
     }
 
-    /// Отменяет NFT offer (только Oracle может отменить свои offers)
+    /// Cancels an NFT offer (only Oracle can cancel its own offers)
     pub async fn cancel_offer(&self, offer_index: &str) -> Result<String> {
         let wallet = self
             .wallet
@@ -841,8 +841,8 @@ impl XrplService {
         Ok(tx_hash)
     }
 
-    /// Сжигает NFT (только владелец NFT может это сделать)
-    /// Этот метод используется когда Oracle ещё владеет NFT (до accept offer)
+    /// Burns an NFT (only the NFT owner can do this)
+    /// This method is used while Oracle still owns the NFT (before offer acceptance)
     pub async fn burn_nft(&self, nft_token_id: &str) -> Result<String> {
         let wallet = self
             .wallet
@@ -856,7 +856,7 @@ impl XrplService {
 
         let fields = NFTokenBurn {
             nftoken_id: nft_id,
-            owner: None, // None когда мы сами владелец
+            owner: None, // None when we are the owner
         };
 
         let common = TransactionCommon {
@@ -895,14 +895,14 @@ impl XrplService {
         Ok(tx_hash)
     }
 
-    /// Получает текущего владельца NFT
-    /// Проверяет есть ли NFT на Oracle кошельке
+    /// Gets the current NFT owner
+    /// Checks whether the NFT is on the Oracle wallet
     pub async fn check_nft_on_oracle(&self, nft_token_id: &str) -> Result<bool> {
         let oracle_address = self
             .oracle_address()
             .ok_or_else(|| ApiError::Internal("Oracle wallet not configured".to_string()))?;
 
-        // Получаем все NFT на Oracle кошельке
+        // Get all NFTs on the Oracle wallet
         let response = self
             .rpc(
                 "account_nfts",
@@ -913,31 +913,31 @@ impl XrplService {
             )
             .await?;
 
-        // Проверяем есть ли наш NFT в списке
+        // Check whether our NFT is in the list
         if let Some(nfts) = response["result"]["account_nfts"].as_array() {
             for nft in nfts {
                 if nft["NFTokenID"].as_str() == Some(nft_token_id) {
-                    return Ok(true); // NFT на Oracle
+                    return Ok(true); // NFT is on Oracle
                 }
             }
         }
 
-        Ok(false) // NFT не на Oracle (claimed или burned)
+        Ok(false) // NFT is not on Oracle (claimed or burned)
     }
 
-    /// Получает текущего владельца NFT (legacy метод для совместимости)
+    /// Gets the current NFT owner (legacy compatibility method)
     pub async fn get_nft_owner(&self, nft_token_id: &str) -> Result<String> {
         let oracle_address = self
             .oracle_address()
             .ok_or_else(|| ApiError::Internal("Oracle wallet not configured".to_string()))?;
 
-        // Проверяем есть ли NFT на Oracle
+        // Check whether the NFT is on Oracle
         if self.check_nft_on_oracle(nft_token_id).await? {
             return Ok(oracle_address);
         }
 
-        // NFT не на Oracle - значит был передан или сожжён
-        // Возвращаем пустую строку чтобы отличить от Oracle
+        // NFT is not on Oracle, so it was transferred or burned
+        // Return an empty string to distinguish it from Oracle
         Err(ApiError::NftNotFound(nft_token_id.to_string()))
     }
 }
@@ -963,24 +963,24 @@ fn decode_xrpl_uri(hex_uri: &str) -> Result<String> {
     String::from_utf8(bytes).map_err(|_| ApiError::Xrpl("XRPL NFT URI is not valid UTF-8".into()))
 }
 
-/// Извлекает NFTokenID из метаданных транзакции
+/// Extracts NFTokenID from transaction metadata
 fn extract_nft_id_from_meta(meta: &serde_json::Value) -> Option<String> {
-    // Прямой путь (новый формат)
+    // Direct path (new format)
     if let Some(id) = meta["meta"]["nftoken_id"].as_str() {
         return Some(id.to_string());
     }
 
-    // Через AffectedNodes
+    // Through AffectedNodes
     meta["meta"]["AffectedNodes"]
         .as_array()?
         .iter()
         .find_map(|node| {
-            // Ищем ModifiedNode с NFTokenPage
+            // Look for ModifiedNode with NFTokenPage
             let modified = node.get("ModifiedNode")?;
             let final_fields = modified.get("FinalFields")?;
             let nftokens = final_fields.get("NFTokens")?.as_array()?;
 
-            // Последний токен в списке - новый
+            // The last token in the list is new
             let prev_nftokens = modified
                 .get("PreviousFields")
                 .and_then(|pf| pf.get("NFTokens"))
@@ -1000,7 +1000,7 @@ fn extract_nft_id_from_meta(meta: &serde_json::Value) -> Option<String> {
             }
         })
         .or_else(|| {
-            // Ищем CreatedNode с NFTokenPage
+            // Look for CreatedNode with NFTokenPage
             meta["meta"]["AffectedNodes"]
                 .as_array()?
                 .iter()
@@ -1019,9 +1019,9 @@ fn extract_nft_id_from_meta(meta: &serde_json::Value) -> Option<String> {
         })
 }
 
-/// Извлекает Offer ID из метаданных транзакции
+/// Extracts Offer ID from transaction metadata
 fn extract_offer_id_from_meta(meta: &serde_json::Value) -> Option<String> {
-    // Ищем CreatedNode с LedgerEntryType = NFTokenOffer
+    // Look for CreatedNode with LedgerEntryType = NFTokenOffer
     meta["meta"]["AffectedNodes"]
         .as_array()?
         .iter()

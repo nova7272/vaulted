@@ -27,7 +27,7 @@ futures-util.workspace = true
 # Database
 sqlx.workspace = true
 
-# HTTP Client (для XRPL и storage nodes)
+# HTTP client (for XRPL and storage nodes)
 reqwest.workspace = true
 
 # Serialization

@@ -12,7 +12,7 @@ use crate::{
     sync::{SyncAction, SyncConfig, XrplSyncService},
 };
 
-/// POST /api/v1/sync/trigger - запустить синхронизацию вручную
+/// POST /api/v1/sync/trigger - start synchronization manually
 /// **Requires admin role** (CRIT-04)
 pub async fn trigger_sync(
     _admin: AdminUser,
@@ -25,7 +25,7 @@ pub async fn trigger_sync(
     Ok(Json(stats.to_json()))
 }
 
-/// POST /api/v1/sync/nft/:nft_token_id - синхронизировать конкретный NFT
+/// POST /api/v1/sync/nft/:nft_token_id - synchronize a specific NFT
 /// **Requires authentication** (CRIT-04)
 pub async fn sync_nft(
     _admin: AdminUser,
@@ -61,7 +61,7 @@ pub async fn sync_nft(
     Ok(Json(result))
 }
 
-/// GET /api/v1/sync/status - получить статус синхронизации
+/// GET /api/v1/sync/status - get synchronization status
 /// **Requires authentication** (CRIT-04)
 pub async fn sync_status(
     _admin: AdminUser,

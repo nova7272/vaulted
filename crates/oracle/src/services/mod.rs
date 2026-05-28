@@ -1,4 +1,4 @@
-//! Сервисы Oracle
+//! Oracle services
 
 pub mod app_state;
 pub mod replication;

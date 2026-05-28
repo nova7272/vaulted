@@ -144,7 +144,7 @@ pub async fn register_node(
         ));
     }
 
-    // Проверяем доступность node
+    // Check node availability
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()
@@ -169,7 +169,7 @@ pub async fn register_node(
         },
     };
 
-    // Upsert в БД
+    // Upsert into the database
     let result = sqlx::query(
         r#"
         INSERT INTO storage_nodes (id, endpoint_url, region, status, total_space_bytes, last_health_check)
@@ -270,7 +270,7 @@ pub async fn remove_node(
     State(state): State<AppState>,
     Path(node_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    // Проверяем что нет фрагментов на этом node
+    // Check that there are no fragments on this node
     let fragments_count: (i64,) =
         sqlx::query_as("SELECT COUNT(*) FROM file_fragments WHERE storage_node_id = $1")
             .bind(&node_id)
@@ -375,7 +375,7 @@ pub async fn health_check_all(
             Err(e) => (false, None, Some(e.to_string())),
         };
 
-        // Обновляем статус в БД
+        // Update the status in the database
         if healthy {
             sqlx::query(
                 r#"

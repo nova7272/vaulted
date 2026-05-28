@@ -1,7 +1,7 @@
 //! XRPL Vault Oracle Server
 //!
-//! Центральный сервер для управления зашифрованным хранилищем файлов
-//! с NFT-based access control.
+//! Central server for managing encrypted file storage
+//! with NFT-based access control.
 
 use axum::http::{header, Method};
 use ed25519_dalek::SigningKey;
@@ -18,7 +18,7 @@ use xrpl_vault_oracle::{
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Инициализируем логирование
+    // Initialize logging
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -29,17 +29,17 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Starting XRPL Vault Oracle v{}", env!("CARGO_PKG_VERSION"));
 
-    // Загружаем конфигурацию
+    // Load configuration
     let config = Config::from_env()?;
     tracing::info!("Loaded configuration (env: {})", config.environment);
 
-    // Подключаемся к базе данных
+    // Connect to the database
     tracing::info!("Connecting to database...");
     let db_pool = db::create_pool(&config.database_url).await?;
     db::check_connection(&db_pool).await?;
     tracing::info!("Database connected");
 
-    // Запускаем миграции
+    // Run migrations
     tracing::info!("Running database migrations...");
     let migration_result = run_embedded_migrations(&db_pool).await?;
     tracing::info!(
@@ -49,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
         migration_result.skipped
     );
 
-    // Загружаем или генерируем signing key для Oracle
+    // Load or generate the Oracle signing key
     let signing_key = load_or_generate_signing_key(&config)?;
     let verifying_key = signing_key.verifying_key();
     tracing::info!(
@@ -84,7 +84,7 @@ async fn main() -> anyhow::Result<()> {
         config.auth_rate_limit_rpm
     );
 
-    // Создаём состояние приложения
+    // Create application state
     let mut state = AppState::new(config.clone(), db_pool, signing_key);
 
     // CRIT-03: Log wallet seed source for security awareness
@@ -124,7 +124,7 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Создаём роутер с middleware stack
+    // Create the router with the middleware stack
     let app = api::create_router(auth_rate_limiter)
         .layer(
             ServiceBuilder::new()
@@ -150,7 +150,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .with_state(state);
 
-    // Запускаем сервер
+    // Start the server
     let addr: SocketAddr = config.listen_addr().parse()?;
     tracing::info!("Oracle listening on http://{}", addr);
 
@@ -228,9 +228,9 @@ fn build_cors_layer(config: &Config) -> CorsLayer {
     }
 }
 
-/// Загружает signing key из конфигурации или генерирует новый
+/// Loads the signing key from configuration or generates a new one
 fn load_or_generate_signing_key(config: &Config) -> anyhow::Result<SigningKey> {
-    // Пробуем загрузить из env
+    // Try to load from env
     if let Ok(key_hex) = std::env::var("ORACLE_SIGNING_KEY") {
         let key_bytes = hex::decode(&key_hex)?;
         if key_bytes.len() != 32 {
@@ -247,11 +247,11 @@ fn load_or_generate_signing_key(config: &Config) -> anyhow::Result<SigningKey> {
         anyhow::bail!("ORACLE_SIGNING_KEY must be set in production!");
     }
 
-    // Генерируем новый (только для dev!)
+    // Generate a new one (dev only)
     tracing::warn!("⚠️  Generating random signing key. Set ORACLE_SIGNING_KEY in production!");
     let signing_key = SigningKey::generate(&mut OsRng);
 
-    // Выводим для сохранения
+    // Print it for saving
     tracing::info!(
         "Generated signing key (save this!): {}",
         hex::encode(signing_key.to_bytes())

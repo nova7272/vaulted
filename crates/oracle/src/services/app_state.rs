@@ -1,4 +1,4 @@
-//! Состояние приложения Oracle
+//! Oracle application state
 
 use ed25519_dalek::SigningKey;
 use sqlx::PgPool;
@@ -19,7 +19,7 @@ pub struct StoredChallenge {
     pub created_at: Instant,
 }
 
-/// Состояние приложения
+/// Application state
 #[derive(Clone)]
 pub struct AppState {
     pub config: Config,
@@ -307,7 +307,7 @@ impl AppState {
             .await;
     }
 
-    /// Логирует событие аудита с шифрованием чувствительных данных
+    /// Logs an audit event with sensitive data encryption
     pub async fn audit_log(
         &self,
         user_id: Option<Uuid>,
@@ -351,7 +351,7 @@ impl AppState {
         }
     }
 
-    /// Логирует событие аудита с IP и User-Agent
+    /// Logs an audit event with IP and User-Agent
     pub async fn audit_log_full(
         &self,
         user_id: Option<Uuid>,
