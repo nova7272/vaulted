@@ -1,6 +1,6 @@
 //! Tauri Commands
 //!
-//! Мост между JavaScript UI и Rust backend.
+//! Bridge between the JavaScript UI and Rust backend.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1841,25 +1841,25 @@ pub async fn confirm_vaulted_file_grant_approval(
 
 // ==================== Progress Events ====================
 
-/// Событие прогресса для upload/download
+/// Progress event for upload/download
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProgressEvent {
-    /// Идентификатор операции (nft_token_id или file_path)
+    /// Operation identifier (nft_token_id or file_path)
     pub operation_id: String,
-    /// Тип операции: "upload" или "download"
+    /// Operation type: "upload" or "download"
     pub operation_type: String,
-    /// Текущий этап: "encrypting", "uploading", "minting", "downloading", "decrypting"
+    /// Current phase: "encrypting", "uploading", "minting", "downloading", "decrypting"
     pub stage: String,
-    /// Прогресс текущего этапа (0-100)
+    /// Current phase progress (0-100)
     pub progress: u32,
-    /// Общий прогресс операции (0-100)
+    /// Overall operation progress (0-100)
     pub total_progress: u32,
-    /// Описание текущего действия
+    /// Current action description
     pub message: String,
-    /// Обработано байт
+    /// Bytes processed
     pub bytes_processed: u64,
-    /// Всего байт
+    /// Total bytes
     pub bytes_total: u64,
 }
 
@@ -1884,14 +1884,14 @@ impl ProgressEvent {
 
 // ==================== Auth Commands ====================
 
-/// Шаг 3: DEPRECATED - PRE ключи теперь деривируются автоматически при Vaulted unlock
-/// Оставлено для совместимости с UI
+/// Step 3: DEPRECATED - PRE keys are now derived automatically during Vaulted unlock
+/// Kept for UI compatibility
 #[tauri::command]
 pub async fn start_key_derivation(
     state: State<'_, Arc<AppState>>,
 ) -> Result<VaultedSigningRequest> {
-    // PRE ключи уже деривированы при Vaulted unlock
-    // Возвращаем пустой payload — UI проверит has_pre_keys и увидит что ключи есть
+    // PRE keys are already derived during Vaulted unlock
+    // Return an empty payload - the UI will check has_pre_keys and see that keys exist
     let session = state.get_session().await?;
 
     if state.has_keypair().await {
@@ -1901,7 +1901,7 @@ pub async fn start_key_derivation(
         );
     }
 
-    // Возвращаем dummy payload — UI не должен его использовать
+    // Return a dummy payload - the UI must not use it
     Ok(VaultedSigningRequest {
         uuid: "keys-already-derived".to_string(),
         qr_png: String::new(),
@@ -1912,8 +1912,8 @@ pub async fn start_key_derivation(
     })
 }
 
-/// Шаг 4: DEPRECATED - PRE ключи теперь деривируются автоматически при Vaulted unlock
-/// Оставлено для совместимости с UI
+/// Step 4: DEPRECATED - PRE keys are now derived automatically during Vaulted unlock
+/// Kept for UI compatibility
 #[tauri::command(rename_all = "camelCase")]
 pub async fn wait_for_key_derivation(
     state: State<'_, Arc<AppState>>,
@@ -1922,7 +1922,7 @@ pub async fn wait_for_key_derivation(
 ) -> Result<KeyDerivationResponse> {
     let session = state.get_session().await?;
 
-    // PRE ключи уже деривированы при Vaulted unlock
+    // PRE keys are already derived during Vaulted unlock
     let public_key_hex = state.get_public_key_hex().await?;
 
     tracing::info!(
@@ -1937,21 +1937,21 @@ pub async fn wait_for_key_derivation(
     })
 }
 
-/// Проверяет наличие PRE ключей для текущего пользователя (в памяти)
+/// Checks whether PRE keys exist for the current user (in memory)
 #[tauri::command]
 pub async fn has_pre_keys(state: State<'_, Arc<AppState>>) -> Result<bool> {
     let _session = state.get_session().await?;
     Ok(state.has_keypair().await)
 }
 
-/// Выходит из системы
+/// Logs out
 #[tauri::command]
 pub async fn logout(state: State<'_, Arc<AppState>>) -> Result<()> {
     state.clear_session().await;
     Ok(())
 }
 
-/// Проверяет статус авторизации
+/// Checks authorization status
 #[tauri::command]
 pub async fn is_authenticated(state: State<'_, Arc<AppState>>) -> Result<bool> {
     Ok(state.is_authenticated().await)
@@ -1963,7 +1963,7 @@ pub async fn get_oracle_url(state: State<'_, Arc<AppState>>) -> Result<String> {
     Ok(state.config.oracle_url.clone())
 }
 
-/// Получает текущую сессию
+/// Gets the current session
 #[tauri::command]
 pub async fn get_current_session(state: State<'_, Arc<AppState>>) -> Result<Option<Session>> {
     match state.get_session().await {
@@ -1972,7 +1972,7 @@ pub async fn get_current_session(state: State<'_, Arc<AppState>>) -> Result<Opti
     }
 }
 
-/// Информация о пользователе
+/// User information
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UserInfo {
@@ -1986,7 +1986,7 @@ pub struct UserInfo {
     pub expires_at: String,
 }
 
-/// Получает информацию о текущем пользователе
+/// Gets current user information
 #[tauri::command]
 pub async fn get_current_user(state: State<'_, Arc<AppState>>) -> Result<UserInfo> {
     let session = state.get_session().await?;
@@ -2017,7 +2017,7 @@ pub async fn get_current_user(state: State<'_, Arc<AppState>>) -> Result<UserInf
     })
 }
 
-/// Ответ на деривацию ключей
+/// Key derivation response
 #[derive(Serialize)]
 pub struct KeyDerivationResponse {
     pub public_key: String,
@@ -2026,7 +2026,7 @@ pub struct KeyDerivationResponse {
 
 // ==================== File Upload Commands ====================
 
-/// Результат загрузки файла
+/// File upload result
 #[derive(Debug, Serialize)]
 pub struct UploadResult {
     pub vault_id: String,
@@ -2040,7 +2040,7 @@ pub struct UploadResult {
     pub fragments_count: u32,
 }
 
-/// Прогресс загрузки
+/// Upload progress
 #[derive(Debug, Clone, Serialize)]
 pub struct UploadProgress {
     pub stage: String,
@@ -2048,7 +2048,7 @@ pub struct UploadProgress {
     pub message: String,
 }
 
-/// Загружает файл: шифрует, отправляет на storage, минтит NFT
+/// Uploads a file: encrypts it, sends it to storage, and mints an NFT
 #[tauri::command]
 pub async fn upload_file(
     app: AppHandle,
@@ -2058,7 +2058,7 @@ pub async fn upload_file(
     let session = state.get_session().await?;
     let wallet_address = session.wallet_address.clone();
 
-    // Проверяем что keypair есть в памяти
+    // Check that the keypair is in memory
     if !state.has_keypair().await {
         return Err(ClientError::Auth(
             "Vaulted wallet is locked. Create or restore it from seed phrase first.".to_string(),
@@ -2092,14 +2092,14 @@ pub async fn upload_file(
         .unwrap_or("unknown")
         .to_string();
 
-    // Инициализируем прогресс
+    // Initialize progress
     let mut progress = ProgressEvent::new(&file_path, "upload");
     progress.bytes_total = file_size;
     progress.emit(&app);
 
     tracing::info!("Uploading encrypted file payload ({} bytes)", file_size);
 
-    // Этап 1: Шифрование (0-30%)
+    // Phase 1: Encryption (0-30%)
     progress.stage = "encrypting".to_string();
     progress.message = "Encrypting file...".to_string();
     progress.total_progress = 5;
@@ -2116,7 +2116,7 @@ pub async fn upload_file(
 
     tracing::info!("File encrypted: {} bytes", encrypted_bytes.len());
 
-    // Этап 2: Создание Vault и минтинг NFT (30-60%)
+    // Phase 2: Vault creation and NFT minting (30-60%)
     progress.stage = "minting".to_string();
     progress.progress = 0;
     progress.message = "Preparing encrypted vault...".to_string();
@@ -2127,7 +2127,7 @@ pub async fn upload_file(
 
     let oracle = state.get_oracle_client_with_timeout(120).await?;
 
-    // Создаём vault с пустым storage info (будет заполнено после upload)
+    // Create a vault with empty storage info (filled after upload)
     let vault_request = CreateVaultRequest {
         wallet_address: wallet_address.clone(),
         pre_public_key: public_key_hex,
@@ -2140,8 +2140,8 @@ pub async fn upload_file(
             original_hash: encrypted.manifest.original_hash.clone(),
             fragments: vec![VaultFragment {
                 index: 0,
-                storage_node_id: String::new(), // Будет заполнено Oracle
-                storage_key: String::new(),     // Будет заполнено Oracle
+                storage_node_id: String::new(), // Filled by Oracle
+                storage_key: String::new(),     // Filled by Oracle
                 encrypted_hash: encrypted.encrypted_hash.clone(),
                 size: encrypted_bytes.len() as u64,
             }],
@@ -2163,7 +2163,7 @@ pub async fn upload_file(
         vault_response.nft_token_id
     );
 
-    // Этап 3: Загрузка через Oracle proxy (60-95%)
+    // Phase 3: Upload through Oracle proxy (60-95%)
     progress.stage = "uploading".to_string();
     progress.progress = 0;
     progress.message = "Uploading encrypted data...".to_string();
@@ -2204,7 +2204,7 @@ pub async fn upload_file(
     progress.message = "Upload complete".to_string();
     progress.emit(&app);
 
-    // Финальный прогресс
+    // Final progress
     progress.stage = "complete".to_string();
     progress.progress = 100;
     progress.total_progress = 100;
@@ -2224,7 +2224,7 @@ pub async fn upload_file(
     })
 }
 
-/// Загружает несколько файлов (автоматически архивирует в ZIP)
+/// Uploads multiple files (automatically archives them into ZIP)
 #[tauri::command]
 pub async fn upload_files(
     app: AppHandle,
@@ -2238,9 +2238,9 @@ pub async fn upload_files(
         return Err(ClientError::Validation("No files selected".to_string()));
     }
 
-    // Если один файл и не папка - используем обычный upload
+    // If this is one file and not a directory, use regular upload
     if file_paths.len() == 1 && !needs_archiving(&file_paths) {
-        // Если есть custom_name, используем upload_bytes
+        // If custom_name exists, use upload_bytes
         if let Some(name) = custom_name {
             let path = Path::new(&file_paths[0]);
             let data = tokio::fs::read(path).await?;
@@ -2252,7 +2252,7 @@ pub async fn upload_files(
         return upload_file(app, state, file_paths[0].clone()).await;
     }
 
-    // Нужна архивация
+    // Archiving is needed
     let archive_name = custom_name.unwrap_or_else(|| generate_archive_name(&file_paths));
     let archive_name = if !archive_name.ends_with(".zip") {
         format!("{}.zip", archive_name)
@@ -2266,13 +2266,13 @@ pub async fn upload_files(
         file_paths.len()
     );
 
-    // Создаём архив
+    // Create an archive
     let zip_data =
         create_zip_archive(&file_paths, &archive_name).map_err(|e| ClientError::Validation(e))?;
 
     tracing::info!("ZIP archive created: {} bytes", zip_data.len());
 
-    // Загружаем архив
+    // Upload the archive
     upload_bytes_internal(
         app,
         state,
@@ -2283,7 +2283,7 @@ pub async fn upload_files(
     .await
 }
 
-/// Внутренняя функция для загрузки байтов
+/// Internal function for uploading bytes
 async fn upload_bytes_internal(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
@@ -2320,7 +2320,7 @@ async fn upload_bytes_internal(
         file_size
     );
 
-    // Этап 1: Шифрование (0-30%)
+    // Phase 1: Encryption (0-30%)
     progress.stage = "encrypting".to_string();
     progress.message = "Encrypting data...".to_string();
     progress.total_progress = 5;
@@ -2337,7 +2337,7 @@ async fn upload_bytes_internal(
 
     tracing::info!("Data encrypted: {} bytes", encrypted_bytes.len());
 
-    // Этап 2: Создание vault и минтинг NFT (30-60%)
+    // Phase 2: Vault creation and NFT minting (30-60%)
     progress.stage = "minting".to_string();
     progress.progress = 0;
     progress.message = "Preparing encrypted vault...".to_string();
@@ -2347,8 +2347,8 @@ async fn upload_bytes_internal(
     let encrypted_hash = format!("blake3:{}", &encrypted.encrypted_hash[..13]);
     let fragment = VaultFragment {
         index: 0,
-        storage_node_id: String::new(), // Будет заполнено Oracle
-        storage_key: String::new(),     // Будет заполнено Oracle
+        storage_node_id: String::new(), // Filled by Oracle
+        storage_key: String::new(),     // Filled by Oracle
         encrypted_hash: encrypted_hash.clone(),
         size: encrypted_bytes.len() as u64,
     };
@@ -2388,7 +2388,7 @@ async fn upload_bytes_internal(
         vault_response.nft_token_id
     );
 
-    // Этап 3: Загрузка через Oracle proxy (60-95%)
+    // Phase 3: Upload through Oracle proxy (60-95%)
     progress.stage = "uploading".to_string();
     progress.progress = 0;
     progress.message = "Uploading encrypted data...".to_string();
@@ -2429,7 +2429,7 @@ async fn upload_bytes_internal(
     progress.message = "Upload complete".to_string();
     progress.emit(&app);
 
-    // Финальный прогресс
+    // Final progress
     progress.stage = "complete".to_string();
     progress.progress = 100;
     progress.total_progress = 100;
@@ -2449,7 +2449,7 @@ async fn upload_bytes_internal(
     })
 }
 
-/// Шифрует файл и возвращает зашифрованные данные (без загрузки)
+/// Encrypts a file and returns encrypted data (without uploading)
 #[tauri::command]
 pub async fn encrypt_file(
     state: State<'_, Arc<AppState>>,
@@ -2536,7 +2536,7 @@ pub async fn get_xrp_balance(state: State<'_, Arc<AppState>>) -> Result<String> 
     Ok(overview.balance_xrp.unwrap_or_else(|| "0".to_string()))
 }
 
-/// Расшифровывает имя файла из encrypted_filename
+/// Decrypts the file name from encrypted_filename
 async fn decrypt_filename(
     state: &State<'_, Arc<AppState>>,
     encrypted_aes_key: &str,
@@ -2545,7 +2545,7 @@ async fn decrypt_filename(
 ) -> Result<String> {
     let keypair = state.get_keypair().await?;
 
-    // Расшифровываем AES ключ
+    // Decrypt the AES key
     let aes_key_bytes = if is_re_encrypted {
         let re_encrypted_data =
             xrpl_vault_crypto_core::pre::ReEncryptedData::from_base64(encrypted_aes_key)
@@ -2562,7 +2562,7 @@ async fn decrypt_filename(
 
     let aes_key = xrpl_vault_crypto_core::AesKey::from_bytes(&aes_key_bytes)?;
 
-    // Расшифровываем имя файла
+    // Decrypt the file name
     let decrypted_bytes = aes_key
         .decrypt_from_base64(encrypted_filename)
         .map_err(|e| ClientError::Crypto(e))?;
@@ -2604,8 +2604,8 @@ pub async fn list_my_nfts(state: State<'_, Arc<AppState>>) -> Result<Vec<NftInfo
         .cloned()
         .unwrap_or_default();
 
-    // Собираем базовую информацию о NFT
-    // Фильтруем только NFT нашего проекта (URI: vaulted:// или .../nft/.../metadata.json)
+    // Collect basic NFT information
+    // Filter only NFTs from our project (URI: vaulted:// or .../nft/.../metadata.json)
     let mut nft_infos: Vec<NftInfo> = nfts
         .into_iter()
         .filter_map(|nft| {
@@ -2620,7 +2620,7 @@ pub async fn list_my_nfts(state: State<'_, Arc<AppState>>) -> Result<Vec<NftInfo
                 String::new()
             };
 
-            // Показываем только NFT нашего проекта
+            // Show only NFTs from our project
             let is_vault_nft = uri.starts_with("vaulted://")
                 || (uri.contains("/nft/") && uri.contains("/metadata.json"));
             if !is_vault_nft {
@@ -2637,7 +2637,7 @@ pub async fn list_my_nfts(state: State<'_, Arc<AppState>>) -> Result<Vec<NftInfo
         })
         .collect();
 
-    // Запрашиваем и расшифровываем filename из Oracle для каждого NFT
+    // Request and decrypt filename from Oracle for each NFT
     let oracle_url = &state.config.oracle_url;
     let has_keypair = state.has_keypair().await;
 
@@ -3066,13 +3066,13 @@ pub async fn download_file(
         "owner_download"
     );
 
-    // Инициализируем прогресс
+    // Initialize progress
     let mut progress = ProgressEvent::new(&nft_token_id, "download");
     progress.emit(&app);
 
     let client = state.create_authed_client().await;
 
-    // Получаем метаданные файла
+    // Get file metadata
     let oracle_url = format!(
         "{}/api/v1/files/{}/access",
         state.config.oracle_url, nft_token_id
@@ -3111,7 +3111,7 @@ pub async fn download_file(
         .as_str()
         .ok_or_else(|| ClientError::Oracle("Missing encrypted_aes_key".into()))?;
 
-    // Проверяем был ли ключ перешифрован (после transfer)
+    // Check whether the key was re-encrypted (after transfer)
     let is_re_encrypted = file_info["is_re_encrypted"].as_bool().unwrap_or(false);
 
     let original_size = file_info["manifest"]["original_size"].as_u64().unwrap_or(0);
@@ -3127,13 +3127,13 @@ pub async fn download_file(
         "owner_download"
     );
 
-    // Этап: Скачивание через Oracle proxy (10-70%)
+    // Phase: Download through Oracle proxy (10-70%)
     progress.stage = "downloading".to_string();
     progress.message = "Downloading encrypted data...".to_string();
     progress.total_progress = 10;
     progress.emit(&app);
 
-    // Используем новый Oracle proxy endpoint
+    // Use the new Oracle proxy endpoint
     let download_url = format!(
         "{}/api/v1/files/{}/download",
         state.config.oracle_url, nft_token_id
@@ -3177,7 +3177,7 @@ pub async fn download_file(
         "owner_download"
     );
 
-    // Этап: Расшифровка (70-95%)
+    // Phase: Decryption (70-95%)
     progress.stage = "decrypting".to_string();
     progress.message = "Decrypting file...".to_string();
     progress.total_progress = 75;
@@ -3186,9 +3186,9 @@ pub async fn download_file(
 
     let keypair = state.get_keypair().await?;
 
-    // Расшифровываем AES ключ в зависимости от типа данных
+    // Decrypt the AES key depending on the data type
     let aes_key_bytes = if is_re_encrypted {
-        // После transfer - ключ в формате ReEncryptedData
+        // After transfer - key is in ReEncryptedData format
         tracing::info!(
             command = "download_file",
             phase = "unwrap_transferred_key",
@@ -3205,7 +3205,7 @@ pub async fn download_file(
             .pre()
             .decrypt_reencrypted_data(&keypair, &re_encrypted_data)?
     } else {
-        // Оригинальный владелец - ключ в формате EncryptedPreData
+        // Original owner - key is in EncryptedPreData format
         tracing::info!(
             command = "download_file",
             phase = "unwrap_owner_key",
@@ -3242,7 +3242,7 @@ pub async fn download_file(
         "owner_download"
     );
 
-    // Этап: Сохранение (95-100%)
+    // Phase: Saving (95-100%)
     progress.stage = "saving".to_string();
     progress.message = "Saving file...".to_string();
     progress.total_progress = 95;
@@ -3251,7 +3251,7 @@ pub async fn download_file(
     std::fs::write(&output_path, &decrypted_data)
         .map_err(|e| ClientError::Config(format!("Failed to write file: {}", e)))?;
 
-    // Финальный прогресс
+    // Final progress
     progress.stage = "complete".to_string();
     progress.message = "Download complete!".to_string();
     progress.progress = 100;
@@ -3299,7 +3299,7 @@ pub async fn request_file_access(
 
     let access = oracle.request_file_access(&nft_token_id).await?;
 
-    // Расшифровываем имя файла до move
+    // Decrypt the file name before move
     let filename = decrypt_filename(
         &state,
         &access.encrypted_aes_key,
@@ -4135,7 +4135,7 @@ pub async fn get_incoming_offers(state: State<'_, Arc<AppState>>) -> Result<Vec<
 
     let client = state.create_authed_client().await;
 
-    // Запрашиваем у Oracle pending transfers где мы получатель
+    // Request pending transfers from Oracle where we are the recipient
     let oracle_url = format!(
         "{}/api/v1/transfers/incoming/{}",
         state.config.oracle_url, session.wallet_address
@@ -4224,7 +4224,7 @@ pub async fn get_outgoing_offers(state: State<'_, Arc<AppState>>) -> Result<Vec<
     let session = state.get_session().await?;
     let client = state.create_authed_client().await;
 
-    // Запрашиваем историю трансферов у Oracle
+    // Request transfer history from Oracle
     let oracle_url = format!(
         "{}/api/v1/transfers/history/{}",
         state.config.oracle_url, session.wallet_address
@@ -4461,7 +4461,7 @@ pub async fn wait_for_burn(
 
 // ==================== Secure Notes ====================
 
-/// Secure Note - зашифрованная заметка
+/// Secure Note - encrypted note
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SecureNote {
@@ -4472,7 +4472,7 @@ pub struct SecureNote {
     pub created_at: String,
 }
 
-/// Результат создания secure note
+/// Secure note creation result
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SecureNoteResult {
@@ -4484,8 +4484,8 @@ pub struct SecureNoteResult {
     pub size: u64,
 }
 
-/// Шифрует и загружает текстовые данные (пароли, ключи, заметки)
-/// Данные хранятся ТОЛЬКО в RAM и очищаются после шифрования
+/// Encrypts and uploads text data (passwords, keys, notes)
+/// Data is stored ONLY in RAM and cleared after encryption
 #[tauri::command]
 pub async fn encrypt_secure_note(
     app: AppHandle,
@@ -4506,7 +4506,7 @@ pub async fn encrypt_secure_note(
     let public_key = state.get_public_key().await?;
     let public_key_hex = hex::encode(public_key.to_bytes());
 
-    // Размер данных
+    // Data size
     let content_size = content.len() as u64;
 
     tracing::info!(
@@ -4524,10 +4524,10 @@ pub async fn encrypt_secure_note(
     progress.total_progress = 10;
     progress.emit(&app);
 
-    // Конвертируем в bytes для шифрования
+    // Convert to bytes for encryption
     let mut content_bytes = content.into_bytes();
 
-    // MIME type для заметок
+    // MIME type for notes
     let mime_type = match note_type.as_str() {
         "password" => "application/x-password",
         "seed" => "application/x-seed-phrase",
@@ -4535,7 +4535,7 @@ pub async fn encrypt_secure_note(
         _ => "text/plain",
     };
 
-    // Шифруем
+    // Encrypt
     let encryptor = FileEncryptor::new(state.config.fragment_size);
     let encrypted = encryptor.encrypt_bytes(
         &content_bytes,
@@ -4544,7 +4544,7 @@ pub async fn encrypt_secure_note(
         &public_key,
     )?;
 
-    // 🔒 ВАЖНО: Очищаем plaintext из памяти
+    // IMPORTANT: Clear plaintext from memory
     content_bytes.zeroize();
 
     let encrypted_bytes = encrypted.encrypted_data.to_bytes()?;
@@ -4555,7 +4555,7 @@ pub async fn encrypt_secure_note(
 
     tracing::info!("Secure note encrypted: {} bytes", encrypted_bytes.len());
 
-    // Создаём vault (минтим NFT)
+    // Create a vault (mint NFT)
     progress.stage = "minting".to_string();
     progress.message = "Creating secure vault...".to_string();
     progress.total_progress = 40;
@@ -4598,7 +4598,7 @@ pub async fn encrypt_secure_note(
         vault_response.nft_token_id
     );
 
-    // Загружаем через Oracle proxy
+    // Upload through Oracle proxy
     progress.stage = "uploading".to_string();
     progress.message = "Uploading encrypted note...".to_string();
     progress.total_progress = 75;
@@ -4644,8 +4644,8 @@ pub async fn encrypt_secure_note(
     })
 }
 
-/// Расшифровывает и возвращает содержимое secure note
-/// Данные возвращаются в UI и должны быть очищены там после использования
+/// Decrypts and returns secure note content
+/// Data is returned to the UI and must be cleared there after use
 #[tauri::command]
 pub async fn decrypt_secure_note(
     state: State<'_, Arc<AppState>>,
@@ -4655,7 +4655,7 @@ pub async fn decrypt_secure_note(
 
     tracing::info!("Decrypting secure note payload");
 
-    // Получаем метаданные
+    // Get metadata
     let client = state.create_authed_client().await;
     let oracle_url = format!(
         "{}/api/v1/files/{}/access",
@@ -4675,7 +4675,7 @@ pub async fn decrypt_secure_note(
         .unwrap_or("text/plain")
         .to_string();
 
-    // Скачиваем через Oracle proxy
+    // Download through Oracle proxy
     let download_url = format!(
         "{}/api/v1/files/{}/download",
         state.config.oracle_url, nft_token_id
@@ -4706,7 +4706,7 @@ pub async fn decrypt_secure_note(
 
     let encrypted_data = response.bytes().await?.to_vec();
 
-    // Расшифровываем AES ключ
+    // Decrypt the AES key
     let keypair = state.get_keypair().await?;
 
     let aes_key_bytes = if is_re_encrypted {
@@ -4725,16 +4725,16 @@ pub async fn decrypt_secure_note(
         state.pre().decrypt(&keypair, &encrypted_pre_data)?
     };
 
-    // Расшифровываем данные
+    // Decrypt data
     let aes_key = xrpl_vault_crypto_core::AesKey::from_bytes(&aes_key_bytes)?;
     let encrypted_fragment = xrpl_vault_crypto_core::EncryptedData::from_bytes(&encrypted_data)?;
     let decrypted = aes_key.decrypt(&encrypted_fragment)?;
 
-    // Конвертируем в строку
+    // Convert to string
     let content = String::from_utf8(decrypted)
         .map_err(|_| ClientError::Config("Invalid UTF-8 in note".to_string()))?;
 
-    // Определяем тип по MIME
+    // Determine type by MIME
     let note_type = match mime_type.as_str() {
         "application/x-password" => "password",
         "application/x-seed-phrase" => "seed",
@@ -4753,7 +4753,7 @@ pub async fn decrypt_secure_note(
     })
 }
 
-/// Содержимое расшифрованной заметки
+/// Decrypted note content
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SecureNoteContent {
@@ -4763,12 +4763,12 @@ pub struct SecureNoteContent {
     pub mime_type: String,
 }
 
-/// Получить список secure notes пользователя
+/// Get the user's secure notes list
 #[tauri::command]
 pub async fn list_secure_notes(state: State<'_, Arc<AppState>>) -> Result<Vec<SecureNote>> {
     let _session = state.get_session().await?;
 
-    // Получаем все файлы и фильтруем по MIME type
+    // Get all files and filter by MIME type
     let files = get_my_files(state.clone()).await?;
 
     let secure_notes: Vec<SecureNote> = files
@@ -4805,7 +4805,7 @@ pub async fn list_secure_notes(state: State<'_, Arc<AppState>>) -> Result<Vec<Se
     Ok(secure_notes)
 }
 
-/// Статус claim NFT
+/// NFT claim status
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClaimStatus {
@@ -4814,8 +4814,8 @@ pub struct ClaimStatus {
     pub owner_address: Option<String>,
 }
 
-/// Проверка статуса claim NFT
-/// Проверяет, был ли NFT получен пользователем (offer принят)
+/// NFT claim status check
+/// Checks whether the NFT was received by the user (offer accepted)
 #[tauri::command]
 pub async fn check_claim_status(
     state: State<'_, Arc<AppState>>,
@@ -4859,8 +4859,8 @@ pub async fn check_claim_status(
     }
 }
 
-/// Отмена offer и сжигание NFT
-/// Вызывается когда пользователь отменяет операцию или истекло время
+/// Offer cancellation and NFT burn
+/// Called when the user cancels the operation or time expires
 #[tauri::command]
 pub async fn cancel_secure_note_offer(
     state: State<'_, Arc<AppState>>,

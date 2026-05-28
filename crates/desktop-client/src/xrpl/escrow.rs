@@ -1,24 +1,24 @@
-//! Escrow операции на XRPL
+//! Escrow operations on XRPL
 //!
-//! Используется для безопасной передачи NFT с гарантией оплаты.
+//! Used for secure NFT transfer with payment guarantee.
 
 use super::client::XrplClient;
 use crate::error::Result;
 use serde::{Deserialize, Serialize};
 
-/// Операции с Escrow
+/// Escrow operations
 pub struct EscrowOperations<'a> {
     #[allow(dead_code)]
     client: &'a XrplClient,
 }
 
 impl<'a> EscrowOperations<'a> {
-    /// Создаёт новый объект операций
+    /// Creates a new operations object
     pub fn new(client: &'a XrplClient) -> Self {
         Self { client }
     }
 
-    /// Создаёт данные для EscrowCreate транзакции
+    /// Creates data for an EscrowCreate transaction
     pub fn create_escrow_transaction(
         &self,
         request: &CreateEscrowRequest,
@@ -42,7 +42,7 @@ impl<'a> EscrowOperations<'a> {
         }
     }
 
-    /// Создаёт данные для EscrowFinish транзакции
+    /// Creates data for an EscrowFinish transaction
     pub fn create_finish_transaction(
         &self,
         request: &FinishEscrowRequest,
@@ -57,7 +57,7 @@ impl<'a> EscrowOperations<'a> {
         }
     }
 
-    /// Создаёт данные для EscrowCancel транзакции
+    /// Creates data for an EscrowCancel transaction
     pub fn create_cancel_transaction(
         &self,
         request: &CancelEscrowRequest,
@@ -70,8 +70,8 @@ impl<'a> EscrowOperations<'a> {
         }
     }
 
-    /// Получает информацию об Escrow по owner и sequence
-    /// TODO: Реализовать после добавления публичного метода request в XrplClient
+    /// Gets Escrow information by owner and sequence
+    /// TODO: Implement after adding a public request method to XrplClient
     pub async fn get_escrow_info(
         &self,
         _owner: &str,
@@ -80,7 +80,7 @@ impl<'a> EscrowOperations<'a> {
         Ok(None)
     }
 
-    /// Проверяет, можно ли завершить Escrow
+    /// Checks whether Escrow can be finished
     pub fn can_finish(&self, escrow: &EscrowInfo) -> bool {
         let now_ripple = current_ripple_time();
         match escrow.finish_after {
@@ -89,7 +89,7 @@ impl<'a> EscrowOperations<'a> {
         }
     }
 
-    /// Проверяет, можно ли отменить Escrow
+    /// Checks whether Escrow can be cancelled
     pub fn can_cancel(&self, escrow: &EscrowInfo) -> bool {
         let now_ripple = current_ripple_time();
         match escrow.cancel_after {

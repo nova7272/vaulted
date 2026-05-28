@@ -1,9 +1,9 @@
-//! Расшифровка файлов
+//! File decryption
 //!
-//! Процесс:
-//! 1. Расшифровываем AES-ключ
-//! 2. Расшифровываем данные
-//! 3. Верифицируем хеш
+//! Process:
+//! 1. Decrypt the AES key
+//! 2. Decrypt data
+//! 3. Verify the hash
 
 use std::path::Path;
 use tokio::fs::File;
@@ -19,23 +19,23 @@ use xrpl_vault_crypto_core::{
 
 use crate::error::{ClientError, Result};
 
-/// Расшифровщик файлов
+/// File decryptor
 pub struct FileDecryptor {
     pre: ProxyReEncryption,
 }
 
 impl FileDecryptor {
-    /// Создаёт новый расшифровщик
+    /// Creates a new decryptor
     pub fn new() -> Self {
         Self {
             pre: ProxyReEncryption::new(),
         }
     }
 
-    /// Расшифровывает AES-ключ
+    /// Decrypts the AES key
     ///
-    /// Используется когда пользователь сам зашифровал файл
-    /// или получил ключ после transfer
+    /// Used when the user encrypted the file themselves
+    /// or received the key after transfer
     pub fn decrypt_aes_key(
         &self,
         keypair: &PreKeyPair,
@@ -55,14 +55,14 @@ impl FileDecryptor {
         AesKey::from_bytes(&key_bytes).map_err(|e| ClientError::Crypto(e))
     }
 
-    /// Расшифровывает данные
+    /// Decrypts data
     pub fn decrypt_data(&self, aes_key: &AesKey, encrypted: &EncryptedData) -> Result<Vec<u8>> {
         aes_key
             .decrypt(encrypted)
             .map_err(|e| ClientError::Crypto(e))
     }
 
-    /// Расшифровывает файл и сохраняет на диск
+    /// Decrypts a file and saves it to disk
     pub async fn decrypt_file(
         &self,
         aes_key: &AesKey,
@@ -70,10 +70,10 @@ impl FileDecryptor {
         expected_hash: &str,
         output_path: &Path,
     ) -> Result<()> {
-        // Расшифровываем
+        // Decrypt
         let decrypted = self.decrypt_data(aes_key, encrypted_data)?;
 
-        // Верифицируем хеш
+        // Verify the hash
         if !verify_hash(&decrypted, expected_hash) {
             return Err(ClientError::Crypto(
                 xrpl_vault_crypto_core::CryptoError::InvalidData(
@@ -82,7 +82,7 @@ impl FileDecryptor {
             ));
         }
 
-        // Сохраняем файл
+        // Save the file
         let mut file = File::create(output_path).await?;
         file.write_all(&decrypted).await?;
         file.flush().await?;
@@ -96,7 +96,7 @@ impl FileDecryptor {
         Ok(())
     }
 
-    /// Расшифровывает данные в память
+    /// Decrypts data into memory
     pub fn decrypt_bytes(
         &self,
         aes_key: &AesKey,
@@ -105,7 +105,7 @@ impl FileDecryptor {
     ) -> Result<Vec<u8>> {
         let decrypted = self.decrypt_data(aes_key, encrypted_data)?;
 
-        // Верифицируем хеш
+        // Verify the hash
         if !verify_hash(&decrypted, expected_hash) {
             return Err(ClientError::Crypto(
                 xrpl_vault_crypto_core::CryptoError::InvalidData(

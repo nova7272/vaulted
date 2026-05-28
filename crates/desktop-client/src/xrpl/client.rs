@@ -1,6 +1,6 @@
-//! WebSocket клиент для XRPL
+//! WebSocket client for XRPL
 //!
-//! Подключение к XRPL ноде для отправки транзакций и получения данных.
+//! Connection to an XRPL node for sending transactions and receiving data.
 
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -12,7 +12,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::error::{ClientError, Result};
 
-/// XRPL WebSocket клиент
+/// XRPL WebSocket client
 pub struct XrplClient {
     node_url: String,
     request_id: AtomicU64,
@@ -21,7 +21,7 @@ pub struct XrplClient {
 }
 
 impl XrplClient {
-    /// Создаёт новый клиент
+    /// Creates a new client
     pub fn new(node_url: &str) -> Self {
         Self {
             node_url: node_url.to_string(),
@@ -31,7 +31,7 @@ impl XrplClient {
         }
     }
 
-    /// Подключается к XRPL ноде
+    /// Connects to an XRPL node
     pub async fn connect(&mut self) -> Result<()> {
         let (ws_stream, _) = connect_async(&self.node_url)
             .await
@@ -44,7 +44,7 @@ impl XrplClient {
 
         let pending = Arc::clone(&self.pending_requests);
 
-        // Обработчик входящих сообщений
+        // Incoming message handler
         tokio::spawn(async move {
             while let Some(msg) = read.next().await {
                 match msg {
@@ -71,7 +71,7 @@ impl XrplClient {
             }
         });
 
-        // Обработчик исходящих сообщений
+        // Outgoing message handler
         tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
                 if write.send(msg).await.is_err() {
@@ -84,7 +84,7 @@ impl XrplClient {
         Ok(())
     }
 
-    /// Отправляет запрос и ждёт ответ
+    /// Sends a request and waits for a response
     async fn request(&self, command: &str, params: Value) -> Result<Value> {
         self.request_with_id(command, params)
             .await
@@ -150,7 +150,7 @@ impl XrplClient {
                 ClientError::WebSocket(e.to_string())
             })?;
 
-        // Ждём ответ с таймаутом
+        // Wait for a response with timeout
         let response = tokio::time::timeout(std::time::Duration::from_secs(30), rx)
             .await
             .map_err(|_| {
@@ -180,7 +180,7 @@ impl XrplClient {
                 ClientError::Xrpl(message.to_string())
             })?;
 
-        // Проверяем на ошибку
+        // Check for an error
         if response.get("error").is_some() {
             if log_submit_transport {
                 let fields = extract_xrpl_error_response_fields(&response);
@@ -206,7 +206,7 @@ impl XrplClient {
         Ok((id, response))
     }
 
-    /// Получает информацию об аккаунте
+    /// Gets account information
     pub async fn account_info(&self, account: &str) -> Result<AccountInfo> {
         let response = self
             .request(
@@ -233,7 +233,7 @@ impl XrplClient {
         })
     }
 
-    /// Получает NFT токены аккаунта
+    /// Gets account NFT tokens
     pub async fn account_nfts(&self, account: &str) -> Result<Vec<NftToken>> {
         let response = self
             .request(
@@ -290,15 +290,15 @@ impl XrplClient {
         .await
     }
 
-    /// Проверяет владельца NFT
+    /// Checks the NFT owner
     pub async fn verify_nft_owner(&self, nft_token_id: &str, expected_owner: &str) -> Result<bool> {
-        // Получаем все NFT владельца
+        // Get all NFTs of the owner
         let nfts = self.account_nfts(expected_owner).await?;
 
         Ok(nfts.iter().any(|nft| nft.nft_token_id == nft_token_id))
     }
 
-    /// Получает sell offers для NFT
+    /// Gets sell offers for an NFT
     pub async fn nft_sell_offers(&self, nft_id: &str) -> Result<Vec<NftOffer>> {
         let response = self
             .request("nft_sell_offers", json!({ "nft_id": nft_id }))
@@ -328,7 +328,7 @@ impl XrplClient {
         Ok(offers)
     }
 
-    /// Получает информацию о транзакции
+    /// Gets transaction information
     pub async fn tx(&self, tx_hash: &str) -> Result<Value> {
         self.request(
             "tx",
@@ -340,7 +340,7 @@ impl XrplClient {
         .await
     }
 
-    /// Отправляет подписанную транзакцию
+    /// Sends a signed transaction
     pub async fn submit(&self, tx_blob: &str) -> Result<SubmitResult> {
         tracing::info!(
             method = "submit",
@@ -544,7 +544,7 @@ impl XrplClient {
         Ok(None)
     }
 
-    /// Получает текущий fee
+    /// Gets the current fee
     pub async fn server_info(&self) -> Result<ServerInfo> {
         let response = self.request("server_info", json!({})).await?;
 
@@ -570,7 +570,7 @@ impl XrplClient {
     }
 }
 
-/// Информация об аккаунте
+/// Account information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountInfo {
     pub account: String,
@@ -578,7 +578,7 @@ pub struct AccountInfo {
     pub sequence: u32,
 }
 
-/// NFT токен
+/// NFT token
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NftToken {
     pub nft_token_id: String,
@@ -597,7 +597,7 @@ pub struct NftOffer {
     pub destination: Option<String>,
 }
 
-/// Результат отправки транзакции
+/// Transaction submission result
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubmitResult {
     pub engine_result: String,
@@ -723,7 +723,7 @@ fn safe_transport_error_message(message: &str) -> String {
     safe
 }
 
-/// Информация о сервере
+/// Server information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerInfo {
     pub build_version: String,
@@ -822,7 +822,7 @@ fn nftoken_id_from_last_token(tokens: &[Value]) -> Option<String> {
         .map(|id| id.to_string())
 }
 
-/// Конвертирует hex строку в обычную строку
+/// Converts a hex string to a regular string
 fn hex_to_string(hex: &str) -> String {
     hex::decode(hex)
         .ok()

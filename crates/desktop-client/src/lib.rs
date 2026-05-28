@@ -1,9 +1,9 @@
 //! XRPL Vault Desktop Client
 //!
-//! Клиентское приложение для безопасного хранения файлов
-//! с NFT-based access control на блокчейне XRPL.
+//! Client application for secure file storage
+//! with NFT-based access control on the XRPL blockchain.
 //!
-//! ## Архитектура
+//! ## Architecture
 //!
 //! ```text
 //! ┌─────────────────────────────────────────────────────────┐
@@ -22,11 +22,11 @@
 //! └─────────────────────────────────────────────────────────┘
 //! ```
 //!
-//! ## Безопасность
+//! ## Security
 //!
-//! - Приватные ключи НИКОГДА не покидают устройство
-//! - Шифрование/расшифровка происходит ТОЛЬКО локально
-//! - Oracle получает только зашифрованные данные и re-encryption keys
+//! - Private keys NEVER leave the device
+//! - Encryption/decryption happens ONLY locally
+//! - Oracle receives only encrypted data and re-encryption keys
 
 #![allow(missing_docs)]
 #![warn(clippy::all)]

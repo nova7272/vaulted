@@ -1,6 +1,6 @@
-//! Состояние приложения
+//! Application state
 //!
-//! Хранит текущую сессию, ключи и конфигурацию.
+//! Stores the current session, keys, and configuration.
 //!
 //! Vaulted identity keys are derived from the Vaulted seed phrase and kept only in memory.
 //! The bundled wallet layer derives XRPL signing keys from the Vaulted seed with a separate domain; external wallet signing is not required.
@@ -17,16 +17,16 @@ use crate::{
     error::{ClientError, Result},
 };
 
-/// Конфигурация приложения
+/// Application configuration
 #[derive(Debug, Clone)]
 pub struct AppConfig {
-    /// URL Oracle сервера
+    /// Oracle server URL
     pub oracle_url: String,
-    /// URL XRPL ноды (WebSocket)
+    /// XRPL node URL (WebSocket)
     pub xrpl_node_url: String,
-    /// Максимальный размер файла (bytes)
+    /// Maximum file size (bytes)
     pub max_file_size: u64,
-    /// Размер фрагмента (bytes)
+    /// Fragment size (bytes)
     pub fragment_size: usize,
     /// URL Storage Node
     pub storage_node_url: String,
@@ -90,7 +90,7 @@ mod tests {
 }
 
 impl AppConfig {
-    /// Загружает конфигурацию из переменных окружения
+    /// Loads configuration from environment variables
     pub fn from_env() -> Self {
         Self {
             oracle_url: std::env::var("ORACLE_URL")
@@ -111,13 +111,13 @@ impl AppConfig {
     }
 }
 
-/// Состояние приложения (thread-safe)
+/// Application state (thread-safe)
 pub struct AppState {
-    /// Конфигурация
+    /// Configuration
     pub config: AppConfig,
-    /// Текущая сессия пользователя
+    /// Current user session
     session: RwLock<Option<Session>>,
-    /// PRE контекст (thread-safe)
+    /// PRE context (thread-safe)
     pre: ProxyReEncryption,
     /// Legacy PRE keypair - derived from Vaulted seed only for compatibility/migration.
     keypair: RwLock<Option<PreKeyPair>>,
@@ -125,14 +125,14 @@ pub struct AppState {
     vaulted_identity: RwLock<Option<VaultedIdentityKeys>>,
     /// Vaulted-owned XRPL wallet keys - stored only in memory after unlock.
     xrpl_wallet: RwLock<Option<VaultedXrplWallet>>,
-    /// HTTP клиент
+    /// HTTP client
     http_client: reqwest::Client,
     /// Device fingerprint (unique per app instance, persisted)
     device_fingerprint: String,
 }
 
 impl AppState {
-    /// Создаёт новое состояние приложения
+    /// Creates new application state
     pub fn new(config: AppConfig) -> Result<Arc<Self>> {
         let http_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
@@ -243,17 +243,17 @@ impl AppState {
         &self.device_fingerprint
     }
 
-    /// Возвращает PRE контекст
+    /// Returns the PRE context
     pub fn pre(&self) -> &ProxyReEncryption {
         &self.pre
     }
 
-    /// Возвращает HTTP клиент
+    /// Returns the HTTP client
     pub fn http(&self) -> &reqwest::Client {
         &self.http_client
     }
 
-    /// Проверяет наличие активной сессии
+    /// Checks whether an active session exists
     pub async fn is_authenticated(&self) -> bool {
         let session = self.session.read().await;
         session.as_ref().map(|s| !s.is_expired()).unwrap_or(false)
@@ -264,7 +264,7 @@ impl AppState {
         self.is_authenticated().await
     }
 
-    /// Возвращает текущую сессию
+    /// Returns the current session
     pub async fn get_session(&self) -> Result<Session> {
         let session = self.session.read().await;
         match session.as_ref() {
@@ -274,13 +274,13 @@ impl AppState {
         }
     }
 
-    /// Устанавливает сессию после авторизации
+    /// Sets the session after authorization
     pub async fn set_session(&self, session: Session) {
         let mut guard = self.session.write().await;
         *guard = Some(session);
     }
 
-    /// Очищает сессию (logout)
+    /// Clears the session (logout)
     pub async fn clear_session(&self) {
         let mut session_guard = self.session.write().await;
         *session_guard = None;
@@ -293,7 +293,7 @@ impl AppState {
         tracing::info!("Session, Vaulted identity, Vaulted XRPL wallet and legacy PRE keypair cleared from memory");
     }
 
-    /// Возвращает адрес кошелька текущего пользователя
+    /// Returns the current user wallet address
     pub async fn wallet_address(&self) -> Result<String> {
         let session = self.get_session().await?;
         Ok(session.wallet_address)
@@ -309,14 +309,14 @@ impl AppState {
         wallet_address: &str,
         mut seed: [u8; 32],
     ) -> Result<()> {
-        // Генерируем keypair из seed
+        // Generate a keypair from the seed
         let keypair = self.pre.generate_keypair_from_seed(&seed)?;
 
-        // Зануляем seed немедленно после использования
+        // Zeroize the seed immediately after use
         use zeroize::Zeroize;
         seed.zeroize();
 
-        // Сохраняем ТОЛЬКО в памяти
+        // Store ONLY in memory
         let mut guard = self.keypair.write().await;
         *guard = Some(keypair);
 
@@ -392,13 +392,13 @@ impl AppState {
         self.xrpl_wallet.read().await.is_some()
     }
 
-    /// Проверяет есть ли keypair в памяти
+    /// Checks whether a keypair is in memory
     pub async fn has_keypair(&self) -> bool {
         let guard = self.keypair.read().await;
         guard.is_some()
     }
 
-    /// Возвращает keypair из памяти (клонируется)
+    /// Returns the keypair from memory (cloned)
     pub async fn get_keypair(&self) -> Result<PreKeyPair> {
         let guard = self.keypair.read().await;
         guard.clone().ok_or_else(|| {
@@ -409,13 +409,13 @@ impl AppState {
         })
     }
 
-    /// Возвращает публичный ключ PRE в hex формате
+    /// Returns the PRE public key in hex format
     pub async fn get_public_key_hex(&self) -> Result<String> {
         let keypair = self.get_keypair().await?;
         Ok(hex::encode(keypair.export_public_key_bytes()))
     }
 
-    /// Возвращает публичный ключ PRE
+    /// Returns the PRE public key
     pub async fn get_public_key(&self) -> Result<PrePublicKey> {
         let keypair = self.get_keypair().await?;
         Ok(keypair.public_key())

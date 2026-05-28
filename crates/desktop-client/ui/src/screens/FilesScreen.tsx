@@ -673,8 +673,8 @@ export default function FilesScreen({onNavigate,searchQuery='',localWalletAvaila
                 const isSecure = isSecureNote(nft.filename)
                 const mintDate = nft.createdAt ? new Date(nft.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : null
 
-                // Определяем тип файла и иконку
-                // Извлекаем тег из имени файла (формат: filename[tag].ext)
+                // Determine the file type and icon
+                // Extract the tag from the file name (format: filename[tag].ext)
                 const parseTag = () => {
                   if (!nft.filename) return null
                   const match = nft.filename.match(/\[([^\]]+)\]/)

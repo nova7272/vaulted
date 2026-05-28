@@ -42,8 +42,8 @@ directories.workspace = true
 qrcode.workspace = true
 image.workspace = true
 
-# XRPL (своя реализация через WebSocket, без внешних зависимостей)
-# xrpl-rust.workspace = true  # Раскомментировать если нужна официальная библиотека
+# XRPL (custom implementation over WebSocket, no external dependencies)
+# xrpl-rust.workspace = true  # Uncomment if the official library is needed
 
 # MIME
 mime_guess.workspace = true

@@ -1,18 +1,18 @@
-//! Управление сессией пользователя
+//! User session management
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
-/// Сессия авторизованного пользователя
+/// Authorized user session
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
-    /// XRPL адрес кошелька (rXXX...)
+    /// XRPL wallet address (rXXX...)
     pub wallet_address: String,
-    /// Публичный ключ кошелька (hex)
+    /// Wallet public key (hex)
     pub public_key: String,
-    /// Время создания сессии
+    /// Session creation time
     pub created_at: DateTime<Utc>,
-    /// Время истечения сессии
+    /// Session expiration time
     pub expires_at: DateTime<Utc>,
     /// UUID of the signing/login request that created this session.
     #[serde(alias = "xaman_payload_uuid")]
@@ -35,7 +35,7 @@ pub struct Session {
 }
 
 impl Session {
-    /// Создаёт новую сессию
+    /// Creates a new session
     pub fn new(
         wallet_address: String,
         public_key: String,
@@ -57,7 +57,7 @@ impl Session {
         }
     }
 
-    /// Создаёт сессию с Oracle токеном
+    /// Creates a session with an Oracle token
     pub fn with_oracle_token(
         wallet_address: String,
         public_key: String,
@@ -76,12 +76,12 @@ impl Session {
         session
     }
 
-    /// Проверяет, не истекла ли сессия
+    /// Checks whether the session has expired
     pub fn is_expired(&self) -> bool {
         Utc::now() > self.expires_at
     }
 
-    /// Возвращает оставшееся время жизни сессии
+    /// Returns the remaining session lifetime
     pub fn time_remaining(&self) -> Option<Duration> {
         let remaining = self.expires_at - Utc::now();
         if remaining > Duration::zero() {
@@ -91,7 +91,7 @@ impl Session {
         }
     }
 
-    /// Обновляет время истечения
+    /// Updates the expiration time
     pub fn refresh(&mut self, duration_hours: i64) {
         self.expires_at = Utc::now() + Duration::hours(duration_hours);
     }
@@ -204,7 +204,7 @@ mod tests {
             "uuid-123".to_string(),
             24,
         );
-        // Устанавливаем время истечения в прошлое
+        // Set the expiration time in the past
         session.expires_at = Utc::now() - Duration::hours(1);
         assert!(session.is_expired());
         assert!(session.time_remaining().is_none());

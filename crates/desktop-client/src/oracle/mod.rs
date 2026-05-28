@@ -1,9 +1,9 @@
-//! Модуль связи с Oracle сервером
+//! Oracle server communication module
 //!
-//! HTTP API для:
-//! - Регистрации зашифрованных файлов
-//! - Получения доступа к файлам по NFT
-//! - Инициирования PRE перешифровки при передаче
+//! HTTP API for:
+//! - Registering encrypted files
+//! - Getting file access by NFT
+//! - Initiating PRE re-encryption during transfer
 
 pub mod api;
 

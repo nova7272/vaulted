@@ -1,10 +1,10 @@
-//! Шифрование файлов
+//! File encryption
 //!
-//! Процесс:
-//! 1. Генерируем AES-256 ключ
-//! 2. Шифруем файл целиком
-//! 3. Шифруем AES-ключ через PRE (публичным ключом)
-//! 4. Создаём манифест с хешем
+//! Process:
+//! 1. Generate an AES-256 key
+//! 2. Encrypt the whole file
+//! 3. Encrypt the AES key through PRE (with the public key)
+//! 4. Create a manifest with a hash
 
 use std::path::Path;
 use tokio::fs::File;
@@ -19,26 +19,26 @@ use xrpl_vault_crypto_core::{
 
 use crate::error::Result;
 
-/// Результат шифрования файла
+/// File encryption result
 #[derive(Debug)]
 pub struct EncryptedFile {
-    /// Зашифрованный AES-ключ (для хранения в метаданных NFT)
+    /// Encrypted AES key (for storage in NFT metadata)
     pub encrypted_aes_key: EncryptedPreData,
-    /// Манифест файла
+    /// File manifest
     pub manifest: FileManifest,
-    /// Зашифрованные данные (один blob)
+    /// Encrypted data (one blob)
     pub encrypted_data: EncryptedData,
-    /// Hash зашифрованных данных
+    /// Encrypted data hash
     pub encrypted_hash: String,
 }
 
-/// Шифровальщик файлов
+/// File encryptor
 pub struct FileEncryptor {
     pre: ProxyReEncryption,
 }
 
 impl FileEncryptor {
-    /// Создаёт новый шифровальщик
+    /// Creates a new encryptor
     pub fn new(_fragment_size: usize) -> Self {
         // fragment_size ignored - kept for API compatibility
         Self {
@@ -46,20 +46,20 @@ impl FileEncryptor {
         }
     }
 
-    /// Шифрует файл целиком
+    /// Encrypts the whole file
     ///
     /// # Arguments
-    /// * `file_path` - путь к файлу
-    /// * `owner_public_key` - публичный ключ PRE владельца
+    /// * `file_path` - path to the file
+    /// * `owner_public_key` - owner PRE public key
     ///
     /// # Returns
-    /// Зашифрованный файл с манифестом
+    /// Encrypted file with manifest
     pub async fn encrypt_file(
         &self,
         file_path: &Path,
         owner_public_key: &PrePublicKey,
     ) -> Result<EncryptedFile> {
-        // Получаем метаданные файла
+        // Get file metadata
         let metadata = tokio::fs::metadata(file_path).await?;
         let file_size = metadata.len();
 
@@ -80,16 +80,16 @@ impl FileEncryptor {
             mime_type
         );
 
-        // Читаем весь файл
+        // Read the whole file
         let mut file = File::open(file_path).await?;
         let mut data = Vec::with_capacity(file_size as usize);
         file.read_to_end(&mut data).await?;
 
-        // Шифруем
+        // Encrypt
         self.encrypt_data(&data, &filename, &mime_type, owner_public_key)
     }
 
-    /// Шифрует данные из памяти
+    /// Encrypts data from memory
     pub fn encrypt_bytes(
         &self,
         data: &[u8],
@@ -100,7 +100,7 @@ impl FileEncryptor {
         self.encrypt_data(data, filename, mime_type, owner_public_key)
     }
 
-    /// Внутренний метод шифрования данных
+    /// Internal data encryption method
     fn encrypt_data(
         &self,
         data: &[u8],
@@ -108,13 +108,13 @@ impl FileEncryptor {
         mime_type: &str,
         owner_public_key: &PrePublicKey,
     ) -> Result<EncryptedFile> {
-        // Генерируем AES ключ
+        // Generate an AES key
         let aes_key = AesKey::generate();
 
-        // Хеш оригинала
+        // Original hash
         let original_hash = sha256_prefixed(data);
 
-        // Шифруем данные целиком
+        // Encrypt all data
         let encrypted_data = aes_key.encrypt(data)?;
         let encrypted_bytes = encrypted_data.to_bytes()?;
         let encrypted_hash = blake3_prefixed(&encrypted_bytes);
@@ -127,10 +127,10 @@ impl FileEncryptor {
             &encrypted_hash[..20]
         );
 
-        // Шифруем имя файла тем же AES ключом
+        // Encrypt the file name with the same AES key
         let encrypted_filename = aes_key.encrypt_to_base64(filename.as_bytes())?;
 
-        // Создаём манифест (без storage info - это добавит Oracle)
+        // Create a manifest (without storage info - Oracle will add it)
         let manifest = FileManifest {
             encrypted_filename,
             original_size: data.len() as u64,
@@ -140,7 +140,7 @@ impl FileEncryptor {
             encrypted_hash: encrypted_hash.clone(),
         };
 
-        // Шифруем AES-ключ публичным ключом владельца
+        // Encrypt the AES key with the owner public key
         let encrypted_aes_key = self.pre.encrypt(owner_public_key, aes_key.as_bytes())?;
 
         Ok(EncryptedFile {
@@ -202,7 +202,7 @@ mod tests {
             )
             .unwrap();
 
-        // Теперь 1 blob вместо фрагментов
+        // Now one blob instead of fragments
         assert_eq!(encrypted.manifest.original_size, 500);
         assert!(encrypted.manifest.encrypted_size > 500); // encrypted is larger due to nonce+tag
     }
