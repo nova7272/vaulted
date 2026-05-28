@@ -258,10 +258,7 @@ impl XrplClient {
                         Some(NftToken {
                             nft_token_id: nft.get("NFTokenID")?.as_str()?.to_string(),
                             issuer: nft.get("Issuer")?.as_str()?.to_string(),
-                            uri: nft
-                                .get("URI")
-                                .and_then(|v| v.as_str())
-                                .map(|s| hex_to_string(s)),
+                            uri: nft.get("URI").and_then(|v| v.as_str()).map(hex_to_string),
                             flags: nft.get("Flags")?.as_u64()? as u32,
                             transfer_fee: nft.get("TransferFee").and_then(|v| v.as_u64())
                                 as Option<u64>,
@@ -642,7 +639,7 @@ fn top_level_safe_field(response: &Value, field: &str) -> Option<String> {
 
 pub(crate) fn is_xrpl_tx_blob_hex(tx_blob: &str) -> bool {
     !tx_blob.is_empty()
-        && tx_blob.len() % 2 == 0
+        && tx_blob.len().is_multiple_of(2)
         && tx_blob.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 

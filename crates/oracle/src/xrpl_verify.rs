@@ -151,7 +151,7 @@ pub fn derive_address_from_public_key(public_key_hex: &str) -> Result<String, Si
 
     // Step 2: RIPEMD-160 of SHA-256 hash (Account ID)
     use ripemd::Ripemd160;
-    let account_id = Ripemd160::digest(&sha256_hash);
+    let account_id = Ripemd160::digest(sha256_hash);
 
     // Step 3: Add version byte (0x00 for mainnet)
     let mut payload = Vec::with_capacity(21);
@@ -160,7 +160,7 @@ pub fn derive_address_from_public_key(public_key_hex: &str) -> Result<String, Si
 
     // Step 4: Double SHA-256 checksum
     let hash1 = Sha256::digest(&payload);
-    let hash2 = Sha256::digest(&hash1);
+    let hash2 = Sha256::digest(hash1);
     let checksum = &hash2[..4];
 
     // Step 5: Append checksum

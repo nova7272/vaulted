@@ -42,13 +42,13 @@ impl PreKeyPair {
     /// Returns the public key
     pub fn public_key(&self) -> PrePublicKey {
         PrePublicKey {
-            inner: self.public_key.clone(),
+            inner: self.public_key,
         }
     }
 
     /// Exports the public key as bytes (33 compressed bytes)
     pub fn export_public_key_bytes(&self) -> Vec<u8> {
-        self.public_key.clone().to_compressed_bytes().to_vec()
+        self.public_key.to_compressed_bytes().to_vec()
     }
 
     /// Export signer's verifying key bytes (for kfrag verification)
@@ -81,7 +81,7 @@ impl PrePublicKey {
 
     /// Exports as bytes (33 compressed bytes)
     pub fn to_bytes(&self) -> Vec<u8> {
-        self.inner.clone().to_compressed_bytes().to_vec()
+        self.inner.to_compressed_bytes().to_vec()
     }
 
     /// Exports as hex

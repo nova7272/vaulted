@@ -73,7 +73,7 @@ impl Keystore {
         for i in 0..10000u32 {
             let mut h = Sha256::new();
             h.update(&current);
-            h.update(&i.to_le_bytes());
+            h.update(i.to_le_bytes());
             h.update(salt);
             current = h.finalize().to_vec();
         }
@@ -155,7 +155,7 @@ impl Keystore {
         fs::write(self.seed_path(wallet_address), &encrypted_b64)?;
 
         // Save salt
-        let salt_b64 = base64::engine::general_purpose::STANDARD.encode(&salt);
+        let salt_b64 = base64::engine::general_purpose::STANDARD.encode(salt);
         fs::write(self.salt_path(wallet_address), &salt_b64)?;
 
         // Set restrictive file permissions (Unix)

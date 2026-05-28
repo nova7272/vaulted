@@ -87,7 +87,6 @@ impl KeyDerivation {
 }
 
 /// Derivation result with metadata
-
 pub struct DerivedKeys {
     /// PRE keypair
     pub keypair: PreKeyPair,

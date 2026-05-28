@@ -85,8 +85,7 @@ mod tests {
     }
 
     fn repeated_words(count: usize) -> String {
-        std::iter::repeat("abandon")
-            .take(count)
+        std::iter::repeat_n("abandon", count)
             .collect::<Vec<_>>()
             .join(" ")
     }
