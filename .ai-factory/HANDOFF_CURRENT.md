@@ -1,10 +1,14 @@
 # Vaulted current handoff checkpoint
 
-Date: 2026-05-27
+Date: 2026-05-28
 
 ## Status
 
-Production-MVP transfer/re-encryption is now through the runtime checkpoint. The current working milestone is no longer XRPL mint, wallet send, QR login, owner decrypt, or transfer acceptance plumbing. The next work should start from the remaining roadmap items after transfer/re-encryption unless runtime evidence shows a regression.
+Final production-MVP verification passed. The fresh pass covered service health, Wallet/Send XRP, upload/mint/finalize, owner decrypt, transfer/re-encryption, recipient decrypt, sensitive logging retest, Rust gates, frontend gates, and final security audit.
+
+QR login has one documented fresh-pass limitation: the QR UI/security surface passed, raw payload/copy was removed, Oracle-only wording was clarified, and the approval lifecycle had previous runtime evidence, but fresh approval was skipped because no second device/session was available.
+
+No production blocker remains after the storage proxy failed-replica logging fix and retest.
 
 Security reminder: do not log or paste seed phrases, mnemonic entropy, private keys, derived keys, AES keys, JWTs, storage tokens, `tx_blob`, signatures, plaintext file contents, decrypted content, recovery phrases, QR payloads, QR approval signatures, raw encrypted key material, tokenized URLs, or raw storage keys.
 
@@ -22,6 +26,7 @@ Security reminder: do not log or paste seed phrases, mnemonic entropy, private k
 - QR login demo-safe flow.
 - QR polling rate-limit fix.
 - QR approval lifecycle fix.
+- QR UI/security final-pass verification.
 - Owner download/decrypt hardening.
 - Owner download/decrypt runtime success.
 - Local XRPL NFT transfer flow:
@@ -33,10 +38,40 @@ Security reminder: do not log or paste seed phrases, mnemonic entropy, private k
   - `NFTokenAcceptOffer` signing/submission.
   - Oracle `complete_transfer`.
   - Recipient decrypt after re-encryption.
+- Storage proxy failed-replica log redaction.
+- Final MVP verification report update.
 
 ## Runtime-Tested Evidence
 
-Owner download/decrypt runtime phases completed:
+Service health:
+
+```text
+Oracle /health -> 200 OK
+storage-node /health -> 200 OK
+Postgres accepting connections
+Redis healthy
+```
+
+Wallet / Send XRP:
+
+```text
+send_xrp_payment validation_status=input_valid
+spendable_balance_valid
+engine_result=tesSUCCESS
+tx_hash=7358EBD2206746DB741CB97C722D5F92B09A29A149658BC62E207E358ADC480F
+```
+
+Fresh mint/finalize:
+
+```text
+NFTokenMint -> tesSUCCESS
+tx_hash=CDCBBC5C415748A970DDAEF6630E9CB8C973B98CCCD03D4CEB9FB62B6436D3A9
+nft_token_id=00080000DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4FDC806A59010D42BE
+by-NFT lookup -> 200 OK
+status=active
+```
+
+Owner download/decrypt:
 
 ```text
 access_metadata_ok
@@ -47,65 +82,75 @@ payload_decrypted
 complete
 ```
 
-Transfer/re-encryption runtime completed:
+Transfer/re-encryption:
 
 ```text
+transfer_id=cc31996f-d50f-4266-8afc-ab70369ab88e
+offer_index=73279F7F968205554AC8810A5D2CE9822CAA6169810EB64F9B556A1CE581B858
 NFTokenCreateOffer -> tesSUCCESS
+create_offer_tx_hash=788B5514302452EE1A7594B271B7D071A97CC139D5E83B46E9EB3400BBBFC113
 confirm-signed -> 200 OK
 incoming offer visible
 NFTokenAcceptOffer -> tesSUCCESS
+accept_tx_hash=086E8C092A0935A85094E6A4E201229D6F17B067D0D1CE8314B5515E3ECCB40D
 Oracle completed locally accepted NFT transfer
 unwrap_transferred_key
+content_key_unwrapped
 payload_decrypted
 complete
 ```
 
-Sensitive logging check passed after the owner decrypt and transfer checkpoints.
+Sensitive logging:
+
+```text
+tokenized storage URL leak found during final pass
+fixed in commit 29d4938
+fresh failed upload line uses safe structured fields with error_class="connect"
+no tokenized URL or fragment URL path in fresh failed upload line
+./scripts/check-sensitive-logs.sh passed
+```
+
+Automated gates:
+
+```text
+cargo fmt --all --check passed
+cargo check --workspace passed
+cargo test --workspace passed
+npm run lint passed
+npx tsc --noEmit --project tsconfig.json passed
+npm run build passed
+git diff --check passed
+make security-audit-strict completed
+```
 
 ## Latest Relevant Commits
 
 ```text
+29d4938 Redact storage proxy error logs
+22e9514 Clarify QR login Oracle session UX
+64a3e8f Plan final MVP verification pass
+bc69b1a Update runtime verification docs
+8bfda0a Polish demo UI safety surfaces
+842737b Add current project handoff
 50547f4 Update transfer runtime checkpoint plan
 772b68b Register local NFT claim command
 5903186 Fix incoming transfer accept UI crash
 2b12dbf Fix transfer confirm signed payload
 0668f67 Implement local XRPL NFT transfer flow
 41e7df2 Harden owner download decrypt path
-1d8414a Keep QR login polling alive through approval
-258265e Make QR login polling rate limit safe
-56e3ae7 Trace QR login command boundary
-5f6deb0 Add demo safe QR login flow
-9eae2d0 Add testnet XRP send from wallet
-b7f1b30 Make desktop window launch visible
-c5e19d9 Add read only wallet tab
-d53aca4 Add green checkpoint handoff
-bf61f7b Verify auth restart lifecycle
-51b9749 Enforce 12 word seed policy
-ce0f58a Configure Oracle XRPL HTTP RPC endpoint
-0a47421 Recover restarted pending mint finalization
-e7248df Recover pending mint finalization after submit
-d92c579 Link vault objects after local mint finalization
-25c48cc Fix post-mint NFTokenID finalization
-7d54a89 Fix NFT file status mapping after mint
-865fb68 Use xrpl-mithril codec for XRPL transaction serialization
 ```
 
 ## Remaining Roadmap
 
-From `.ai-factory/VAULTED_AGENT_INSTRUCTIONS.md`, immediate tasks 1-8 are complete or have runtime checkpoint evidence. Remaining explicit roadmap items:
-
-1. Polish UI for XRPL Grants demo.
-2. Update runtime verification and README.
-
-Final MVP acceptance gates still need a fresh, end-to-end confirmation pass before declaring production-ready MVP:
+Final MVP acceptance gates have fresh pass evidence or documented acceptable limitation:
 
 - Docker compose starts Postgres/Redis.
 - Oracle starts and `/health` responds.
 - Storage-node starts and `/health` responds.
 - Desktop starts.
-- Fresh create-wallet and restore-by-seed flow.
-- QR login works or demo-safe QR is clearly presented.
-- Wallet balance, receive QR, Send XRP, and transaction history behavior.
+- Fresh wallet/auth flow remains covered by current auth/runtime evidence.
+- QR login UI/security works; fresh approval retest is optional with a second device/session.
+- Wallet balance, receive surface, Send XRP, and transaction behavior.
 - Upload, encrypted payload upload, public metadata URL, mint, account NFT visibility, Oracle finalize.
 - Owner download/decrypt.
 - Transfer NFT/file access to another user.
@@ -113,36 +158,22 @@ Final MVP acceptance gates still need a fresh, end-to-end confirmation pass befo
 - `make security-audit-strict`.
 - `cargo test --workspace`.
 - Frontend lint/typecheck/build.
-- README/demo script updated.
-
-Items needing roadmap confirmation because this checkpoint does not prove final polish state:
-
-- Whether a dedicated `Transfers` navigation view is required beyond the current Files/Activity transfer surfaces.
-- Whether Wallet MVP is considered complete for receive QR, transaction history, XRPL connection status, and testnet/mainnet badge.
-- Whether `docs/RUNTIME_VERIFICATION.md` should be created now or together with README/demo script updates.
-- Whether final `make security-audit-strict` should run before UI polish or only at final release gate.
+- README/demo script and runtime verification docs updated.
 
 ## Known Issues / Follow-Ups
 
-- `.ai-factory/PLAN.md` was updated by the transfer runtime checkpoint plan commit and should be treated as historical context, not the next implementation target.
-- Activity screen previously had a placeholder incoming-offer accept path; Files screen is the runtime-tested accept path. Confirm whether Activity should be wired to the same `claim_nft` command during UI polish.
-- Final MVP still needs a clean all-up verification pass in a fresh runtime session.
-- Do not reset runtime state, log out, clear wallets, or delete app data without explicit owner approval.
+- Remove duplicate `XRPL_NODE_URL` in `.env` when safe.
+- Consider dependency updates for yanked `aes 0.9.0` through `zip 8.6.0`.
+- Consider dependency updates for the npm `brace-expansion` advisory through `@typescript-eslint/typescript-estree`.
+- Optional full QR approval retest with a second device/session.
+- Do not reset runtime state, log out, clear wallets, delete app data, or edit `.env` without explicit owner approval.
 
 ## How To Continue Safely
 
-Recommended next planning prompt:
+Recommended next prompt:
 
 ```text
-$aif-plan Read AGENTS.md, .ai-factory/VAULTED_AGENT_INSTRUCTIONS.md, .ai-factory/HANDOFF_2026-05-25.md, and .ai-factory/HANDOFF_CURRENT.md first.
-
-Create a plan only. Do not implement yet.
-
-Transfer/re-encryption has runtime checkpoint evidence through recipient decrypt. Identify the next minimal production-MVP task from the remaining roadmap after transfer/re-encryption.
-
-Do not touch completed XRPL mint, pending recovery, Oracle XRPL RPC, seed policy, auth lifecycle, desktop launch, Wallet/Send XRP, QR login, owner decrypt, or transfer/re-encryption code unless inspection is required.
-
-Include exact files likely to inspect/change, tests, verification commands, runtime checks, and out-of-scope list.
+Review the final MVP verification artifacts and identify only non-blocking release hardening follow-ups. Do not touch runtime state, wallet state, .env, or production source code unless explicitly approved.
 ```
 
 Safe verification baseline before any push/review:
