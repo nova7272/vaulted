@@ -422,7 +422,6 @@ pub async fn publish_vaulted_nft_metadata(
             metadata_hash,
         })
         .await
-        .map_err(Into::into)
 }
 
 /// Parameters for building and locally signing an NFTokenMint transaction.
@@ -1317,6 +1316,8 @@ pub async fn poll_vaulted_xrpl_signing_request(
 }
 
 /// Confirms Scan-to-Sign-XRPL-Transaction from a trusted unlocked Vaulted identity.
+// Keep the command signature stable for the Tauri camelCase API surface.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command(rename_all = "camelCase")]
 pub async fn confirm_vaulted_xrpl_signing_request(
     state: State<'_, Arc<AppState>>,
@@ -1659,6 +1660,8 @@ fn recipient_public_key_id(recipient_public_key_hex: &str) -> String {
 }
 
 /// Starts Scan-to-Approve-File-Grant. The returned QR payload can be approved by a trusted device.
+// Keep the command signature stable for the Tauri camelCase API surface.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command(rename_all = "camelCase")]
 pub async fn start_vaulted_file_grant_approval(
     state: State<'_, Arc<AppState>>,
@@ -1790,6 +1793,8 @@ pub async fn poll_vaulted_file_grant_approval(
 }
 
 /// Confirms Scan-to-Approve-File-Grant from a trusted unlocked Vaulted identity.
+// Keep the command signature stable for the Tauri camelCase API surface.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command(rename_all = "camelCase")]
 pub async fn confirm_vaulted_file_grant_approval(
     state: State<'_, Arc<AppState>>,
@@ -2268,7 +2273,7 @@ pub async fn upload_files(
 
     // Create an archive
     let zip_data =
-        create_zip_archive(&file_paths, &archive_name).map_err(|e| ClientError::Validation(e))?;
+        create_zip_archive(&file_paths, &archive_name).map_err(ClientError::Validation)?;
 
     tracing::info!("ZIP archive created: {} bytes", zip_data.len());
 
@@ -2549,14 +2554,14 @@ async fn decrypt_filename(
     let aes_key_bytes = if is_re_encrypted {
         let re_encrypted_data =
             xrpl_vault_crypto_core::pre::ReEncryptedData::from_base64(encrypted_aes_key)
-                .map_err(|e| ClientError::Crypto(e))?;
+                .map_err(ClientError::Crypto)?;
         state
             .pre()
             .decrypt_reencrypted_data(&keypair, &re_encrypted_data)?
     } else {
         let encrypted_pre_data =
             xrpl_vault_crypto_core::EncryptedPreData::from_base64(encrypted_aes_key)
-                .map_err(|e| ClientError::Crypto(e))?;
+                .map_err(ClientError::Crypto)?;
         state.pre().decrypt(&keypair, &encrypted_pre_data)?
     };
 
@@ -2565,7 +2570,7 @@ async fn decrypt_filename(
     // Decrypt the file name
     let decrypted_bytes = aes_key
         .decrypt_from_base64(encrypted_filename)
-        .map_err(|e| ClientError::Crypto(e))?;
+        .map_err(ClientError::Crypto)?;
 
     String::from_utf8(decrypted_bytes)
         .map_err(|e| ClientError::Config(format!("Invalid filename UTF-8: {}", e)))
@@ -2676,7 +2681,7 @@ pub async fn list_my_nfts(state: State<'_, Arc<AppState>>) -> Result<Vec<NftInfo
 
     let results = futures_util::future::join_all(futures).await;
 
-    for (nft, result) in nft_infos.iter_mut().zip(results.into_iter()) {
+    for (nft, result) in nft_infos.iter_mut().zip(results) {
         match result {
             Some((status, data)) if status == "available" => {
                 nft.file_status = "available".to_string();
@@ -3200,7 +3205,7 @@ pub async fn download_file(
 
         let re_encrypted_data =
             xrpl_vault_crypto_core::pre::ReEncryptedData::from_base64(encrypted_aes_key)
-                .map_err(|e| ClientError::Crypto(e))?;
+                .map_err(ClientError::Crypto)?;
         state
             .pre()
             .decrypt_reencrypted_data(&keypair, &re_encrypted_data)?
@@ -3214,7 +3219,7 @@ pub async fn download_file(
         );
         let encrypted_pre_data =
             xrpl_vault_crypto_core::EncryptedPreData::from_base64(encrypted_aes_key)
-                .map_err(|e| ClientError::Crypto(e))?;
+                .map_err(ClientError::Crypto)?;
         state.pre().decrypt(&keypair, &encrypted_pre_data)?
     };
 
@@ -4713,7 +4718,7 @@ pub async fn decrypt_secure_note(
         tracing::info!("Unwrapping transferred secure-note content key");
         let re_encrypted_data =
             xrpl_vault_crypto_core::pre::ReEncryptedData::from_base64(encrypted_aes_key)
-                .map_err(|e| ClientError::Crypto(e))?;
+                .map_err(ClientError::Crypto)?;
         state
             .pre()
             .decrypt_reencrypted_data(&keypair, &re_encrypted_data)?
@@ -4721,7 +4726,7 @@ pub async fn decrypt_secure_note(
         tracing::info!("Unwrapping owner content key");
         let encrypted_pre_data =
             xrpl_vault_crypto_core::EncryptedPreData::from_base64(encrypted_aes_key)
-                .map_err(|e| ClientError::Crypto(e))?;
+                .map_err(ClientError::Crypto)?;
         state.pre().decrypt(&keypair, &encrypted_pre_data)?
     };
 

@@ -52,14 +52,12 @@ impl FileDecryptor {
             ));
         }
 
-        AesKey::from_bytes(&key_bytes).map_err(|e| ClientError::Crypto(e))
+        AesKey::from_bytes(&key_bytes).map_err(ClientError::Crypto)
     }
 
     /// Decrypts data
     pub fn decrypt_data(&self, aes_key: &AesKey, encrypted: &EncryptedData) -> Result<Vec<u8>> {
-        aes_key
-            .decrypt(encrypted)
-            .map_err(|e| ClientError::Crypto(e))
+        aes_key.decrypt(encrypted).map_err(ClientError::Crypto)
     }
 
     /// Decrypts a file and saves it to disk

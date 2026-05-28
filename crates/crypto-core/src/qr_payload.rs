@@ -174,6 +174,8 @@ impl VaultedQrPayloadBody {
     }
 
     /// Creates a Scan-to-Approve-File-Grant QR body.
+    // Keep the explicit constructor parameters to preserve the public QR API and call sites.
+    #[allow(clippy::too_many_arguments)]
     pub fn scan_to_approve_file_grant(
         request_id: impl Into<String>,
         challenge: impl Into<String>,

@@ -49,7 +49,7 @@ fn add_file_to_zip<W: Write + Seek>(
     file.read_to_end(&mut contents)
         .map_err(|e| format!("Failed to read file {:?}: {}", file_path, e))?;
 
-    zip.start_file(name_in_archive, options.clone())
+    zip.start_file(name_in_archive, *options)
         .map_err(|e| format!("Failed to start file in ZIP: {}", e))?;
 
     zip.write_all(&contents)
@@ -83,7 +83,7 @@ fn add_directory_to_zip<W: Write + Seek>(
             add_file_to_zip(zip, &path, &archive_path, options)?;
         } else if path.is_dir() {
             // Add directory entry
-            zip.add_directory(&archive_path, options.clone())
+            zip.add_directory(&archive_path, *options)
                 .map_err(|e| format!("Failed to add directory to ZIP: {}", e))?;
             add_directory_to_zip(zip, &path, &archive_path, options)?;
         }

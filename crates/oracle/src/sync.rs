@@ -190,7 +190,7 @@ impl XrplSyncService {
                             WHERE id = $2
                             "#,
                         )
-                        .bind(&new_id)
+                        .bind(new_id)
                         .bind(nft_id)
                         .execute(&self.db)
                         .await?;
@@ -202,7 +202,7 @@ impl XrplSyncService {
                             VALUES ($1, 'xrpl_sync_owner_change', $2, $3)
                             "#,
                         )
-                        .bind(&new_id)
+                        .bind(new_id)
                         .bind(nft_token_id)
                         .bind(serde_json::json!({
                             "old_owner_id": current_owner_id.to_string(),

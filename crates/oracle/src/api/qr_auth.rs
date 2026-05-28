@@ -1404,6 +1404,8 @@ fn pair_device_signature_message(
     )
 }
 
+// Keep this canonical-message helper flat so every signed field remains explicit.
+#[allow(clippy::too_many_arguments)]
 fn xrpl_signing_approval_message(
     signing_request_id: &str,
     challenge: &str,
@@ -1427,6 +1429,8 @@ fn xrpl_signing_approval_message(
     )
 }
 
+// Keep this canonical-message helper flat so every signed field remains explicit.
+#[allow(clippy::too_many_arguments)]
 fn file_grant_approval_message(
     grant_request_id: &str,
     challenge: &str,

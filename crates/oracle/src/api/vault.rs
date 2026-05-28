@@ -143,7 +143,7 @@ pub async fn create_vault(
             .bind(user_id)
             .bind(&req.encrypted_aes_key)
             .bind(&req.metadata_hash)
-            .bind(&manifest_json.to_string())
+            .bind(manifest_json.to_string())
             .bind(enc_key)
             .execute(&state.db)
             .await?;

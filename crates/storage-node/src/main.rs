@@ -822,14 +822,14 @@ fn fragment_hash_matches(declared_hash: &str, data: &[u8]) -> bool {
         return expected.eq_ignore_ascii_case(&sha256_hex(data));
     }
     if let Some(expected) = declared_hash.strip_prefix("blake3:") {
-        return expected.eq_ignore_ascii_case(&blake3::hash(data).to_hex().to_string());
+        return expected.eq_ignore_ascii_case(blake3::hash(data).to_hex().as_ref());
     }
     false
 }
 
 /// Hex decode helper
 fn hex_decode(s: &str) -> Result<Vec<u8>, ()> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return Err(());
     }
     (0..s.len())

@@ -12,6 +12,7 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use sqlx::Row;
 use uuid::Uuid;
 use xrpl_vault_crypto_core::encryption_public_key_fingerprint_hex;
 
@@ -835,5 +836,3 @@ mod trust_tests {
         assert!(encryption_public_key_fingerprint_hex("deadbeef").is_err());
     }
 }
-
-use sqlx::Row;
