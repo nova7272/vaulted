@@ -97,5 +97,5 @@ SELECT
 FROM file_replicas fr
 JOIN storage_nodes sn ON sn.id = fr.storage_node_id;
 
-COMMENT ON TABLE file_replicas IS 'Реплики зашифрованных файлов на storage nodes';
-COMMENT ON TABLE replication_settings IS 'Глобальные настройки репликации';
+COMMENT ON TABLE file_replicas IS 'Encrypted file replicas on storage nodes';
+COMMENT ON TABLE replication_settings IS 'Global replication settings';
