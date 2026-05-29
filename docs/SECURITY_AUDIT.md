@@ -2,7 +2,7 @@
 
 ## Scope
 
-This audit covers the XRPL Grants MVP release surface:
+This audit covers the Vaulted MVP release surface:
 
 - desktop client, including Tauri commands, local secret handling, UI flows, and wallet actions;
 - Oracle, including authentication, registry, manifest, grant, transfer, QR, storage-token, and XRPL verification paths;
