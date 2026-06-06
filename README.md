@@ -92,7 +92,7 @@ npx tsc --noEmit --project tsconfig.json
 npm run build
 ```
 
-## XRPL Grants demo flow
+## Demo flow
 
 Use the runtime verification document for the detailed checklist. The local demo path is:
 
