@@ -2,7 +2,7 @@
 
 Vaulted is an encrypted file vault built around a first-party Vaulted seed, local XRPL wallet signing, deterministic NFT metadata, and recipient-bound `KeyEnvelope` sharing.
 
-## XRPL Grants MVP status
+## MVP status
 
 The current production-MVP checkpoint has runtime evidence through local XRPL mint, Oracle finalize/by-NFT linkage, owner download/decrypt, NFT transfer/re-encryption, recipient accept, and recipient decrypt after re-encryption.
 
