@@ -51,23 +51,30 @@ fn configure_linux_display_backend() {
     let display_present = std::env::var_os("DISPLAY").is_some();
     let wayland_display_present = std::env::var_os("WAYLAND_DISPLAY").is_some();
     let gdk_backend_present = std::env::var_os("GDK_BACKEND").is_some();
-    let should_force_x11 = display_present && wayland_display_present && !gdk_backend_present;
+    let force_x11_requested = std::env::var("VAULTED_FORCE_X11")
+        .map(|value| value == "1")
+        .unwrap_or(false);
 
-    if should_force_x11 {
+    if force_x11_requested {
         std::env::set_var("GDK_BACKEND", "x11");
     }
 
+    let status = if force_x11_requested {
+        "x11_forced_by_user"
+    } else if wayland_display_present {
+        "wayland_available_unchanged"
+    } else {
+        "unchanged"
+    };
+
     tracing::info!(
         phase = "display_backend",
-        status = if should_force_x11 {
-            "x11_forced"
-        } else {
-            "unchanged"
-        },
+        status,
         display_present,
         wayland_display_present,
         gdk_backend_present,
-        backend_forced = should_force_x11,
+        force_x11_requested,
+        backend_forced = force_x11_requested,
         "tauri_display_backend_configured"
     );
 }
@@ -132,6 +139,44 @@ fn main() {
                         result = true,
                         "tauri_window_lookup"
                     );
+
+                    match window.unminimize() {
+                        Ok(()) => tracing::info!(
+                            phase = "window_unminimize",
+                            status = "ok",
+                            window_label,
+                            result = true,
+                            "tauri_window_unminimize"
+                        ),
+                        Err(error) => tracing::warn!(
+                            phase = "window_unminimize",
+                            status = "failed",
+                            window_label,
+                            result = false,
+                            error_class = "window_unminimize_failed",
+                            error_message = %safe_startup_error_message(&error.to_string()),
+                            "tauri_window_unminimize"
+                        ),
+                    }
+
+                    match window.center() {
+                        Ok(()) => tracing::info!(
+                            phase = "window_center",
+                            status = "ok",
+                            window_label,
+                            result = true,
+                            "tauri_window_center"
+                        ),
+                        Err(error) => tracing::warn!(
+                            phase = "window_center",
+                            status = "failed",
+                            window_label,
+                            result = false,
+                            error_class = "window_center_failed",
+                            error_message = %safe_startup_error_message(&error.to_string()),
+                            "tauri_window_center"
+                        ),
+                    }
 
                     match window.show() {
                         Ok(()) => tracing::info!(

@@ -746,6 +746,86 @@ impl XrplService {
         })
     }
 
+    pub async fn verify_local_nft_burn(
+        &self,
+        tx_hash: &str,
+        nft_token_id: &str,
+        expected_owner: &str,
+    ) -> Result<()> {
+        if tx_hash.len() != 64 || !tx_hash.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(ApiError::Validation("Invalid XRPL transaction hash".into()));
+        }
+        if nft_token_id.len() != 64 || !nft_token_id.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(ApiError::Validation("Invalid NFTokenID".into()));
+        }
+
+        let tx_data = self
+            .rpc(
+                "tx",
+                serde_json::json!({
+                    "transaction": tx_hash,
+                    "binary": false
+                }),
+            )
+            .await?;
+        let result = tx_data
+            .get("result")
+            .ok_or_else(|| ApiError::Xrpl("No transaction result".into()))?;
+
+        if result.get("validated").and_then(|v| v.as_bool()) != Some(true) {
+            return Err(ApiError::Xrpl(format!(
+                "Transaction {} is not validated yet",
+                tx_hash
+            )));
+        }
+
+        let tx_result = result
+            .pointer("/meta/TransactionResult")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        if tx_result != "tesSUCCESS" {
+            return Err(ApiError::Xrpl(format!(
+                "Transaction {} did not succeed: {}",
+                tx_hash, tx_result
+            )));
+        }
+
+        let tx_type = result
+            .get("TransactionType")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        if tx_type != "NFTokenBurn" {
+            return Err(ApiError::Xrpl(format!(
+                "Transaction {} is {}, not NFTokenBurn",
+                tx_hash, tx_type
+            )));
+        }
+
+        let account = result
+            .get("Account")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ApiError::Xrpl("NFTokenBurn transaction has no Account".into()))?;
+        if !account.eq_ignore_ascii_case(expected_owner) {
+            return Err(ApiError::Forbidden(format!(
+                "Burn transaction account {} does not match expected owner {}",
+                account, expected_owner
+            )));
+        }
+
+        let burned_nft_token_id = result
+            .get("NFTokenID")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ApiError::Xrpl("NFTokenBurn transaction has no NFTokenID".into()))?;
+        if !burned_nft_token_id.eq_ignore_ascii_case(nft_token_id) {
+            return Err(ApiError::Xrpl(format!(
+                "Burned NFTokenID mismatch: tx has {}, request has {}",
+                burned_nft_token_id, nft_token_id
+            )));
+        }
+
+        Ok(())
+    }
+
     /// Returns raw account_nfts entries from XRPL for verification paths that need
     /// fields beyond the legacy typed helpers.
     async fn account_nfts(&self, account: &str) -> Result<Vec<serde_json::Value>> {

@@ -1,15 +1,14 @@
 //! Vaulted-owned XRPL wallet derivation and local XRPL transaction signing.
 //!
 //! This module deliberately does not depend on external wallet providers. XRPL keys are derived
-//! from the Vaulted BIP-39 seed with a dedicated domain separator so blockchain signing keys never
-//! overlap with Vaulted encryption/signing identity keys.
+//! from the Vaulted BIP-39 seed using standard XRP BIP-44 so the account matches other XRP wallets.
 //!
 //! The XRPL serializer implemented here intentionally covers the transaction subset Vaulted needs
 //! for its MVP: locally signing XLS-20 `NFTokenMint`, `NFTokenCreateOffer`,
 //! `NFTokenAcceptOffer`, and testnet XRP `Payment` transactions.
 //! Unsupported fields fail closed instead of being silently omitted.
 
-use hkdf::Hkdf;
+use hmac::{Hmac, Mac};
 use k256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey, VerifyingKey};
 use ripemd::Ripemd160;
 use serde::{Deserialize, Serialize};
@@ -19,8 +18,21 @@ use zeroize::Zeroize;
 
 use crate::{seed::SeedManager, CryptoError, Result};
 
-const XRPL_ROOT_SALT: &[u8] = b"Vaulted v1 wallet xrpl";
-const XRPL_SECP256K1_INFO: &[u8] = b"Vaulted v1 wallet xrpl secp256k1 signing";
+type HmacSha512 = Hmac<Sha512>;
+
+const BIP32_MASTER_KEY: &[u8] = b"Bitcoin seed";
+const BIP32_HARDENED_OFFSET: u32 = 0x8000_0000;
+const XRP_BIP44_PATH: [u32; 5] = [
+    BIP32_HARDENED_OFFSET + 44,
+    BIP32_HARDENED_OFFSET + 144,
+    BIP32_HARDENED_OFFSET,
+    0,
+    0,
+];
+const SECP256K1_ORDER: [u8; 32] = [
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe,
+    0xba, 0xae, 0xdc, 0xe6, 0xaf, 0x48, 0xa0, 0x3b, 0xbf, 0xd2, 0x5e, 0x8c, 0xd0, 0x36, 0x41, 0x41,
+];
 const TF_TRANSFERABLE: u32 = 0x0000_0008;
 
 /// Vaulted-derived XRPL wallet. Private key material is zeroized on drop.
@@ -31,7 +43,7 @@ pub struct VaultedXrplWallet {
 }
 
 impl VaultedXrplWallet {
-    /// Derives the XRPL wallet from a BIP-39 mnemonic with a separate XRPL domain.
+    /// Derives the XRPL wallet from a BIP-39 mnemonic using XRP BIP-44.
     pub fn from_mnemonic(mnemonic: &str, passphrase: Option<&str>) -> Result<Self> {
         let mut seed = SeedManager::mnemonic_to_seed(mnemonic, passphrase)?;
         let wallet = Self::from_bip39_seed(&seed)?;
@@ -39,36 +51,11 @@ impl VaultedXrplWallet {
         Ok(wallet)
     }
 
-    /// Derives the XRPL wallet from a BIP-39 seed.
+    /// Derives the XRPL wallet from a BIP-39 seed using m/44'/144'/0'/0/0.
     pub fn from_bip39_seed(seed: &[u8; 64]) -> Result<Self> {
-        let root = Hkdf::<Sha256>::new(Some(XRPL_ROOT_SALT), seed);
-        let mut candidate = [0u8; 32];
-        root.expand(XRPL_SECP256K1_INFO, &mut candidate)
-            .map_err(|_| CryptoError::KeyDerivationFailed)?;
-
-        // k256 rejects zero/out-of-range scalars. Re-hash with a counter until valid.
-        for counter in 0u8..=32 {
-            let material = if counter == 0 {
-                candidate
-            } else {
-                let mut h = Sha256::new();
-                h.update(b"Vaulted XRPL secp256k1 retry");
-                h.update(candidate);
-                h.update([counter]);
-                h.finalize().into()
-            };
-            if SigningKey::from_bytes((&material).into()).is_ok() {
-                candidate.zeroize();
-                return Ok(Self {
-                    private_key: material,
-                });
-            }
-        }
-
-        candidate.zeroize();
-        Err(CryptoError::KeyDerivation(
-            "Could not derive a valid XRPL secp256k1 key".to_string(),
-        ))
+        Ok(Self {
+            private_key: derive_xrp_bip44_private_key(seed)?,
+        })
     }
 
     /// Returns the secp256k1 signing key.
@@ -308,6 +295,15 @@ pub fn build_nftoken_accept_offer_tx(account: &str, nftoken_sell_offer: &str) ->
     })
 }
 
+/// XRPL NFTokenBurn builder for deleting a Vaulted-owned NFT.
+pub fn build_nftoken_burn_tx(account: &str, nftoken_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "TransactionType": "NFTokenBurn",
+        "Account": account,
+        "NFTokenID": nftoken_id,
+    })
+}
+
 /// Validates an XRPL classic address checksum and account-id shape.
 pub fn is_valid_xrpl_classic_address(address: &str) -> bool {
     let Ok(decoded) = bs58::decode(address)
@@ -346,6 +342,7 @@ fn validate_supported_signable_tx(tx: &serde_json::Value) -> Result<()> {
         "NFTokenMint" => validate_nftoken_mint_tx(tx)?,
         "NFTokenCreateOffer" => validate_nftoken_create_offer_tx(tx)?,
         "NFTokenAcceptOffer" => validate_nftoken_accept_offer_tx(tx)?,
+        "NFTokenBurn" => validate_nftoken_burn_tx(tx)?,
         "Payment" => validate_xrp_payment_tx(tx)?,
         _ => {
             return Err(CryptoError::InvalidData(format!(
@@ -393,6 +390,11 @@ fn validate_nftoken_create_offer_tx(tx: &serde_json::Value) -> Result<()> {
 
 fn validate_nftoken_accept_offer_tx(tx: &serde_json::Value) -> Result<()> {
     let _ = string_field(tx, "NFTokenSellOffer")?;
+    Ok(())
+}
+
+fn validate_nftoken_burn_tx(tx: &serde_json::Value) -> Result<()> {
+    let _ = string_field(tx, "NFTokenID")?;
     Ok(())
 }
 
@@ -452,6 +454,162 @@ fn encode_xrpl_base58_check(payload: &[u8]) -> String {
         .into_string()
 }
 
+fn derive_xrp_bip44_private_key(seed: &[u8; 64]) -> Result<[u8; 32]> {
+    let master = hmac_sha512(BIP32_MASTER_KEY, seed)?;
+    let mut private_key: [u8; 32] = master[..32]
+        .try_into()
+        .map_err(|_| CryptoError::KeyDerivationFailed)?;
+    let mut chain_code: [u8; 32] = master[32..]
+        .try_into()
+        .map_err(|_| CryptoError::KeyDerivationFailed)?;
+
+    if !is_valid_secp256k1_private_key(&private_key) {
+        private_key.zeroize();
+        chain_code.zeroize();
+        return Err(CryptoError::KeyDerivation(
+            "Invalid BIP32 master key for secp256k1".to_string(),
+        ));
+    }
+
+    for index in XRP_BIP44_PATH {
+        let (child_private_key, child_chain_code) =
+            derive_bip32_private_child(&private_key, &chain_code, index)?;
+        private_key.zeroize();
+        chain_code.zeroize();
+        private_key = child_private_key;
+        chain_code = child_chain_code;
+    }
+
+    chain_code.zeroize();
+    Ok(private_key)
+}
+
+fn derive_bip32_private_child(
+    parent_private_key: &[u8; 32],
+    parent_chain_code: &[u8; 32],
+    index: u32,
+) -> Result<([u8; 32], [u8; 32])> {
+    let mut data = Vec::with_capacity(37);
+    if index >= BIP32_HARDENED_OFFSET {
+        data.push(0);
+        data.extend_from_slice(parent_private_key);
+    } else {
+        let signing_key = SigningKey::from_bytes(parent_private_key.into())
+            .map_err(|e| CryptoError::KeyDerivation(e.to_string()))?;
+        let public_key = VerifyingKey::from(&signing_key);
+        data.extend_from_slice(public_key.to_encoded_point(true).as_bytes());
+    }
+    data.extend_from_slice(&index.to_be_bytes());
+
+    let derived = hmac_sha512(parent_chain_code, &data)?;
+    let mut tweak: [u8; 32] = derived[..32]
+        .try_into()
+        .map_err(|_| CryptoError::KeyDerivationFailed)?;
+    let child_chain_code: [u8; 32] = derived[32..]
+        .try_into()
+        .map_err(|_| CryptoError::KeyDerivationFailed)?;
+
+    let child_private_key = add_secp256k1_scalars_mod_order(&tweak, parent_private_key)?;
+    tweak.zeroize();
+
+    if !is_valid_secp256k1_private_key(&child_private_key) {
+        return Err(CryptoError::KeyDerivation(
+            "Invalid BIP32 child key for secp256k1".to_string(),
+        ));
+    }
+
+    Ok((child_private_key, child_chain_code))
+}
+
+fn hmac_sha512(key: &[u8], data: &[u8]) -> Result<[u8; 64]> {
+    let mut mac = HmacSha512::new_from_slice(key).map_err(|_| CryptoError::KeyDerivationFailed)?;
+    mac.update(data);
+    Ok(mac.finalize().into_bytes().into())
+}
+
+fn add_secp256k1_scalars_mod_order(left: &[u8; 32], right: &[u8; 32]) -> Result<[u8; 32]> {
+    if !is_less_than_order(left) {
+        return Err(CryptoError::KeyDerivation(
+            "BIP32 child tweak is out of secp256k1 range".to_string(),
+        ));
+    }
+    if !is_nonzero_less_than_order(right) {
+        return Err(CryptoError::KeyDerivation(
+            "BIP32 parent private key is out of secp256k1 range".to_string(),
+        ));
+    }
+
+    let (sum, carry) = add_256(left, right);
+    let reduced = if carry || bytes_ge(&sum, &SECP256K1_ORDER) {
+        sub_256(&sum, &SECP256K1_ORDER)
+    } else {
+        sum
+    };
+
+    if is_zero_256(&reduced) {
+        return Err(CryptoError::KeyDerivation(
+            "BIP32 child private key is zero".to_string(),
+        ));
+    }
+
+    Ok(reduced)
+}
+
+fn add_256(left: &[u8; 32], right: &[u8; 32]) -> ([u8; 32], bool) {
+    let mut out = [0u8; 32];
+    let mut carry = 0u16;
+    for i in (0..32).rev() {
+        let sum = left[i] as u16 + right[i] as u16 + carry;
+        out[i] = sum as u8;
+        carry = sum >> 8;
+    }
+    (out, carry != 0)
+}
+
+fn sub_256(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    let mut borrow = 0i16;
+    for i in (0..32).rev() {
+        let diff = left[i] as i16 - right[i] as i16 - borrow;
+        if diff < 0 {
+            out[i] = (diff + 256) as u8;
+            borrow = 1;
+        } else {
+            out[i] = diff as u8;
+            borrow = 0;
+        }
+    }
+    out
+}
+
+fn is_valid_secp256k1_private_key(private_key: &[u8; 32]) -> bool {
+    is_nonzero_less_than_order(private_key) && SigningKey::from_bytes(private_key.into()).is_ok()
+}
+
+fn is_nonzero_less_than_order(value: &[u8; 32]) -> bool {
+    !is_zero_256(value) && is_less_than_order(value)
+}
+
+fn is_less_than_order(value: &[u8; 32]) -> bool {
+    !bytes_ge(value, &SECP256K1_ORDER)
+}
+
+fn is_zero_256(value: &[u8; 32]) -> bool {
+    value.iter().all(|&byte| byte == 0)
+}
+
+fn bytes_ge(left: &[u8; 32], right: &[u8; 32]) -> bool {
+    for (a, b) in left.iter().zip(right.iter()) {
+        if a > b {
+            return true;
+        }
+        if a < b {
+            return false;
+        }
+    }
+    true
+}
+
 fn sha512_half(data: &[u8]) -> [u8; 32] {
     Sha512::digest(data)[..32]
         .try_into()
@@ -471,6 +629,18 @@ mod tests {
         let b = VaultedXrplWallet::from_mnemonic(&mnemonic, None).unwrap();
         assert_eq!(a.classic_address().unwrap(), b.classic_address().unwrap());
         assert!(a.classic_address().unwrap().starts_with('r'));
+    }
+
+    #[test]
+    fn derives_standard_xrp_bip44_wallet_from_test_mnemonic() {
+        let mnemonic =
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        let wallet = VaultedXrplWallet::from_mnemonic(mnemonic, None).unwrap();
+
+        assert_eq!(
+            wallet.classic_address().unwrap(),
+            "rHsMGQEkVNJmpGWs8XUBoTBiAAbwxZN5v3"
+        );
     }
 
     #[test]
@@ -565,6 +735,36 @@ mod tests {
         assert!(!tx_blob.is_empty());
         assert_eq!(signed.tx_hash.as_ref().unwrap().len(), 64);
         assert_eq!(signed.tx_json["TransactionType"], "NFTokenAcceptOffer");
+        assert!(signed.tx_json.get("TxnSignature").is_some());
+    }
+
+    #[test]
+    fn nftoken_burn_builder_sets_required_fields() {
+        let tx = build_nftoken_burn_tx("rTest", "00080000BURN");
+
+        assert_eq!(tx["TransactionType"], "NFTokenBurn");
+        assert_eq!(tx["Account"], "rTest");
+        assert_eq!(tx["NFTokenID"], "00080000BURN");
+    }
+
+    #[test]
+    fn signs_nftoken_burn_as_xrpl_tx_blob() {
+        let wallet = deterministic_wallet();
+        let account = wallet.classic_address().unwrap();
+        let tx = build_nftoken_burn_tx(
+            &account,
+            "00080000DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4FAEB4C857010D42BC",
+        );
+        let tx = add_xrpl_signing_fields(tx, "12", 1, 100);
+        let signed = wallet.sign_xrpl_transaction_json(&tx).unwrap();
+        let tx_blob = signed.tx_blob.as_ref().unwrap();
+
+        assert_eq!(signed.protocol, "vaulted-xrpl-tx-blob-v1");
+        assert_eq!(tx_blob.len() % 2, 0);
+        assert!(hex::decode(tx_blob).is_ok());
+        assert!(!tx_blob.is_empty());
+        assert_eq!(signed.tx_hash.as_ref().unwrap().len(), 64);
+        assert_eq!(signed.tx_json["TransactionType"], "NFTokenBurn");
         assert!(signed.tx_json.get("TxnSignature").is_some());
     }
 

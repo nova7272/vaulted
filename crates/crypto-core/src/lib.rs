@@ -57,8 +57,8 @@ pub use seed::{SeedManager, DEFAULT_MNEMONIC_WORDS, MIN_MNEMONIC_WORDS};
 pub use transfer::{TransferProof, TransferService, TransferVerification};
 pub use types::*;
 pub use xrpl_wallet::{
-    add_xrpl_signing_fields, build_nftoken_accept_offer_tx, build_nftoken_create_offer_tx,
-    build_nftoken_mint_tx, build_xrp_payment_tx, is_valid_xrpl_classic_address,
-    VaultedQrSigningRequest, VaultedSignedXrplTransaction, VaultedXrplWallet,
-    VaultedXrplWalletPublic,
+    add_xrpl_signing_fields, build_nftoken_accept_offer_tx, build_nftoken_burn_tx,
+    build_nftoken_create_offer_tx, build_nftoken_mint_tx, build_xrp_payment_tx,
+    is_valid_xrpl_classic_address, VaultedQrSigningRequest, VaultedSignedXrplTransaction,
+    VaultedXrplWallet, VaultedXrplWalletPublic,
 };

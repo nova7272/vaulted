@@ -927,20 +927,27 @@ pub async fn get_file_by_nft(
 
 /// DELETE /api/v1/vault/:nft_token_id - delete vault
 ///
-/// Deletes the vault and related data. The NFT must be burned by the user.
-/// Oracle deletes metadata from the database and files from storage nodes.
+/// Tombstones the vault and related access state after the user burns the NFT.
+/// Oracle deletes ciphertext fragments from storage nodes when possible.
 ///
 /// **Requires authentication** - only owner can delete
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DeleteVaultResponse {
     pub success: bool,
+    pub overall_status: String,
     pub message: String,
     pub deleted_fragments: usize,
+    pub total_fragments: usize,
+    pub storage_deleted: bool,
+    pub oracle_deleted: bool,
+    pub failures: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct DeleteVaultRequest {
     pub wallet_address: String,
+    pub burn_tx_hash: Option<String>,
 }
 
 pub async fn delete_vault(
@@ -987,44 +994,18 @@ pub async fn delete_vault(
         ));
     }
 
-    // CRIT-03 FIX: Verify NFT ownership on-chain before allowing deletion.
-    // Without this, a previous owner (still in DB) could delete files after
-    // the NFT was transferred externally (outside the app).
-    match state
+    let burn_tx_hash = request
+        .burn_tx_hash
+        .as_deref()
+        .ok_or_else(|| ApiError::BadRequest("burn_tx_hash is required".into()))?;
+    state
         .xrpl
-        .verify_nft_owner(&nft_token_id, &auth.wallet_address)
-        .await
-    {
-        Ok(true) => {
-            tracing::debug!(
-                "On-chain NFT ownership verified for delete: {}",
-                nft_token_id
-            );
-        },
-        Ok(false) => {
-            tracing::warn!(
-                "BLOCKED: delete_vault for NFT {} — wallet {} is DB owner but NOT on-chain owner",
-                nft_token_id,
-                auth.wallet_address
-            );
-            return Err(ApiError::Forbidden(
-                "NFT ownership could not be verified on XRPL ledger. \
-                 The NFT may have been transferred outside the app."
-                    .into(),
-            ));
-        },
-        Err(e) => {
-            // XRPL node may be down — deny deletion to be safe (fail-closed)
-            tracing::warn!(
-                "On-chain verification failed for delete of NFT {}: {} — denying deletion",
-                nft_token_id,
-                e
-            );
-            return Err(ApiError::Internal(
-                "Unable to verify NFT ownership on-chain. Please try again later.".into(),
-            ));
-        },
-    }
+        .verify_local_nft_burn(burn_tx_hash, &nft_token_id, &auth.wallet_address)
+        .await?;
+    tracing::debug!(
+        "Validated local NFTokenBurn before Oracle cleanup: {}",
+        nft_token_id
+    );
 
     // Check status - cannot delete a vault during transfer
     if status == "transferring" {
@@ -1047,6 +1028,7 @@ pub async fn delete_vault(
         .build()
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     let mut deleted_fragments = 0;
+    let mut failures = Vec::new();
 
     // PERF FIX: Preload all node endpoints in one query
     let node_endpoints: std::collections::HashMap<String, String> =
@@ -1082,6 +1064,11 @@ pub async fn delete_vault(
                 tracing::debug!("Deleted fragment {} from storage", fragment.storage_key);
             },
             Ok(resp) => {
+                failures.push(format!(
+                    "storage_delete_http_{}_fragment_{}",
+                    resp.status().as_u16(),
+                    fragment.index
+                ));
                 tracing::warn!(
                     "Failed to delete fragment {}: HTTP {}",
                     fragment.storage_key,
@@ -1089,28 +1076,41 @@ pub async fn delete_vault(
                 );
             },
             Err(e) => {
+                failures.push(format!("storage_delete_error_fragment_{}", fragment.index));
                 tracing::warn!("Failed to delete fragment {}: {}", fragment.storage_key, e);
             },
         }
     }
 
-    // Delete related transfer_requests
-    sqlx::query("DELETE FROM transfer_requests WHERE nft_metadata_id = $1")
+    let storage_deleted = deleted_fragments == fragment_count;
+
+    sqlx::query(
+        "UPDATE grants SET status = 'revoked' WHERE vault_object_id = $1 AND status = 'active'",
+    )
+    .bind(nft_metadata_id.to_string())
+    .execute(&state.db)
+    .await?;
+
+    sqlx::query("UPDATE vault_objects SET status = 'deleted', updated_at = now() WHERE id = $1")
+        .bind(nft_metadata_id.to_string())
+        .execute(&state.db)
+        .await?;
+
+    if storage_deleted {
+        let _ = sqlx::query("UPDATE file_replicas SET status = 'deleted' WHERE nft_token_id = $1")
+            .bind(&nft_token_id)
+            .execute(&state.db)
+            .await;
+    }
+
+    sqlx::query("UPDATE nft_metadata SET status = 'archived', updated_at = now() WHERE id = $1")
         .bind(nft_metadata_id)
         .execute(&state.db)
         .await?;
 
-    // Delete file_manifests (if there is a separate table)
-    let _ = sqlx::query("DELETE FROM file_manifests WHERE nft_metadata_id = $1")
-        .bind(nft_metadata_id)
-        .execute(&state.db)
-        .await;
-
-    // Delete it nft_metadata
-    sqlx::query("DELETE FROM nft_metadata WHERE id = $1")
-        .bind(nft_metadata_id)
-        .execute(&state.db)
-        .await?;
+    if !storage_deleted {
+        failures.push("storage_delete_partial".to_string());
+    }
 
     // Audit
     state
@@ -1121,6 +1121,8 @@ pub async fn delete_vault(
             Some(serde_json::json!({
                 "fragments_deleted": deleted_fragments,
                 "total_fragments": fragment_count,
+                "storage_deleted": storage_deleted,
+                "burn_tx_hash": request.burn_tx_hash,
             })),
         )
         .await;
@@ -1133,13 +1135,29 @@ pub async fn delete_vault(
         fragment_count
     );
 
-    Ok(Json(DeleteVaultResponse {
-        success: true,
-        message: format!(
-            "Vault deleted. {} of {} fragments removed from storage.",
+    let success = storage_deleted && failures.is_empty();
+    let overall_status = if success { "deleted" } else { "partial" }.to_string();
+    let message = if success {
+        format!(
+            "Vault tombstoned. {} of {} fragments removed from storage.",
             deleted_fragments, fragment_count
-        ),
+        )
+    } else {
+        format!(
+            "Vault tombstoned after NFT burn, but storage cleanup is partial: {} of {} fragments removed.",
+            deleted_fragments, fragment_count
+        )
+    };
+
+    Ok(Json(DeleteVaultResponse {
+        success,
+        overall_status,
+        message,
         deleted_fragments,
+        total_fragments: fragment_count,
+        storage_deleted,
+        oracle_deleted: true,
+        failures,
     }))
 }
 

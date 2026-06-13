@@ -12,6 +12,7 @@ interface SigningRequestPayload { uuid:string; qrPng:string; websocketUrl:string
 interface TransferResult { transferId:string; status:string; signingRequest:SigningRequestPayload|null; offerIndex?:string|null; txHash?:string|null; engineResult?:string|null; engineResultMessage?:string|null }
 interface IncomingOffer { offerIndex:string; nftTokenId:string; fromAddress:string; amount:string }
 interface ClaimResult { success:boolean; txHash:string; nftTokenId?:string|null; transferId?:string|null; engineResult:string; engineResultMessage:string }
+interface DeleteVaultResult { success:boolean; overallStatus:string; nftTokenId:string; message:string; nftBurned:boolean; burnTxHash?:string|null; burnEngineResult?:string|null; oracleDeleted:boolean; storageDeleted:boolean; deletedFragments:number; totalFragments?:number|null; failures:string[] }
 interface SecureNoteContent { nftTokenId:string; content:string; noteType:string; mimeType:string }
 interface RecipientTrustInfo { recipientIdentityId:string; recipientEncryptionPublicKey:string; recipientEncryptionPublicKeyFingerprint?:string; displayFingerprint:string; trusted:boolean; trustLevel:string; trustSource?:string; trustedAt?:string|null; revokedAt?:string|null; activeRecipientEncryptionPublicKeyFingerprint?:string; keyRotationDetected?:boolean; trustedDifferentKeyFingerprint?:string|null; trustedDifferentKeyAt?:string|null }
 interface GrantStartResult { grantRequestId:string; grantId:string; challenge:string; oracleUrl:string; expiresAt:string; grantContextHash:string; vaultObjectId:string; recipientIdentityId:string; qrPayload:unknown }
@@ -458,10 +459,30 @@ export default function FilesScreen({onNavigate,searchQuery='',localWalletAvaila
 
   const deleteVault=async()=>{
     if(!deleteNft)return
+    const target=deleteNft
     setDeleting(true)
     setBurnQr(null)
-    toast({type:'warning',title:'Vaulted signing pending',sub:'Local XRPL NFT burn signing is not implemented yet'})
-    setDeleting(false)
+    try{
+      const result=await invoke<DeleteVaultResult>('delete_vault',{nftTokenId:target.nftTokenId})
+      if(result.success){
+        toast({type:'success',title:'Vault deleted',sub:result.message})
+        addEntry('file_deleted',`Deleted ${target.filename||'vault object'}`,{status:'success',detail:`Burn tx: ${result.burnTxHash?.slice(0,8)||'accepted'}…`,nftTokenId:target.nftTokenId})
+        setNfts(prev=>prev.filter(n=>n.nftTokenId!==target.nftTokenId))
+        setDeleteNft(null)
+        setDeleteConfirmText('')
+        await load()
+      }else{
+        const detail=result.failures.length?result.failures.join(', '):result.overallStatus
+        toast({type:'warning',title:'Delete partially completed',sub:`${result.message} (${detail})`})
+        addEntry('file_deleted',`Delete partial for ${target.filename||'vault object'}`,{status:'error',detail,nftTokenId:target.nftTokenId})
+        await load()
+      }
+    }catch(e){
+      toast({type:'error',title:'Delete failed',sub:String(e)})
+      addEntry('file_deleted',`Delete failed for ${target.filename||'vault object'}`,{status:'error',detail:String(e),nftTokenId:target.nftTokenId})
+    }finally{
+      setDeleting(false)
+    }
   }
 
   // Extract available tags and extensions for filter
@@ -686,6 +707,8 @@ export default function FilesScreen({onNavigate,searchQuery='',localWalletAvaila
                 // ===== GRID VIEW — 2-column horizontal cards =====
                 const isDeleted = nft.fileStatus === 'deleted'
                 const isUnavailable = nft.fileStatus === 'unavailable' || nft.fileStatus === 'metadata_unlinked'
+                const showsOwnerStatus = !isDeleted && !nft.preKeyMismatch && !isUnavailable
+                const canDelete = nft.fileStatus !== 'deleted' && showsOwnerStatus
                 const cleanName = name.replace(/\[[^\]]+\]/g,'').trim()
                 const hasExt = cleanName.includes('.') && cleanName.lastIndexOf('.') > 0
                 const fileExt = hasExt ? cleanName.split('.').pop()?.toLowerCase() || '' : ''
@@ -774,7 +797,7 @@ export default function FilesScreen({onNavigate,searchQuery='',localWalletAvaila
                         </div>
 
                         {/* Buttons — full width with icons */}
-                        <div style={{display:'flex',gap:8,marginTop:14}}>
+                        <div style={{marginTop:14}}>
                           {isDeleted ? (
                               <button className="v-btn v-btn-danger" style={{height:50,justifyContent:'center',fontSize:15,gap:7,padding:'0 24px'}}
                                       onClick={()=>{setDeleteNft(nft);setDeleteConfirmText('')}}>
@@ -782,38 +805,42 @@ export default function FilesScreen({onNavigate,searchQuery='',localWalletAvaila
                                 Burn
                               </button>
                           ) : (
-                              <>
+                              <div style={{display:'grid',gap:8}}>
+                                <div style={{display:'grid',gridTemplateColumns:'repeat(3, minmax(0, 1fr))',gap:8}}>
                                 {isSecure ? (
-                                    <button className="v-btn" style={{flex:1,height:50,justifyContent:'center',fontSize:15,gap:7}}
+                                    <button className="v-btn" style={{height:50,justifyContent:'center',fontSize:15,gap:7,padding:'0 12px'}}
                                             onClick={()=>viewNote(nft)}>
                                       <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
                                       View
                                     </button>
                                 ) : (
-                                    <button className="v-btn" style={{flex:1,height:50,justifyContent:'center',fontSize:15,gap:7}}
+                                    <button className="v-btn" style={{height:50,justifyContent:'center',fontSize:15,gap:7,padding:'0 12px'}}
                                             onClick={()=>download(nft)}
                                             disabled={downloading===nft.nftTokenId||!!nft.preKeyMismatch||isUnavailable}>
                                       <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                                       {downloading===nft.nftTokenId?'...':'Download'}
                                     </button>
                                 )}
-                                <button className="v-btn" style={{flex:1,height:50,justifyContent:'center',fontSize:15,gap:7}}
+                                <button className="v-btn" style={{height:50,justifyContent:'center',fontSize:15,gap:7,padding:'0 12px'}}
                                         onClick={()=>openShareModal(nft)}
                                         disabled={isUnavailable}>
                                   <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M4 12v7a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-7"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>
                                   Share
                                 </button>
-                                <button className="v-btn" style={{flex:1,height:50,justifyContent:'center',fontSize:15,gap:7}}
+                                <button className="v-btn" style={{height:50,justifyContent:'center',fontSize:15,gap:7,padding:'0 12px'}}
                                         onClick={()=>setTransferNft(nft)}>
                                   <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
                                   Transfer
                                 </button>
-                                <button className="v-btn v-btn-danger" style={{flex:1,height:50,justifyContent:'center',fontSize:15,gap:7}}
-                                        onClick={()=>{setDeleteNft(nft);setDeleteConfirmText('')}}>
-                                  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/></svg>
-                                  Burn
-                                </button>
-                              </>
+                                </div>
+                                {canDelete && (
+                                    <button className="v-btn v-btn-danger" style={{width:'100%',height:46,justifyContent:'center',fontSize:15,gap:7}}
+                                            onClick={()=>{setDeleteNft(nft);setDeleteConfirmText('')}}>
+                                      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/></svg>
+                                      Burn
+                                    </button>
+                                )}
+                              </div>
                           )}
                         </div>
                       </div>

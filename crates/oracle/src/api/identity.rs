@@ -151,6 +151,9 @@ pub struct IdentityChallengeResponse {
 pub struct IdentityTokenRequest {
     pub identity_id: String,
     pub wallet_address: String,
+    /// Legacy recipient PRE public key used by wallet-address transfer lookup.
+    /// When provided, it must be covered by the identity signature challenge.
+    pub pre_public_key: Option<String>,
     pub challenge: String,
     pub signature: String,
     pub device_public_key: Option<String>,
@@ -708,6 +711,17 @@ pub async fn identity_token(
             "Challenge is not bound to the requested wallet".into(),
         ));
     }
+    if let Some(pre_public_key) = req.pre_public_key.as_deref() {
+        validate_pre_public_key(pre_public_key)?;
+        if !req
+            .challenge
+            .contains(&format!("pre_public_key:{}", pre_public_key))
+        {
+            return Err(ApiError::Unauthorized(
+                "Challenge is not bound to the recipient public key".into(),
+            ));
+        }
+    }
 
     verify_ed25519_hex(
         &signing_public_key,
@@ -730,6 +744,20 @@ pub async fn identity_token(
         .await;
     }
 
+    let user_id = if let Some(pre_public_key) = req.pre_public_key.as_deref() {
+        let user_id = upsert_verified_wallet_recipient_key(
+            &state,
+            &req.identity_id,
+            &wallet_address,
+            pre_public_key,
+        )
+        .await?;
+        Some(user_id)
+    } else {
+        None
+    };
+
+    let recipient_key_registered = user_id.is_some();
     let role = "user".to_string();
     let claims = Claims::new_access_with_role(&wallet_address, 1, &role);
     let access_token = auth::create_token(&claims, &state.signing_key);
@@ -745,6 +773,8 @@ pub async fn identity_token(
             Some(serde_json::json!({
                 "identity_id": req.identity_id,
                 "wallet_address": wallet_address,
+                "user_id": user_id,
+                "recipient_key_registered": recipient_key_registered,
                 "token_id": claims.jti,
                 "expires_at": claims.exp,
                 "auth_mode": "vaulted_identity_signature"
@@ -763,6 +793,50 @@ pub async fn identity_token(
     }))
 }
 
+async fn upsert_verified_wallet_recipient_key(
+    state: &AppState,
+    identity_id: &str,
+    wallet_address: &str,
+    pre_public_key: &str,
+) -> Result<Uuid> {
+    let user_id = sqlx::query_scalar::<_, Uuid>(
+        r#"INSERT INTO users (wallet_address, pre_public_key, last_seen_at)
+           VALUES ($1, $2, NOW())
+           ON CONFLICT (wallet_address) DO UPDATE SET
+             pre_public_key = EXCLUDED.pre_public_key,
+             updated_at = NOW(),
+             last_seen_at = NOW()
+           RETURNING id"#,
+    )
+    .bind(wallet_address)
+    .bind(pre_public_key)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| ApiError::Database(format!("Failed to upsert recipient public key: {e}")))?;
+
+    sqlx::query(
+        r#"INSERT INTO linked_wallets (id, identity_id, chain, address, proof_signature)
+           VALUES ($1, $2, 'xrpl', $3, NULL)
+           ON CONFLICT (identity_id, chain, address) DO UPDATE SET
+             proof_signature = EXCLUDED.proof_signature,
+             revoked_at = NULL"#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(identity_id)
+    .bind(wallet_address)
+    .execute(&state.db)
+    .await
+    .map_err(|e| ApiError::Database(format!("Failed to link Vaulted wallet: {e}")))?;
+
+    tracing::info!(
+        identity_id,
+        wallet_address,
+        "Registered Vaulted recipient public key for wallet"
+    );
+
+    Ok(user_id)
+}
+
 fn derive_identity_id(signing_public_key: &str, encryption_public_key: &str) -> String {
     let mut h = Sha256::new();
     h.update(b"Vaulted v1 identity id");
@@ -778,6 +852,15 @@ fn validate_hex_key(value: &str, expected_bytes: usize, field: &str) -> Result<(
         return Err(ApiError::BadRequest(format!(
             "{field} must be {expected_bytes} bytes"
         )));
+    }
+    Ok(())
+}
+
+fn validate_pre_public_key(value: &str) -> Result<()> {
+    if (value.len() != 66 && value.len() != 128) || !value.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(ApiError::BadRequest(
+            "pre_public_key must be a 33-byte compressed or 64-byte hex public key".into(),
+        ));
     }
     Ok(())
 }
@@ -834,5 +917,31 @@ mod trust_tests {
     #[test]
     fn rejects_invalid_public_key_for_fingerprint() {
         assert!(encryption_public_key_fingerprint_hex("deadbeef").is_err());
+    }
+
+    #[test]
+    fn accepts_legacy_pre_public_key_lengths() {
+        assert!(validate_pre_public_key(&"02".repeat(33)).is_ok());
+        assert!(validate_pre_public_key(&"ab".repeat(64)).is_ok());
+    }
+
+    #[test]
+    fn rejects_malformed_legacy_pre_public_key() {
+        assert!(validate_pre_public_key("abcd").is_err());
+        assert!(validate_pre_public_key(&"zz".repeat(33)).is_err());
+    }
+
+    #[test]
+    fn identity_login_challenge_can_bind_wallet_and_recipient_key() {
+        let identity_id = "identity-1";
+        let wallet_address = "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh";
+        let pre_public_key = "02".repeat(33);
+        let challenge = format!(
+            "Vaulted identity login:vaulted-v1:{identity_id}:nonce\nwallet_address:{wallet_address}\npre_public_key:{pre_public_key}"
+        );
+
+        assert!(challenge.contains(&format!("vaulted-v1:{identity_id}")));
+        assert!(challenge.contains(&format!("wallet_address:{wallet_address}")));
+        assert!(challenge.contains(&format!("pre_public_key:{pre_public_key}")));
     }
 }

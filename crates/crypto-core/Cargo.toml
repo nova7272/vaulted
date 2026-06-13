@@ -24,6 +24,7 @@ blake3.workspace = true
 
 # Key derivation
 hkdf = "0.12"
+hmac = "0.12"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 bip39 = { version = "2", features = ["rand"] }
 k256 = { version = "0.13", features = ["ecdsa", "sha256"] }

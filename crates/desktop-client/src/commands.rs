@@ -8,9 +8,9 @@ use std::path::Path;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
 use xrpl_vault_crypto_core::{
-    add_xrpl_signing_fields, build_nftoken_accept_offer_tx, build_nftoken_create_offer_tx,
-    build_nftoken_mint_tx, build_xrp_payment_tx, encryption_public_key_fingerprint_hex,
-    format_fingerprint_groups,
+    add_xrpl_signing_fields, build_nftoken_accept_offer_tx, build_nftoken_burn_tx,
+    build_nftoken_create_offer_tx, build_nftoken_mint_tx, build_xrp_payment_tx,
+    encryption_public_key_fingerprint_hex, format_fingerprint_groups,
     generate_vaulted_nft_metadata_preview as build_vaulted_nft_metadata_preview,
     is_valid_xrpl_classic_address, open_key_envelope, seal_key_for_recipient_hex, KeyEnvelope,
     SeedManager, VaultedNftMetadataInput, VaultedNftMetadataPreview, VaultedQrSigningRequest,
@@ -243,8 +243,21 @@ async fn register_vaulted_identity_public(
             return;
         },
     };
+    let pre_public_key = match state.get_public_key_hex().await {
+        Ok(public_key) => public_key,
+        Err(e) => {
+            tracing::warn!(
+                "Current recipient PRE public key is unavailable for Oracle identity login: {}",
+                e
+            );
+            return;
+        },
+    };
 
-    let signed_challenge = format!("{}\nwallet_address:{}", challenge.challenge, wallet_address);
+    let signed_challenge = format!(
+        "{}\nwallet_address:{}\npre_public_key:{}",
+        challenge.challenge, wallet_address, pre_public_key
+    );
     use ed25519_dalek::Signer as _;
     let signature = vaulted_identity
         .signing_key()
@@ -255,6 +268,7 @@ async fn register_vaulted_identity_public(
         .get_identity_token(&IdentityTokenRequest {
             identity_id: identity.vaulted_identity_id.clone(),
             wallet_address,
+            pre_public_key: Some(pre_public_key),
             challenge: signed_challenge,
             signature: signature_hex,
             device_public_key: Some(identity.device_public_key.clone()),
@@ -4392,8 +4406,34 @@ pub async fn cancel_transfer(
 #[serde(rename_all = "camelCase")]
 pub struct DeleteVaultResponse {
     pub success: bool,
+    pub overall_status: String,
+    pub nft_token_id: String,
+    pub message: String,
+    pub nft_burned: bool,
+    pub burn_tx_hash: Option<String>,
+    pub burn_engine_result: Option<String>,
+    pub oracle_deleted: bool,
+    pub storage_deleted: bool,
+    pub deleted_fragments: usize,
+    pub total_fragments: Option<usize>,
+    #[serde(default)]
+    pub failures: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OracleDeleteVaultResponse {
+    pub success: bool,
     pub message: String,
     pub deleted_fragments: usize,
+    #[serde(default)]
+    pub total_fragments: Option<usize>,
+    #[serde(default)]
+    pub storage_deleted: bool,
+    #[serde(default)]
+    pub oracle_deleted: bool,
+    #[serde(default)]
+    pub failures: Vec<String>,
 }
 
 #[tauri::command]
@@ -4402,6 +4442,88 @@ pub async fn delete_vault(
     nft_token_id: String,
 ) -> Result<DeleteVaultResponse> {
     let session = state.get_session().await?;
+    let wallet = state.get_xrpl_wallet().await?;
+    let account = wallet.classic_address()?;
+    if !account.eq_ignore_ascii_case(&session.wallet_address) {
+        return Err(ClientError::Auth(
+            "Current session wallet does not match the local Vaulted XRPL wallet".to_string(),
+        ));
+    }
+
+    let mut xrpl = XrplClient::new(&state.config.xrpl_node_url);
+    xrpl.connect().await?;
+    match xrpl.verify_nft_owner(&nft_token_id, &account).await {
+        Ok(true) => {},
+        Ok(false) => {
+            return Err(ClientError::Auth(
+                "Only the current XRPL NFT owner can delete this vault".to_string(),
+            ));
+        },
+        Err(e) => {
+            return Err(ClientError::Xrpl(format!(
+                "Could not verify NFT ownership before delete: {}",
+                e
+            )));
+        },
+    }
+
+    let account_info = xrpl.account_info(&account).await?;
+    let fee_drops = xrpl.fee_drops().await?;
+    let last_ledger_sequence = xrpl.ledger_current_index().await?.saturating_add(20);
+    let burn_tx = add_xrpl_signing_fields(
+        build_nftoken_burn_tx(&account, &nft_token_id),
+        fee_drops,
+        account_info.sequence,
+        last_ledger_sequence,
+    );
+    let signed = wallet.sign_xrpl_transaction_json(&burn_tx)?;
+    let tx_blob = signed.tx_blob.clone().ok_or_else(|| {
+        ClientError::Xrpl("Signed NFTokenBurn transaction is missing tx_blob".to_string())
+    })?;
+    let burn_submit = xrpl.submit(&tx_blob).await?;
+    let burn_accepted = burn_submit.engine_result.starts_with("tes");
+
+    if !burn_accepted {
+        return Ok(DeleteVaultResponse {
+            success: false,
+            overall_status: "failed".to_string(),
+            nft_token_id,
+            message: format!(
+                "NFT burn was not accepted by XRPL: {}",
+                burn_submit.engine_result_message
+            ),
+            nft_burned: false,
+            burn_tx_hash: Some(burn_submit.tx_hash),
+            burn_engine_result: Some(burn_submit.engine_result),
+            oracle_deleted: false,
+            storage_deleted: false,
+            deleted_fragments: 0,
+            total_fragments: None,
+            failures: vec!["xrpl_burn_failed".to_string()],
+        });
+    }
+
+    if let Err(e) =
+        wait_for_validated_nftoken_burn(&xrpl, &burn_submit.tx_hash, &nft_token_id, &account).await
+    {
+        return Ok(DeleteVaultResponse {
+            success: false,
+            overall_status: "partial".to_string(),
+            nft_token_id,
+            message: format!(
+                "NFT burn was submitted, but Vaulted could not confirm validation before Oracle cleanup: {}",
+                e
+            ),
+            nft_burned: true,
+            burn_tx_hash: Some(burn_submit.tx_hash),
+            burn_engine_result: Some(burn_submit.engine_result),
+            oracle_deleted: false,
+            storage_deleted: false,
+            deleted_fragments: 0,
+            total_fragments: None,
+            failures: vec!["xrpl_burn_validation_pending".to_string()],
+        });
+    }
 
     let client = state.create_authed_client().await;
     let oracle_url = format!(
@@ -4412,28 +4534,136 @@ pub async fn delete_vault(
     let response = client
         .post(&oracle_url)
         .json(&serde_json::json!({
-            "wallet_address": session.wallet_address
+            "wallet_address": session.wallet_address,
+            "burn_tx_hash": burn_submit.tx_hash,
         }))
         .send()
         .await?;
 
     if !response.status().is_success() {
+        let status = response.status();
         let error_text = response.text().await.unwrap_or_default();
-        return Err(crate::error::ClientError::Oracle(format!(
-            "Failed to delete vault: {}",
-            error_text
-        )));
+        return Ok(DeleteVaultResponse {
+            success: false,
+            overall_status: "partial".to_string(),
+            nft_token_id,
+            message: format!(
+                "NFT burn succeeded, but Oracle/storage cleanup failed: HTTP {} {}",
+                status, error_text
+            ),
+            nft_burned: true,
+            burn_tx_hash: Some(burn_submit.tx_hash),
+            burn_engine_result: Some(burn_submit.engine_result),
+            oracle_deleted: false,
+            storage_deleted: false,
+            deleted_fragments: 0,
+            total_fragments: None,
+            failures: vec!["oracle_cleanup_failed".to_string()],
+        });
     }
 
-    let result: DeleteVaultResponse = response.json().await?;
+    let oracle_result: OracleDeleteVaultResponse = response.json().await?;
+    let storage_deleted = oracle_result.storage_deleted
+        || oracle_result
+            .total_fragments
+            .map(|total| oracle_result.deleted_fragments >= total)
+            .unwrap_or(oracle_result.success);
+    let oracle_deleted = oracle_result.oracle_deleted || oracle_result.success;
+    let mut failures = oracle_result.failures;
+    if !storage_deleted {
+        failures.push("storage_delete_partial".to_string());
+    }
+    if !oracle_deleted {
+        failures.push("oracle_tombstone_failed".to_string());
+    }
+    let success = burn_accepted && storage_deleted && oracle_deleted && failures.is_empty();
+    let overall_status = if success { "deleted" } else { "partial" }.to_string();
 
     tracing::info!(
-        "Vault {} deleted: {} fragments removed",
+        "Vault {} delete result: burn accepted, {} fragments removed",
         nft_token_id,
-        result.deleted_fragments
+        oracle_result.deleted_fragments
     );
 
-    Ok(result)
+    Ok(DeleteVaultResponse {
+        success,
+        overall_status,
+        nft_token_id,
+        message: oracle_result.message,
+        nft_burned: true,
+        burn_tx_hash: Some(burn_submit.tx_hash),
+        burn_engine_result: Some(burn_submit.engine_result),
+        oracle_deleted,
+        storage_deleted,
+        deleted_fragments: oracle_result.deleted_fragments,
+        total_fragments: oracle_result.total_fragments,
+        failures,
+    })
+}
+
+async fn wait_for_validated_nftoken_burn(
+    xrpl: &XrplClient,
+    tx_hash: &str,
+    nft_token_id: &str,
+    account: &str,
+) -> Result<()> {
+    const MAX_ATTEMPTS: usize = 12;
+    const POLL_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        match xrpl.tx(tx_hash).await {
+            Ok(response) => {
+                let Some(result) = response.get("result") else {
+                    return Err(ClientError::Xrpl(
+                        "XRPL tx response missing result".to_string(),
+                    ));
+                };
+                if result.get("validated").and_then(|value| value.as_bool()) == Some(true) {
+                    let tx_result = result
+                        .pointer("/meta/TransactionResult")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("unknown");
+                    if tx_result != "tesSUCCESS" {
+                        return Err(ClientError::Xrpl(format!(
+                            "NFTokenBurn transaction failed: {}",
+                            tx_result
+                        )));
+                    }
+                    let tx_type = result
+                        .get("TransactionType")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default();
+                    let tx_account = result
+                        .get("Account")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default();
+                    let tx_nftoken_id = result
+                        .get("NFTokenID")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default();
+                    if tx_type == "NFTokenBurn"
+                        && tx_account.eq_ignore_ascii_case(account)
+                        && tx_nftoken_id.eq_ignore_ascii_case(nft_token_id)
+                    {
+                        return Ok(());
+                    }
+                    return Err(ClientError::Xrpl(
+                        "Validated XRPL transaction does not match requested NFT burn".to_string(),
+                    ));
+                }
+            },
+            Err(e) if attempt == MAX_ATTEMPTS => return Err(e),
+            Err(_) => {},
+        }
+
+        if attempt < MAX_ATTEMPTS {
+            tokio::time::sleep(POLL_DELAY).await;
+        }
+    }
+
+    Err(ClientError::Xrpl(
+        "Timed out waiting for NFTokenBurn validation".to_string(),
+    ))
 }
 
 // ==================== Burn NFT ====================
@@ -5451,7 +5681,7 @@ async fn check_xrpl_account_status_inner(
                     reserve_requirement_xrp,
                     network,
                     can_mint: false,
-                    action_hint: "Your XRPL testnet account is not activated yet. Add testnet XRP to this address, then check again.".to_string(),
+                    action_hint: "XRPL account is not funded yet. You can register and receive access, but cannot submit XRPL transactions until funded.".to_string(),
                     action_label: Some("Open XRPL Testnet Faucet".to_string()),
                     action_url: Some(testnet_faucet_url(&resolved_address)),
                 })

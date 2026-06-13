@@ -925,6 +925,7 @@ pub struct IdentityChallengeResponse {
 pub struct IdentityTokenRequest {
     pub identity_id: String,
     pub wallet_address: String,
+    pub pre_public_key: Option<String>,
     pub challenge: String,
     pub signature: String,
     pub device_public_key: Option<String>,
