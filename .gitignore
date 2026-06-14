@@ -51,3 +51,20 @@ Thumbs.db
 # Accidental CLI artifacts
 crates/desktop-client/vite
 crates/desktop-client/ui@*
+
+# Local/internal project notes and automation
+.ai-factory/
+.codex/
+docs/
+scripts/
+.ai-factory.json
+AGENTS.md
+IMPLEMENTATION_REPORT.md
+VAULTED_V1_IMPLEMENTATION.md
+VAULTED_WALLET_MODE_IMPLEMENTATION.md
+
+# Local artifacts
+vaulted.zip
+passport
+1
+1[pass]
