@@ -1,150 +1,139 @@
 # Vaulted
 
-Vaulted is an encrypted file vault built around a first-party Vaulted seed, local XRPL wallet signing, deterministic NFT metadata, and recipient-bound `KeyEnvelope` sharing.
+Vaulted is a local-first encrypted file vault that uses XRPL NFTs as ownership anchors.
 
-## MVP status
+Files are encrypted on the user's device before upload. The Vaulted desktop client keeps seed material, wallet keys, file keys, and plaintext file content local. The Oracle coordinates metadata, grants, device state, and ledger verification, but it cannot decrypt files. Storage nodes store ciphertext fragments only.
 
-The current production-MVP checkpoint has runtime evidence through local XRPL mint, Oracle finalize/by-NFT linkage, owner download/decrypt, NFT transfer/re-encryption, recipient accept, and recipient decrypt after re-encryption.
+## What it does
 
-The detailed checkpoint, safe runtime phases, and final-pass checklist live in [docs/RUNTIME_VERIFICATION.md](docs/RUNTIME_VERIFICATION.md).
+- Creates a local Vaulted identity from a user-controlled seed phrase.
+- Encrypts files client-side before they are sent to storage nodes.
+- Uses XRPL NFT ownership as the public ownership anchor for a vaulted file.
+- Builds and signs XRPL transactions locally in the desktop client.
+- Lets owners download and decrypt their files locally.
+- Supports recipient-bound sharing through encrypted `KeyEnvelope` grants.
+- Lets the Oracle verify ledger state and issue storage access tokens without receiving plaintext file keys.
 
-## Current architecture
+## Why XRPL
+
+XRPL is a good fit for Vaulted because it provides fast finality, low transaction costs, native NFT primitives, and mature testnet tooling. Vaulted uses those properties to anchor file ownership without putting file content or decryption keys on-chain.
+
+In this model, the ledger answers ownership questions: who currently controls the NFT associated with a vault object. Vaulted keeps the private data path separate: files remain encrypted locally, sharing keys are sealed to recipients, and storage nodes only see ciphertext.
+
+## Architecture
 
 ```text
 Vaulted seed phrase
-├─ Vaulted encryption identity
-├─ Vaulted signing identity
-├─ Vaulted XRPL wallet keypair
-├─ file keys
+├─ Vaulted identity signing key
+├─ Vaulted identity encryption key
+├─ device key
+├─ XRPL wallet keypair
+├─ per-file encryption keys
 ├─ recipient-bound KeyEnvelopes
 └─ signed manifests
 ```
 
 ```text
-Desktop Client (Tauri)
-├─ encrypts/decrypts files locally
-├─ derives identity and XRPL wallet locally from the Vaulted seed
-├─ signs XRPL NFT mint transactions locally
-├─ renders QR approval requests for device pairing, XRPL signing, and file grants
-└─ talks to Oracle and storage nodes over HTTP
+Desktop Client (Tauri + React)
+├─ creates/restores the local Vaulted identity
+├─ encrypts and decrypts files locally
+├─ derives XRPL wallet material locally
+├─ builds and signs XRPL NFT transactions locally
+├─ prepares manifests and grant approvals
+└─ talks to the Oracle and storage nodes over HTTP
 
 Oracle
-├─ registry / index / auth service
-├─ validates client-generated manifests and metadata
-├─ verifies XRPL ledger state before finalizing vault objects
-├─ stores grant and device state
-└─ issues signed storage access tokens
+├─ verifies manifests and XRPL ledger state
+├─ maintains vault object, grant, and device records
+├─ coordinates storage access
+└─ issues signed storage tokens
 
 Storage Nodes
-└─ store encrypted fragments only
+└─ store encrypted file fragments only
 ```
 
-Private seed material, file keys, and decrypted file content never leave the client.
+Private seed material, private wallet keys, file keys, and plaintext file content are not sent to the Oracle or storage nodes.
 
-## Key security principles
+## Current status
 
-1. **Client-side encryption** — file keys are generated locally and files are encrypted before upload.
-2. **Vaulted seed identity** — identity, encryption, signing, and XRPL wallet material derive from the user-controlled Vaulted seed.
-3. **Local XRPL signing** — the client builds and signs XRPL transactions locally, then submits `tx_blob` for ledger verification.
-4. **Recipient-bound sharing** — grants use `KeyEnvelope` objects sealed to the recipient identity encryption key.
-5. **QR trust model** — device pairing, XRPL signing approval, and file grant approval use signed canonical QR payloads.
-6. **Oracle cannot decrypt files** — Oracle indexes manifests, verifies ledger state, and gates storage access, but does not receive plaintext file keys.
+Vaulted is an MVP for local development and XRPL testnet demonstrations. The core flow is implemented around local-first encryption, local XRPL signing, NFT-backed ownership, Oracle verification, encrypted storage fragments, and recipient-bound sharing.
+
+The project is not production hardened yet. Production use requires operational hardening, key management review, deployment security, monitoring, backup strategy, and broader security review.
 
 ## Project structure
 
 ```text
-xrpl-vault/
+vaulted/
 ├── crates/
-│   ├── crypto-core/       # AES, identity derivation, KeyEnvelope, QR payloads, XRPL signing
-│   ├── desktop-client/    # Tauri app, local wallet/signing, file decrypt/open flows, React UI
-│   ├── oracle/            # registry, auth, manifest, QR, grants, device, and XRPL verification service
-│   └── storage-node/      # encrypted fragment storage
-├── migrations/            # PostgreSQL schema and compatibility migrations
-├── docker-compose.yml     # local PostgreSQL + Redis
-└── scripts/               # developer helpers
+│   ├── crypto-core/       # cryptography, identities, manifests, QR payloads, XRPL helpers
+│   ├── desktop-client/    # Tauri desktop app and React UI
+│   ├── oracle/            # Axum registry, manifest, grant, device, and ledger verification service
+│   └── storage-node/      # encrypted fragment storage service
+├── migrations/            # PostgreSQL schema migrations
+├── data/                  # local development fragment storage
+├── docker-compose.yml     # local PostgreSQL, Redis, and optional dev tools
+├── Makefile               # common local development commands
+├── QUICKSTART.md          # local setup and demo flow
+└── SECURITY.md            # security model and production checklist
 ```
-
-Legacy PRE and external-wallet compatibility code can still exist in migrations and old transfer paths, but new sharing is based on `KeyEnvelope` grants and Vaulted identities.
 
 ## Quick start
 
 ```bash
-# Start infrastructure
+git clone https://github.com/nova7272/vaulted.git
+cd vaulted
+cp .env.example .env
 make dev
-
-# Run Oracle
-make oracle
-
-# Run storage node
-make storage
-
-# Run workspace tests
-cargo test --workspace
 ```
 
-Desktop UI checks:
+Start the Oracle and storage node in separate terminals:
 
 ```bash
-cd crates/desktop-client/ui
-npm ci
-npm run lint
-npx tsc --noEmit --project tsconfig.json
-npm run build
+make oracle
 ```
 
-## Demo flow
+```bash
+make storage
+```
 
-Use the runtime verification document for the detailed checklist. The local demo path is:
+Run the desktop client:
 
-1. Start Postgres/Redis with Docker Compose.
-2. Start Oracle and confirm `/health`.
-3. Start storage-node and confirm `/health`.
-4. Launch the desktop client.
-5. Create or restore a 12-word Vaulted wallet.
-6. Confirm Wallet balance, receive address/QR, and Send XRP on testnet.
-7. Upload an encrypted file.
-8. Mint the ownership NFT locally.
-9. Finalize the vault object in Oracle.
-10. Download/decrypt as owner.
-11. Transfer NFT/file access to a recipient.
-12. Confirm the recipient incoming offer.
-13. Accept with local `NFTokenAcceptOffer`.
-14. Confirm recipient decrypt after re-encryption.
+```bash
+cd crates/desktop-client
+cargo tauri dev
+```
 
-## Environment variables
+See [QUICKSTART.md](QUICKSTART.md) for the full local setup and demo flow.
 
-| Variable | Description | Default |
-| --- | --- | --- |
-| `DATABASE_URL` | PostgreSQL connection string | required for Oracle |
-| `REDIS_URL` | Redis connection string | optional/dev dependent |
-| `XRPL_NODE_URL` | XRPL WebSocket URL for desktop XRPL flows | `wss://s.altnet.rippletest.net:51233` |
-| `XRPL_RPC_URL` | XRPL HTTP JSON-RPC URL for Oracle ledger verification | `https://s.altnet.rippletest.net:51234` |
-| `ORACLE_SIGNING_KEY` | Ed25519 signing key for JWT/storage tokens | generated in dev |
-| `RUST_LOG` | Rust logging level | `info` |
+## Tests and checks
 
-## Validation commands
+Rust:
 
 ```bash
 cargo fmt --all --check
 cargo check --workspace
 cargo test --workspace
-
-cd crates/desktop-client/ui
-npm ci
-npm run lint
-npx tsc --noEmit --project tsconfig.json
-npm run build
-cd ../../..
-
-./scripts/check-sensitive-logs.sh
-git diff --check
 ```
 
-## Documentation and security notes
+Desktop UI:
 
-- Runtime evidence and final-pass status are tracked in [docs/RUNTIME_VERIFICATION.md](docs/RUNTIME_VERIFICATION.md).
-- Do not log, render, paste, or commit wallet recovery words, private material, local file keys, tokenized storage URLs, raw storage keys, transaction blobs, approval payloads, or decrypted file contents.
-- Oracle and storage-node must not receive plaintext file content or plaintext file keys.
+```bash
+cd crates/desktop-client/ui
+npm run typecheck
+npm run build
+npm run lint
+```
+
+## Security model
+
+- Files are encrypted locally before upload.
+- The Vaulted seed stays on the client and is the recovery root for local identity and wallet material.
+- XRPL transactions are built and signed locally by the desktop client.
+- The Oracle verifies ledger state, manifests, grants, devices, and storage access, but cannot decrypt files.
+- Storage nodes store encrypted fragments only.
+- Sharing uses recipient-bound `KeyEnvelope` objects instead of exposing plaintext file keys to the Oracle.
+
+See [SECURITY.md](SECURITY.md) for more detail.
 
 ## License
 

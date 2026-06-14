@@ -1,90 +1,110 @@
-# Vaulted - Quick Start
+# Vaulted Quick Start
 
-## 1. Preparation
+This guide starts the local PostgreSQL and Redis services, runs the Oracle and storage node, and launches the desktop client against XRPL testnet defaults.
+
+## Clone repository
 
 ```bash
-git clone <your-repo>
-cd xrpl-vault
+git clone https://github.com/nova7272/vaulted.git
+cd vaulted
+```
+
+## Configure `.env`
+
+```bash
 cp .env.example .env
 ```
 
-For local development, PostgreSQL/Redis from `docker-compose.yml` and the default Oracle URL are usually enough.
-
-## 2. Configure `.env`
+The default file is intended for local development. Check these values before starting services:
 
 ```bash
-DATABASE_URL=postgres://vaulted:vaulted@localhost:5432/vaulted
+DATABASE_URL=postgres://xrpl_vault:dev_password_change_me@localhost:5432/xrpl_vault
 REDIS_URL=redis://localhost:6379
 XRPL_NODE_URL=wss://s.altnet.rippletest.net:51233
 XRPL_RPC_URL=https://s.altnet.rippletest.net:51234
-ORACLE_URL=http://localhost:3000
+XRPL_NETWORK=testnet
+ORACLE_HOST=0.0.0.0
+ORACLE_PORT=3000
 ```
 
-The live XRPL testnet flow requires an activated testnet account. Seed/identity/wallet material is created locally by the Vaulted desktop client and must not be stored in `.env` for production.
+Do not put production seed phrases, wallet private keys, file keys, or recovery material in `.env`. The desktop client creates and stores Vaulted identity and wallet material locally.
 
-## 3. Start Infrastructure
+## Start Postgres/Redis
 
 ```bash
 make dev
 ```
 
-Check:
+Check container status:
 
 ```bash
 docker compose ps
 ```
 
-## 4. Start Services
+## Start Oracle
 
-Oracle:
+Run in a separate terminal:
 
 ```bash
 make oracle
 ```
 
-Storage node:
+Health check:
+
+```bash
+curl http://localhost:3000/health
+```
+
+## Start Storage Node
+
+Run in another terminal:
 
 ```bash
 make storage
 ```
 
-## 5. Health checks
+Health check:
 
 ```bash
-curl http://localhost:3000/health
 curl http://localhost:9001/health
 ```
 
-## 6. Desktop UI checks
+## Run desktop client
 
 ```bash
-cd crates/desktop-client/ui
-npm ci
-npm run lint
-npx tsc --noEmit --project tsconfig.json
-npm run build
+cd crates/desktop-client
+cargo tauri dev
 ```
 
-## 7. Rust checks
+The desktop client uses the local Oracle by default. XRPL flows are configured for testnet unless you change the network settings.
+
+## Run checks
+
+From the repository root:
 
 ```bash
-cd <repo-root>
+cargo fmt --all --check
 cargo check --workspace
 cargo test --workspace
 ```
 
-## 8. Main Dev Flows
+For the desktop UI:
 
-- Create or restore Vaulted seed phrase.
-- Check Wallet balance, receive QR, and Send XRP on testnet.
-- Upload encrypted file.
-- Generate deterministic NFT metadata preview.
-- Locally sign XRPL NFT mint transaction.
-- Finalize mint after Oracle ledger verification.
-- Download/decrypt as owner.
-- Transfer NFT/file access to a recipient.
-- Accept the incoming recipient offer and decrypt after re-encryption.
-- Share file access with recipient identity using fingerprint confirmation and `KeyEnvelope` grants.
-- Approve device pairing / XRPL signing / file grants through signed QR payloads.
+```bash
+cd crates/desktop-client/ui
+npm run typecheck
+npm run build
+npm run lint
+```
 
-The current XRPL Grants runtime checkpoint and final checklist are described in `docs/RUNTIME_VERIFICATION.md`.
+## Demo flow
+
+1. Start Postgres, Redis, Oracle, storage node, and the desktop client.
+2. Create or restore a Vaulted seed phrase in the desktop client.
+3. Confirm the wallet address and XRPL testnet balance.
+4. Upload a file; Vaulted encrypts it locally before storage.
+5. Mint the ownership NFT with a locally signed XRPL transaction.
+6. Let the Oracle verify the ledger state and finalize the vault object.
+7. Download and decrypt the file as the owner.
+8. Share access with a recipient identity using a `KeyEnvelope` grant.
+9. Confirm the recipient can accept access and decrypt locally after re-encryption.

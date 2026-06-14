@@ -2,94 +2,124 @@
 
 ## Overview
 
-Vaulted protects files by keeping seed material, private keys, file keys, and plaintext file data on the client. Oracle provides registry, auth, manifest verification, QR coordination, grant state, and storage-token services. Storage nodes store encrypted fragments only.
+Vaulted is designed around a local-first security model. Seed material, private wallet keys, file keys, and plaintext file content stay on the client. The Oracle coordinates registry, manifest, grant, device, and ledger-verification workflows. Storage nodes store encrypted fragments only.
 
-## Environment variables
+Vaulted is currently an MVP for local development and XRPL testnet demonstrations. Production deployments need additional operational hardening and independent security review.
 
-### Oracle Server
+## Trust boundaries
+
+```text
+Client
+├─ owns seed phrase and local identity keys
+├─ owns XRPL wallet keys
+├─ creates file keys
+├─ encrypts and decrypts file content
+├─ signs manifests and approvals
+└─ signs XRPL transactions
+
+Oracle
+├─ verifies manifests and XRPL ledger state
+├─ stores vault object, grant, and device records
+├─ issues storage access tokens
+└─ cannot decrypt files
+
+Storage Node
+├─ receives encrypted fragments
+├─ returns encrypted fragments
+└─ does not receive plaintext file keys
+```
+
+The main rule is simple: plaintext file content, plaintext file keys, seed phrases, and wallet private keys should never leave the client.
+
+## Seed and key handling
+
+The Vaulted seed phrase is the user's recovery root. It derives or protects local identity, encryption, signing, and XRPL wallet material. Losing it can make encrypted files unrecoverable.
+
+Operational rules:
+
+- Do not store seed phrases, wallet private keys, file keys, recovery material, or decrypted file content in `.env`.
+- Do not log seed phrases, wallet private keys, file keys, recovery material, transaction blobs, storage tokens, or decrypted file content.
+- Use secure OS storage for local secrets in desktop builds.
+- Treat local development wallets as testnet-only unless the deployment has been reviewed for production use.
+
+## Oracle role
+
+The Oracle is a coordination and verification service. It can:
+
+- verify client-generated manifests;
+- verify XRPL ledger state for NFT ownership;
+- store vault object metadata;
+- store grant and device state;
+- issue signed storage access tokens.
+
+The Oracle should not receive plaintext file content or plaintext file keys. A database compromise should not be enough to decrypt stored files if client-side key material remains protected.
+
+Important environment variables:
 
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
 | `ENVIRONMENT` | No | `development` | Set to `production` for strict security settings |
-| `ORACLE_SIGNING_KEY` | Yes in prod | generated in dev | Ed25519 private key for JWT/storage-token signing |
-| `CORS_ORIGINS` | Yes in prod | permissive in dev | Comma-separated allowed origins |
+| `DATABASE_URL` | Yes | local dev value | PostgreSQL connection string |
+| `REDIS_URL` | No | unset | Redis connection string for optional cache/session flows |
+| `ORACLE_SIGNING_KEY` | Yes in production | generated in dev | Ed25519 key used for Oracle-signed tokens |
+| `CORS_ORIGINS` | Yes in production | permissive in dev | Comma-separated allowed origins |
 | `RATE_LIMIT_RPM` | No | `60` | Requests per minute per IP |
 | `JWT_EXPIRATION_HOURS` | No | `24` | Token lifetime in hours |
-| `XRPL_NODE_URL` | No | XRPL testnet WebSocket | XRPL node used for ledger verification/submission |
+| `XRPL_RPC_URL` | No | XRPL testnet JSON-RPC | XRPL endpoint used for ledger verification |
 
-### Storage Node
+## Storage-node role
+
+Storage nodes persist encrypted fragments and return them to authorized clients. They should not receive plaintext files, plaintext file keys, or seed material.
+
+Important environment variables:
 
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
 | `REQUIRE_AUTH` | No | `false` | Require Oracle-signed storage tokens |
-| `ORACLE_PUBLIC_KEY` | Required when auth is enabled | - | Oracle Ed25519 public key |
+| `ORACLE_PUBLIC_KEY` | Required when auth is enabled | unset | Oracle Ed25519 public key |
 | `NODE_ID` | No | `node-local-1` | Unique storage node identifier |
-| `ORACLE_URL` | No | - | Oracle URL for registration/heartbeat |
+| `ORACLE_URL` | No | unset | Oracle URL for registration and heartbeat |
+| `STORAGE_DIR` | No | local data directory | Fragment storage path |
 
-### Desktop Client
+Production storage nodes should use HTTPS, enforce size/rate limits, restrict management access, and back up encrypted fragment data.
 
-| Variable | Required | Default | Description |
-| --- | --- | --- | --- |
-| `ORACLE_URL` | No | `http://localhost:3000` | Oracle server URL |
+## XRPL signing
 
-## Authentication and trust flows
+XRPL transactions are built and signed locally by the desktop client. The Oracle can verify ledger state and coordinate finalization, but it should not custody the user's XRPL wallet keys.
 
-### Vaulted identity
+For production:
 
-```text
-Vaulted seed phrase
-├─ identity signing key
-├─ identity encryption key
-├─ device key
-└─ XRPL wallet keypair
-```
+- keep wallet keys client-side;
+- use testnet settings only for local demos;
+- confirm NFT metadata and ownership identifiers before signing;
+- treat transaction blobs and approval payloads as sensitive operational data.
 
-The seed phrase is the user recovery root. Losing it can make encrypted data unrecoverable.
+## File sharing / KeyEnvelope
 
-### QR login / pairing / approvals
-
-Vaulted QR payloads use a canonical JSON body, a protocol marker, intent-specific validation, and Vaulted identity signatures. Current intents include:
-
-- login;
-- pair device;
-- sign XRPL transaction;
-- approve file grant.
-
-### File sharing
-
-New sharing grants use recipient-bound `KeyEnvelope` objects:
+Vaulted sharing uses recipient-bound `KeyEnvelope` records:
 
 ```text
-file key → sealed to recipient identity encryption public key
-         → bound to vault object id + recipient identity id + recipient key id
+file key
+  -> sealed to recipient identity encryption public key
+  -> bound to vault object id, recipient identity id, and recipient key id
 ```
 
-Oracle stores and verifies grant state, but does not receive plaintext file keys.
-
-## Protected API requests
-
-Protected endpoints require:
-
-```http
-Authorization: Bearer <jwt_token>
-```
-
-When storage auth is enabled, storage nodes additionally require Oracle-signed operation tokens.
+The Oracle may store and verify grant state, but it should not receive the plaintext file key. Recipients decrypt the file key locally with their identity encryption key, then decrypt file content locally.
 
 ## Production checklist
 
-### Oracle
+Oracle:
 
 - [ ] Set `ENVIRONMENT=production`.
-- [ ] Generate and store `ORACLE_SIGNING_KEY` securely.
+- [ ] Generate and protect `ORACLE_SIGNING_KEY`.
 - [ ] Configure restricted `CORS_ORIGINS`.
-- [ ] Use HTTPS behind a reverse proxy.
-- [ ] Use strong PostgreSQL credentials.
-- [ ] Enable external audit logging.
+- [ ] Use HTTPS behind a trusted reverse proxy.
+- [ ] Use strong PostgreSQL credentials and encrypted backups.
 - [ ] Review rate limits for auth, QR, identity, grants, and storage-token endpoints.
-- [ ] Run dependency audits in CI.
+- [ ] Enable operational logging that avoids sensitive values.
+- [ ] Run dependency, container, and infrastructure vulnerability scans in CI.
 
-### Storage Nodes
+Storage nodes:
 
 - [ ] Set `REQUIRE_AUTH=true`.
 - [ ] Configure `ORACLE_PUBLIC_KEY`.
@@ -98,91 +128,54 @@ When storage auth is enabled, storage nodes additionally require Oracle-signed o
 - [ ] Back up encrypted fragment data.
 - [ ] Enforce upload/download size and rate limits.
 
-### Desktop Client
+Desktop client:
 
-- [ ] Distribute with the correct Oracle URL.
+- [ ] Distribute with the correct Oracle and XRPL network settings.
 - [ ] Store local secrets only in secure OS storage.
-- [ ] Disable sensitive logging around seed phrases, file keys, private keys, and plaintext metadata.
+- [ ] Disable sensitive logging around seed phrases, file keys, private keys, filenames when sensitive, and plaintext metadata.
 - [ ] Consider certificate pinning for production builds.
-
-## Cryptographic details
-
-### File encryption
-
-- File content is encrypted client-side.
-- File keys are random per file.
-- Sharing uses X25519 + HKDF-SHA256 + XChaCha20-Poly1305 `KeyEnvelope` sealing.
-
-### Identity and signing
-
-- Vaulted identity signing uses Ed25519.
-- QR payloads and manifests are signed over canonical, domain-separated bytes.
-- XRPL NFT mint transactions are built and signed locally by the client.
-
-### Storage tokens
-
-- Algorithm: Ed25519.
-- Payload includes storage key, operation, issued-at, and expiration data.
 
 ## Incident response
 
-### Oracle signing key compromise
+Oracle signing key compromise:
 
 1. Generate a new `ORACLE_SIGNING_KEY`.
-2. Restart Oracle.
+2. Restart Oracle with the new key.
 3. Re-authenticate clients.
 4. Invalidate old token families where applicable.
+5. Review audit events for suspicious grant, device, and storage-token activity.
 
-### Storage node compromise
+Storage node compromise:
 
 1. Take the node offline.
-2. Revoke node registration in Oracle.
-3. Data remains encrypted, but rotate storage credentials and inspect logs.
-4. Re-replicate fragments to healthy nodes.
+2. Revoke or disable node registration in Oracle.
+3. Rotate storage credentials and inspect logs.
+4. Re-replicate encrypted fragments to healthy nodes where needed.
 
-### Directory or recipient-key compromise
+Recipient-key compromise:
 
-1. Revoke trust for affected recipient fingerprints.
-2. Revoke active grants for affected identities.
-3. Ask recipients to rotate identity/device keys if needed.
-4. Re-share only after manually confirming the new fingerprint.
+1. Revoke active grants for affected identities.
+2. Ask affected users to rotate identity/device keys.
+3. Re-share only after manually confirming the new recipient fingerprint.
 
-### Database compromise
+Database compromise:
 
 1. Rotate Oracle signing keys and database credentials.
 2. Revoke suspicious sessions and grants.
-3. Review audit events for unauthorized grant/device changes.
-4. Plaintext files should remain protected as long as client seed material and file keys were not compromised.
+3. Review grant, device, and storage-token activity.
+4. Confirm that plaintext file content and client-side key material were not exposed.
 
-## Hardening audit commands
+## Local security checks
 
-Run the non-strict local audit before opening a release branch:
-
-```bash
-make security-audit
-```
-
-This runs:
-
-- sensitive logging scan;
-- `cargo fmt -- --check`;
-- `cargo check --workspace`;
-- `cargo test --workspace`;
-- `cargo audit` when `cargo-audit` is installed;
-- frontend install, lint, typecheck, build, and `npm audit` report.
-
-For CI, use strict mode:
+Before a release, run the checks that are available in this repository:
 
 ```bash
-make security-audit-strict
+cargo fmt --all --check
+cargo check --workspace
+cargo test --workspace
+
+cd crates/desktop-client/ui
+npm run typecheck
+npm run build
+npm run lint
 ```
-
-Strict mode fails when `cargo-audit` is missing and when `npm audit --audit-level=high` reports high-or-critical advisories.
-
-To run only the sensitive logging guard:
-
-```bash
-make sensitive-log-audit
-```
-
-The sensitive logging guard is intentionally conservative. It scans logging statements for seed phrases, private keys, file keys, decrypted/plaintext content, local paths, filenames, tokens, and similar values. False positives should be fixed by changing the log message to a count, status, or redacted identifier rather than by logging the raw value.
