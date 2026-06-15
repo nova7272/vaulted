@@ -4,8 +4,10 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
 use xrpl_vault_crypto_core::{
     add_xrpl_signing_fields, build_nftoken_accept_offer_tx, build_nftoken_burn_tx,
@@ -2769,10 +2771,13 @@ mod tests {
         build_auth_lifecycle_status, ensure_recoverable_mint_status,
         file_access_status_from_http_status, generate_create_wallet_mnemonic,
         local_identity_matches_approved, owner_download_error_for_status, parse_destination_tag,
-        parse_wallet_transaction_history, parse_xrp_amount_to_drops, set_vaulted_session,
-        validate_create_wallet_word_count, validate_spendable_balance,
+        parse_wallet_transaction_history, parse_xrp_amount_to_drops,
+        resolve_pre_submit_offer_lookup, set_vaulted_session, validate_create_wallet_word_count,
+        validate_spendable_balance, PreSubmitOfferLookupOutcome,
     };
+    use crate::error::{ClientError, Result};
     use crate::state::{AppConfig, AppState};
+    use std::time::Duration;
     use xrpl_vault_crypto_core::{SeedManager, DEFAULT_MNEMONIC_WORDS};
 
     #[test]
@@ -2895,6 +2900,50 @@ mod tests {
         );
         assert!(validate_create_wallet_word_count(None).is_ok());
         assert!(validate_create_wallet_word_count(Some(24)).is_err());
+    }
+
+    #[tokio::test]
+    async fn pre_submit_lookup_found_existing_offer() {
+        let outcome = resolve_pre_submit_offer_lookup(
+            async { Ok(Some("REUSE1234".to_string())) },
+            Duration::from_secs(1),
+        )
+        .await;
+
+        assert_eq!(
+            outcome,
+            PreSubmitOfferLookupOutcome::Found("REUSE1234".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_submit_lookup_returns_none_and_flow_continues_to_create_offer() {
+        let outcome =
+            resolve_pre_submit_offer_lookup(async { Ok(None) }, Duration::from_secs(1)).await;
+
+        assert_eq!(outcome, PreSubmitOfferLookupOutcome::None);
+    }
+
+    #[tokio::test]
+    async fn pre_submit_lookup_errors_and_flow_continues_to_create_offer() {
+        let outcome = resolve_pre_submit_offer_lookup(
+            async { Err::<Option<String>, _>(ClientError::Xrpl("lookup failed".to_string())) },
+            Duration::from_secs(1),
+        )
+        .await;
+
+        assert!(matches!(outcome, PreSubmitOfferLookupOutcome::Failed(_)));
+    }
+
+    #[tokio::test]
+    async fn pre_submit_lookup_timeout_and_flow_continues_to_create_offer() {
+        let outcome = resolve_pre_submit_offer_lookup(
+            async { std::future::pending::<Result<Option<String>>>().await },
+            Duration::from_millis(1),
+        )
+        .await;
+
+        assert_eq!(outcome, PreSubmitOfferLookupOutcome::Timeout);
     }
 
     #[test]
@@ -3882,6 +3931,76 @@ async fn create_transfer_offer_inner(
 
     let mut client = XrplClient::new(&state.config.xrpl_node_url);
     client.connect().await?;
+
+    tracing::info!(
+        command = "create_transfer_offer",
+        phase = "pre_submit_offer_lookup_started",
+        nft_token_id = %nft_token_id,
+        transfer_id = %transfer_id,
+        "Checking for an existing matching NFTokenOffer before creating a new one"
+    );
+    match resolve_pre_submit_offer_lookup(
+        client.find_matching_nftoken_offer(&account, &nft_token_id, &to_address, "0"),
+        Duration::from_secs(6),
+    )
+    .await
+    {
+        PreSubmitOfferLookupOutcome::Found(offer_index) => {
+            tracing::info!(
+                command = "create_transfer_offer",
+                phase = "pre_submit_offer_lookup_found",
+                nft_token_id = %nft_token_id,
+                transfer_id = %transfer_id,
+                offer_index = %offer_index,
+                "Reusing existing matching NFTokenOffer"
+            );
+            let status = confirm_transfer_offer_with_oracle(
+                state,
+                &transfer_id,
+                &nft_token_id,
+                &offer_index,
+            )
+            .await?;
+            return Ok(TransferOfferResult {
+                transfer_id,
+                offer_index,
+                tx_hash: String::new(),
+                engine_result: "tesSUCCESS".to_string(),
+                engine_result_message: "Existing matching NFTokenOffer reused".to_string(),
+                status,
+            });
+        },
+        PreSubmitOfferLookupOutcome::None => {
+            tracing::info!(
+                command = "create_transfer_offer",
+                phase = "pre_submit_offer_lookup_none",
+                nft_token_id = %nft_token_id,
+                transfer_id = %transfer_id,
+                "No existing matching NFTokenOffer found; creating a new offer"
+            );
+        },
+        PreSubmitOfferLookupOutcome::Failed(error) => {
+            tracing::warn!(
+                command = "create_transfer_offer",
+                phase = "pre_submit_offer_lookup_failed",
+                nft_token_id = %nft_token_id,
+                transfer_id = %transfer_id,
+                error = %error,
+                "Existing-offer lookup failed; continuing with new NFTokenCreateOffer"
+            );
+        },
+        PreSubmitOfferLookupOutcome::Timeout => {
+            tracing::warn!(
+                command = "create_transfer_offer",
+                phase = "pre_submit_offer_lookup_timeout",
+                nft_token_id = %nft_token_id,
+                transfer_id = %transfer_id,
+                timeout_ms = 6000_u64,
+                "Existing-offer lookup timed out; continuing with new NFTokenCreateOffer"
+            );
+        },
+    }
+
     let account_info = client.account_info(&account).await?;
     let fee_drops = client.fee_drops().await?;
     let last_ledger_sequence = client.ledger_current_index().await?.saturating_add(20);
@@ -3928,19 +4047,48 @@ async fn create_transfer_offer_inner(
     }
 
     let offer_index = client
-        .extract_nftoken_offer_index(&submit.tx_hash)
+        .resolve_nftoken_offer_index(&submit.tx_hash, &account, &nft_token_id, &to_address, "0")
         .await?
         .ok_or_else(|| {
             ClientError::Xrpl(
-                "Accepted NFTokenCreateOffer did not expose an offer index yet".to_string(),
+                "Offer was submitted to XRPL, but Vaulted could not resolve the offer index yet. Please refresh or retry confirmation.".to_string(),
             )
         })?;
+
+    let status =
+        confirm_transfer_offer_with_oracle(state, &transfer_id, &nft_token_id, &offer_index)
+            .await?;
+
+    Ok(TransferOfferResult {
+        transfer_id,
+        offer_index,
+        tx_hash: submit.tx_hash,
+        engine_result: submit.engine_result,
+        engine_result_message: submit.engine_result_message,
+        status,
+    })
+}
+
+async fn confirm_transfer_offer_with_oracle(
+    state: &Arc<AppState>,
+    transfer_id: &str,
+    nft_token_id: &str,
+    offer_index: &str,
+) -> Result<String> {
+    tracing::info!(
+        command = "create_transfer_offer",
+        phase = "oracle_confirm_started",
+        nft_token_id = %nft_token_id,
+        transfer_id = %transfer_id,
+        offer_index = %offer_index,
+        "Confirming locally submitted NFT transfer offer with Oracle"
+    );
 
     let oracle = state.get_oracle_client_with_timeout(120).await?;
     let confirmation = oracle
         .confirm_transfer_offer_signed(&ConfirmTransferOfferSignedRequest {
-            transfer_id: transfer_id.clone(),
-            offer_index: offer_index.clone(),
+            transfer_id: transfer_id.to_string(),
+            offer_index: offer_index.to_string(),
         })
         .await?;
     if !confirmation.success {
@@ -3951,23 +4099,38 @@ async fn create_transfer_offer_inner(
 
     tracing::info!(
         command = "create_transfer_offer",
-        phase = "oracle_confirmed",
+        phase = "oracle_confirm_completed",
         nft_token_id = %nft_token_id,
         transfer_id = %transfer_id,
         offer_index = %offer_index,
-        tx_hash = %submit.tx_hash,
         status = %confirmation.status,
         "Oracle confirmed locally submitted NFT transfer offer"
     );
 
-    Ok(TransferOfferResult {
-        transfer_id,
-        offer_index,
-        tx_hash: submit.tx_hash,
-        engine_result: submit.engine_result,
-        engine_result_message: submit.engine_result_message,
-        status: confirmation.status,
-    })
+    Ok(confirmation.status)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PreSubmitOfferLookupOutcome {
+    Found(String),
+    None,
+    Failed(String),
+    Timeout,
+}
+
+async fn resolve_pre_submit_offer_lookup<Fut>(
+    lookup: Fut,
+    timeout: Duration,
+) -> PreSubmitOfferLookupOutcome
+where
+    Fut: Future<Output = Result<Option<String>>>,
+{
+    match tokio::time::timeout(timeout, lookup).await {
+        Ok(Ok(Some(offer_index))) => PreSubmitOfferLookupOutcome::Found(offer_index),
+        Ok(Ok(None)) => PreSubmitOfferLookupOutcome::None,
+        Ok(Err(e)) => PreSubmitOfferLookupOutcome::Failed(e.to_string()),
+        Err(_) => PreSubmitOfferLookupOutcome::Timeout,
+    }
 }
 
 #[tauri::command]

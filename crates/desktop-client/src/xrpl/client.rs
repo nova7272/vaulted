@@ -94,9 +94,16 @@ impl XrplClient {
     async fn request_with_id(&self, command: &str, params: Value) -> Result<(u64, Value)> {
         let id = self.request_id.fetch_add(1, Ordering::SeqCst);
         let log_submit_transport = command == "submit";
+        let log_lookup_transport = matches!(command, "account_objects" | "nft_sell_offers" | "tx");
 
         if log_submit_transport {
             tracing::info!(request_id = id, method = "submit", phase = "started");
+        } else if log_lookup_transport {
+            tracing::debug!(
+                request_id = id,
+                method = command,
+                phase = "xrpl_request_started"
+            );
         }
 
         let sender = self.sender.as_ref().ok_or_else(|| {
@@ -106,6 +113,14 @@ impl XrplClient {
                     request_id = id,
                     method = "submit",
                     phase = "transport_failed",
+                    transport_error_kind = "not_connected",
+                    transport_error_message = message
+                );
+            } else if log_lookup_transport {
+                tracing::warn!(
+                    request_id = id,
+                    method = command,
+                    phase = "xrpl_request_failed",
                     transport_error_kind = "not_connected",
                     transport_error_message = message
                 );
@@ -146,6 +161,14 @@ impl XrplClient {
                         transport_error_kind = classify_transport_error(&message),
                         transport_error_message = %message
                     );
+                } else if log_lookup_transport {
+                    tracing::warn!(
+                        request_id = id,
+                        method = command,
+                        phase = "xrpl_request_failed",
+                        transport_error_kind = classify_transport_error(&message),
+                        transport_error_message = %message
+                    );
                 }
                 ClientError::WebSocket(e.to_string())
             })?;
@@ -163,6 +186,15 @@ impl XrplClient {
                         transport_error_message = "Request timeout",
                         timeout = true
                     );
+                } else if log_lookup_transport {
+                    tracing::warn!(
+                        request_id = id,
+                        method = command,
+                        phase = "xrpl_request_timeout",
+                        transport_error_kind = "timeout",
+                        transport_error_message = "Request timeout",
+                        timeout = true
+                    );
                 }
                 ClientError::Xrpl("Request timeout".to_string())
             })?
@@ -173,6 +205,14 @@ impl XrplClient {
                         request_id = id,
                         method = "submit",
                         phase = "transport_failed",
+                        transport_error_kind = "websocket_closed",
+                        transport_error_message = message
+                    );
+                } else if log_lookup_transport {
+                    tracing::warn!(
+                        request_id = id,
+                        method = command,
+                        phase = "xrpl_request_failed",
                         transport_error_kind = "websocket_closed",
                         transport_error_message = message
                     );
@@ -195,12 +235,33 @@ impl XrplClient {
                     status = %fields.status,
                     transport_error_message = %fields.error_message
                 );
+            } else if log_lookup_transport {
+                let fields = extract_xrpl_error_response_fields(&response);
+                tracing::warn!(
+                    request_id = id,
+                    method = command,
+                    phase = "xrpl_request_failed",
+                    transport_error_kind = "xrpl_error_response",
+                    error = %fields.error,
+                    error_code = %fields.error_code,
+                    error_message = %fields.error_message,
+                    status = %fields.status,
+                    transport_error_message = %fields.error_message
+                );
             }
             let fields = extract_xrpl_error_response_fields(&response);
             return Err(ClientError::Xrpl(format!(
                 "{}: {}",
                 fields.error, fields.error_message
             )));
+        }
+
+        if log_lookup_transport {
+            tracing::debug!(
+                request_id = id,
+                method = command,
+                phase = "xrpl_request_completed"
+            );
         }
 
         Ok((id, response))
@@ -312,6 +373,7 @@ impl XrplClient {
                         Some(NftOffer {
                             offer_index: o.get("nft_offer_index")?.as_str()?.to_string(),
                             owner: o.get("owner")?.as_str()?.to_string(),
+                            nft_token_id: Some(nft_id.to_string()),
                             amount: o.get("amount")?.as_str().unwrap_or("0").to_string(),
                             destination: o
                                 .get("destination")
@@ -323,6 +385,61 @@ impl XrplClient {
             })
             .unwrap_or_default();
         Ok(offers)
+    }
+
+    /// Gets NFT offer ledger objects owned by an account.
+    pub async fn account_nftoken_offers(&self, account: &str) -> Result<Vec<NftOffer>> {
+        let response = self
+            .request(
+                "account_objects",
+                json!({
+                    "account": account,
+                    "ledger_index": "validated"
+                }),
+            )
+            .await?;
+        let result = response
+            .get("result")
+            .ok_or_else(|| ClientError::Xrpl("No result".to_string()))?;
+
+        Ok(parse_account_nftoken_offers(result))
+    }
+
+    /// Finds an active NFT sell offer matching a transfer request.
+    pub async fn find_matching_nftoken_offer(
+        &self,
+        owner: &str,
+        nft_token_id: &str,
+        destination: &str,
+        amount: &str,
+    ) -> Result<Option<String>> {
+        let account_offers = self.account_nftoken_offers(owner).await?;
+        if let Some(offer_index) =
+            find_matching_offer_index(&account_offers, owner, nft_token_id, destination, amount)
+        {
+            tracing::info!(
+                phase = "offer_index_from_account_objects",
+                nft_token_id = %nft_token_id,
+                offer_index = %offer_index,
+                "Resolved NFTokenOffer index from account objects"
+            );
+            return Ok(Some(offer_index));
+        }
+
+        let sell_offers = self.nft_sell_offers(nft_token_id).await?;
+        if let Some(offer_index) =
+            find_matching_offer_index(&sell_offers, owner, nft_token_id, destination, amount)
+        {
+            tracing::info!(
+                phase = "offer_index_from_account_objects",
+                nft_token_id = %nft_token_id,
+                offer_index = %offer_index,
+                "Resolved NFTokenOffer index from NFT sell offers"
+            );
+            return Ok(Some(offer_index));
+        }
+
+        Ok(None)
     }
 
     /// Gets transaction information
@@ -509,12 +626,33 @@ impl XrplClient {
                 .get("result")
                 .ok_or_else(|| ClientError::Xrpl("No result".to_string()))?;
 
+            if !result
+                .get("validated")
+                .and_then(|validated| validated.as_bool())
+                .unwrap_or(false)
+            {
+                tracing::debug!(
+                    tx_hash = %tx_hash,
+                    phase = "tx_validation_pending",
+                    "XRPL transaction was not validated yet"
+                );
+                if attempt < MAX_ATTEMPTS {
+                    tokio::time::sleep(POLL_DELAY).await;
+                }
+                continue;
+            }
+
+            tracing::info!(
+                tx_hash = %tx_hash,
+                phase = "tx_validated",
+                "XRPL transaction validated"
+            );
+
             if let Some(offer_index) = extract_nftoken_offer_index_from_tx_result(result) {
                 tracing::info!(
                     offer_index = %offer_index,
                     tx_hash = %tx_hash,
-                    request_phase = "extract_nftoken_offer_index",
-                    status = "found",
+                    phase = "offer_index_from_metadata",
                     "Extracted NFTokenOffer index from XRPL transaction metadata"
                 );
                 return Ok(Some(offer_index));
@@ -537,6 +675,96 @@ impl XrplClient {
             request_phase = "extract_nftoken_offer_index",
             status = "missing_offer_index",
             "NFTokenOffer index was unavailable after validated transaction polling"
+        );
+        Ok(None)
+    }
+
+    /// Resolves the NFTokenOffer index by validated transaction metadata first, then active offers.
+    pub async fn resolve_nftoken_offer_index(
+        &self,
+        tx_hash: &str,
+        owner: &str,
+        nft_token_id: &str,
+        destination: &str,
+        amount: &str,
+    ) -> Result<Option<String>> {
+        const MAX_ATTEMPTS: usize = 20;
+        const POLL_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            match self.tx(tx_hash).await {
+                Ok(response) => {
+                    let result = response
+                        .get("result")
+                        .ok_or_else(|| ClientError::Xrpl("No result".to_string()))?;
+
+                    if result
+                        .get("validated")
+                        .and_then(|validated| validated.as_bool())
+                        .unwrap_or(false)
+                    {
+                        tracing::info!(
+                            tx_hash = %tx_hash,
+                            phase = "tx_validated",
+                            "XRPL transaction validated"
+                        );
+
+                        if let Some(offer_index) =
+                            extract_nftoken_offer_index_from_tx_result(result)
+                        {
+                            tracing::info!(
+                                offer_index = %offer_index,
+                                tx_hash = %tx_hash,
+                                phase = "offer_index_from_metadata",
+                                "Extracted NFTokenOffer index from XRPL transaction metadata"
+                            );
+                            return Ok(Some(offer_index));
+                        }
+                    } else {
+                        tracing::debug!(
+                            tx_hash = %tx_hash,
+                            phase = "tx_validation_pending",
+                            "XRPL transaction was not validated yet"
+                        );
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(
+                        tx_hash = %tx_hash,
+                        request_phase = "extract_nftoken_offer_index",
+                        status = "tx_lookup_failed",
+                        error = %e,
+                        "Failed to load XRPL transaction while extracting NFTokenOffer index"
+                    );
+                },
+            }
+
+            match self
+                .find_matching_nftoken_offer(owner, nft_token_id, destination, amount)
+                .await
+            {
+                Ok(Some(offer_index)) => return Ok(Some(offer_index)),
+                Ok(None) => {},
+                Err(e) => {
+                    tracing::warn!(
+                        tx_hash = %tx_hash,
+                        phase = "offer_index_account_objects_lookup_failed",
+                        error = %e,
+                        "Could not resolve NFTokenOffer index from account objects"
+                    );
+                },
+            }
+
+            if attempt < MAX_ATTEMPTS {
+                tokio::time::sleep(POLL_DELAY).await;
+            }
+        }
+
+        tracing::warn!(
+            tx_hash = %tx_hash,
+            phase = "offer_index_resolution_timeout",
+            nft_token_id = %nft_token_id,
+            "Timed out resolving NFTokenOffer index"
         );
         Ok(None)
     }
@@ -590,6 +818,7 @@ pub struct NftToken {
 pub struct NftOffer {
     pub offer_index: String,
     pub owner: String,
+    pub nft_token_id: Option<String>,
     pub amount: String,
     pub destination: Option<String>,
 }
@@ -777,6 +1006,70 @@ fn extract_nftoken_offer_index_from_tx_result(result: &Value) -> Option<String> 
     })
 }
 
+fn parse_account_nftoken_offers(result: &Value) -> Vec<NftOffer> {
+    result
+        .get("account_objects")
+        .and_then(|v| v.as_array())
+        .map(|objects| {
+            objects
+                .iter()
+                .filter_map(|object| {
+                    let ledger_entry_type = object.get("LedgerEntryType")?.as_str()?;
+                    if ledger_entry_type != "NFTokenOffer" {
+                        return None;
+                    }
+
+                    Some(NftOffer {
+                        offer_index: object
+                            .get("index")
+                            .or_else(|| object.get("ledger_index"))
+                            .and_then(|v| v.as_str())?
+                            .to_string(),
+                        owner: object.get("Owner")?.as_str()?.to_string(),
+                        nft_token_id: object
+                            .get("NFTokenID")
+                            .and_then(|v| v.as_str())
+                            .map(ToOwned::to_owned),
+                        amount: object
+                            .get("Amount")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("0")
+                            .to_string(),
+                        destination: object
+                            .get("Destination")
+                            .and_then(|v| v.as_str())
+                            .map(ToOwned::to_owned),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn find_matching_offer_index(
+    offers: &[NftOffer],
+    owner: &str,
+    nft_token_id: &str,
+    destination: &str,
+    amount: &str,
+) -> Option<String> {
+    offers
+        .iter()
+        .find(|offer| {
+            offer.owner.eq_ignore_ascii_case(owner)
+                && offer.amount == amount
+                && offer
+                    .destination
+                    .as_deref()
+                    .is_some_and(|value| value.eq_ignore_ascii_case(destination))
+                && offer
+                    .nft_token_id
+                    .as_deref()
+                    .is_none_or(|value| value.eq_ignore_ascii_case(nft_token_id))
+        })
+        .map(|offer| offer.offer_index.clone())
+}
+
 fn minted_nftoken_id_from_created_node(node: &Value) -> Option<String> {
     let created = node.get("CreatedNode")?;
     let ledger_entry_type = created.get("LedgerEntryType")?.as_str()?;
@@ -906,6 +1199,102 @@ mod tests {
         assert_eq!(
             extract_minted_nftoken_id_from_tx_result(&result),
             Some("00080000UPPER".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_nftoken_offer_index_from_metadata() {
+        let result = json!({
+            "validated": true,
+            "meta": {
+                "AffectedNodes": [{
+                    "CreatedNode": {
+                        "LedgerEntryType": "NFTokenOffer",
+                        "LedgerIndex": "21DE5973654BA063B81A3F63FEF66478D81762AA1FF83E66A40027F740AB1708"
+                    }
+                }]
+            }
+        });
+
+        assert_eq!(
+            extract_nftoken_offer_index_from_tx_result(&result),
+            Some("21DE5973654BA063B81A3F63FEF66478D81762AA1FF83E66A40027F740AB1708".to_string())
+        );
+    }
+
+    #[test]
+    fn test_metadata_missing_but_account_objects_finds_offer() {
+        let metadata_result = json!({
+            "validated": true,
+            "meta": {
+                "AffectedNodes": []
+            }
+        });
+        let account_objects = json!({
+            "account_objects": [{
+                "LedgerEntryType": "NFTokenOffer",
+                "index": "ABCDEF1234",
+                "Owner": "rSender",
+                "NFTokenID": "00080000TOKEN",
+                "Destination": "rRecipient",
+                "Amount": "0"
+            }]
+        });
+
+        assert_eq!(
+            extract_nftoken_offer_index_from_tx_result(&metadata_result),
+            None
+        );
+        let offers = parse_account_nftoken_offers(&account_objects);
+        assert_eq!(
+            find_matching_offer_index(&offers, "rSender", "00080000TOKEN", "rRecipient", "0"),
+            Some("ABCDEF1234".to_string())
+        );
+    }
+
+    #[test]
+    fn test_offer_index_resolution_times_out_without_match() {
+        let metadata_result = json!({
+            "validated": true,
+            "meta": {
+                "AffectedNodes": []
+            }
+        });
+        let account_objects = json!({
+            "account_objects": [{
+                "LedgerEntryType": "NFTokenOffer",
+                "index": "ABCDEF1234",
+                "Owner": "rSender",
+                "NFTokenID": "00080000OTHER",
+                "Destination": "rRecipient",
+                "Amount": "0"
+            }]
+        });
+
+        let offers = parse_account_nftoken_offers(&account_objects);
+        assert_eq!(
+            extract_nftoken_offer_index_from_tx_result(&metadata_result),
+            None
+        );
+        assert_eq!(
+            find_matching_offer_index(&offers, "rSender", "00080000TOKEN", "rRecipient", "0"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_retry_reuses_existing_matching_offer() {
+        let offers = vec![NftOffer {
+            offer_index: "REUSE1234".to_string(),
+            owner: "rSender".to_string(),
+            nft_token_id: Some("00080000TOKEN".to_string()),
+            amount: "0".to_string(),
+            destination: Some("rRecipient".to_string()),
+        }];
+
+        assert_eq!(
+            find_matching_offer_index(&offers, "rSender", "00080000TOKEN", "rRecipient", "0"),
+            Some("REUSE1234".to_string())
         );
     }
 
