@@ -10,6 +10,7 @@ use uuid::Uuid;
 use xrpl_vault_crypto_core::VaultedManifest;
 
 use crate::{
+    auth::AuthenticatedUser,
     error::{ApiError, Result},
     models::{FileAccessResponse, FileFragmentDto, FileManifestDto, FragmentDownloadInfo},
     services::AppState,
@@ -59,25 +60,25 @@ pub struct CreateGrantRequest {
 /// Incoming grants query.
 #[derive(Debug, Deserialize)]
 pub struct IncomingGrantsQuery {
-    pub identity_id: String,
+    pub identity_id: Option<String>,
 }
 
 /// Grant-scoped file access query.
 #[derive(Debug, Deserialize)]
 pub struct GrantAccessQuery {
-    pub identity_id: String,
+    pub identity_id: Option<String>,
 }
 
 /// Outgoing grants query.
 #[derive(Debug, Deserialize)]
 pub struct OutgoingGrantsQuery {
-    pub owner_identity_id: String,
+    pub owner_identity_id: Option<String>,
 }
 
 /// Revoke grant request.
 #[derive(Debug, Deserialize)]
 pub struct RevokeGrantRequest {
-    pub owner_identity_id: String,
+    pub owner_identity_id: Option<String>,
 }
 
 /// Grant response.
@@ -97,9 +98,18 @@ pub struct GrantResponse {
 
 /// Registers a vault object manifest pointer after optional signature/hash verification.
 pub async fn register_vault_object(
+    auth: AuthenticatedUser,
     State(state): State<AppState>,
     Json(req): Json<RegisterVaultObjectRequest>,
 ) -> Result<Json<VaultObjectResponse>> {
+    let caller_identity_id = authenticated_identity_for_request(
+        &state,
+        &auth,
+        Some(req.owner_identity_id.as_str()),
+        "owner_identity_id",
+    )
+    .await?;
+
     if let Some(manifest) = &req.manifest {
         manifest.verify_signature()?;
         let computed = manifest.manifest_hash()?;
@@ -129,7 +139,7 @@ pub async fn register_vault_object(
              updated_at = now()"#,
     )
     .bind(&req.id)
-    .bind(&req.owner_identity_id)
+    .bind(&caller_identity_id)
     .bind(&req.manifest_uri)
     .bind(&req.manifest_hash)
     .bind(&req.nft_chain)
@@ -140,7 +150,7 @@ pub async fn register_vault_object(
 
     Ok(Json(VaultObjectResponse {
         id: req.id,
-        owner_identity_id: req.owner_identity_id,
+        owner_identity_id: caller_identity_id,
         manifest_uri: req.manifest_uri,
         manifest_hash: req.manifest_hash,
         nft_chain: req.nft_chain,
@@ -151,9 +161,12 @@ pub async fn register_vault_object(
 
 /// Reads the manifest pointer for a vault object.
 pub async fn get_vault_object(
+    auth: AuthenticatedUser,
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<VaultObjectResponse>> {
+    let caller_identity_id =
+        authenticated_identity_for_request(&state, &auth, None, "identity_id").await?;
     let row = sqlx::query(
         "SELECT id, owner_identity_id, manifest_uri, manifest_hash, nft_chain, nft_token_id, status FROM vault_objects WHERE id = $1",
     )
@@ -162,9 +175,12 @@ pub async fn get_vault_object(
     .await?
     .ok_or_else(|| ApiError::NotFound(format!("vault object not found: {id}")))?;
 
+    let owner_identity_id: String = row.try_get("owner_identity_id")?;
+    authorize_vault_object_access(&state, &id, &owner_identity_id, &caller_identity_id).await?;
+
     Ok(Json(VaultObjectResponse {
         id: row.try_get("id")?,
-        owner_identity_id: row.try_get("owner_identity_id")?,
+        owner_identity_id,
         manifest_uri: row.try_get("manifest_uri")?,
         manifest_hash: row.try_get("manifest_hash")?,
         nft_chain: row.try_get("nft_chain")?,
@@ -175,9 +191,12 @@ pub async fn get_vault_object(
 
 /// Reads the manifest pointer for a vault object by linked NFT token id.
 pub async fn get_vault_object_by_nft(
+    auth: AuthenticatedUser,
     State(state): State<AppState>,
     Path(nft_token_id): Path<String>,
 ) -> Result<Json<VaultObjectResponse>> {
+    let caller_identity_id =
+        authenticated_identity_for_request(&state, &auth, None, "identity_id").await?;
     let row = sqlx::query(
         "SELECT id, owner_identity_id, manifest_uri, manifest_hash, nft_chain, nft_token_id, status FROM vault_objects WHERE nft_token_id = $1 AND status = 'active' ORDER BY updated_at DESC LIMIT 1",
     )
@@ -186,9 +205,13 @@ pub async fn get_vault_object_by_nft(
     .await?
     .ok_or_else(|| ApiError::NotFound(format!("vault object not found for nft: {nft_token_id}")))?;
 
+    let id: String = row.try_get("id")?;
+    let owner_identity_id: String = row.try_get("owner_identity_id")?;
+    authorize_vault_object_access(&state, &id, &owner_identity_id, &caller_identity_id).await?;
+
     Ok(Json(VaultObjectResponse {
-        id: row.try_get("id")?,
-        owner_identity_id: row.try_get("owner_identity_id")?,
+        id,
+        owner_identity_id,
         manifest_uri: row.try_get("manifest_uri")?,
         manifest_hash: row.try_get("manifest_hash")?,
         nft_chain: row.try_get("nft_chain")?,
@@ -199,9 +222,14 @@ pub async fn get_vault_object_by_nft(
 
 /// Creates a signed read grant. Owner signature is stored and must be verified by clients.
 pub async fn create_grant(
+    auth: AuthenticatedUser,
     State(state): State<AppState>,
     Json(req): Json<CreateGrantRequest>,
 ) -> Result<Json<GrantResponse>> {
+    let caller_identity_id =
+        authenticated_identity_for_request(&state, &auth, None, "identity_id").await?;
+    require_vault_object_owner(&state, &req.vault_object_id, &caller_identity_id).await?;
+
     let id = req.grant_id.unwrap_or_else(Uuid::new_v4);
     let permissions = serde_json::to_value(&req.permissions)
         .map_err(|e| ApiError::BadRequest(format!("invalid permissions: {e}")))?;
@@ -258,9 +286,13 @@ pub async fn create_grant(
 
 /// Lists incoming active grants for a recipient identity.
 pub async fn incoming_grants(
+    auth: AuthenticatedUser,
     State(state): State<AppState>,
     Query(q): Query<IncomingGrantsQuery>,
 ) -> Result<Json<Vec<GrantResponse>>> {
+    let caller_identity_id =
+        authenticated_identity_for_request(&state, &auth, q.identity_id.as_deref(), "identity_id")
+            .await?;
     let rows = sqlx::query(
         r#"SELECT id, vault_object_id, recipient_identity_id, permissions, expires_at, encrypted_file_key,
                   COALESCE(key_envelope, jsonb_build_object(
@@ -277,7 +309,7 @@ pub async fn incoming_grants(
              AND (expires_at IS NULL OR expires_at > now())
            ORDER BY created_at DESC"#,
     )
-    .bind(&q.identity_id)
+    .bind(&caller_identity_id)
     .fetch_all(&state.db)
     .await?;
 
@@ -303,9 +335,17 @@ pub async fn incoming_grants(
 
 /// Lists active outgoing grants owned by an identity.
 pub async fn outgoing_grants(
+    auth: AuthenticatedUser,
     State(state): State<AppState>,
     Query(q): Query<OutgoingGrantsQuery>,
 ) -> Result<Json<Vec<GrantResponse>>> {
+    let caller_identity_id = authenticated_identity_for_request(
+        &state,
+        &auth,
+        q.owner_identity_id.as_deref(),
+        "owner_identity_id",
+    )
+    .await?;
     let rows = sqlx::query(
         r#"SELECT g.id, g.vault_object_id, g.recipient_identity_id, g.permissions, g.expires_at, g.encrypted_file_key,
                   COALESCE(g.key_envelope, jsonb_build_object(
@@ -323,7 +363,7 @@ pub async fn outgoing_grants(
              AND (g.expires_at IS NULL OR g.expires_at > now())
            ORDER BY g.created_at DESC"#,
     )
-    .bind(&q.owner_identity_id)
+    .bind(&caller_identity_id)
     .fetch_all(&state.db)
     .await?;
 
@@ -349,10 +389,18 @@ pub async fn outgoing_grants(
 
 /// Revokes an active grant. Revocation is enforced by incoming list/access endpoints.
 pub async fn revoke_grant(
+    auth: AuthenticatedUser,
     State(state): State<AppState>,
     Path(grant_id): Path<Uuid>,
     Json(req): Json<RevokeGrantRequest>,
 ) -> Result<Json<GrantResponse>> {
+    let caller_identity_id = authenticated_identity_for_request(
+        &state,
+        &auth,
+        req.owner_identity_id.as_deref(),
+        "owner_identity_id",
+    )
+    .await?;
     let row = sqlx::query(
         r#"UPDATE grants g
            SET status = 'revoked'
@@ -373,7 +421,7 @@ pub async fn revoke_grant(
                      g.owner_signature, g.status"#,
     )
     .bind(grant_id)
-    .bind(&req.owner_identity_id)
+    .bind(&caller_identity_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| ApiError::NotFound(format!("active grant not found for owner: {grant_id}")))?;
@@ -397,7 +445,7 @@ pub async fn revoke_grant(
             None,
             Some(serde_json::json!({
                 "grant_id": grant_id,
-                "owner_identity_id": req.owner_identity_id,
+                "owner_identity_id": caller_identity_id,
                 "vault_object_id": grant.vault_object_id,
                 "recipient_identity_id": grant.recipient_identity_id,
             })),
@@ -412,10 +460,14 @@ pub async fn revoke_grant(
 /// This intentionally does not return the owner's PRE-wrapped file key. The recipient
 /// must unwrap the grant's KeyEnvelope locally with their Vaulted identity private key.
 pub async fn grant_file_access(
+    auth: AuthenticatedUser,
     State(state): State<AppState>,
     Path(grant_id): Path<Uuid>,
     Query(q): Query<GrantAccessQuery>,
 ) -> Result<Json<FileAccessResponse>> {
+    let caller_identity_id =
+        authenticated_identity_for_request(&state, &auth, q.identity_id.as_deref(), "identity_id")
+            .await?;
     let row = sqlx::query(
         r#"SELECT g.recipient_identity_id,
                   g.encrypted_file_key,
@@ -443,7 +495,7 @@ pub async fn grant_file_access(
     .ok_or_else(|| ApiError::NotFound(format!("active grant not found: {grant_id}")))?;
 
     let recipient_identity_id: String = row.try_get("recipient_identity_id")?;
-    if recipient_identity_id != q.identity_id {
+    if recipient_identity_id != caller_identity_id {
         return Err(ApiError::Forbidden(
             "grant recipient identity mismatch".into(),
         ));
@@ -539,6 +591,145 @@ pub async fn grant_file_access(
         pre_key_owner: None,
         onchain_owner: None,
     }))
+}
+
+async fn authenticated_identity_for_request(
+    state: &AppState,
+    auth: &AuthenticatedUser,
+    requested_identity_id: Option<&str>,
+    field_name: &str,
+) -> Result<String> {
+    let requested = requested_identity_id
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+
+    if let Some(identity_id) = requested {
+        if identity_id == auth.wallet_address {
+            return Ok(identity_id.to_string());
+        }
+
+        if is_canonical_vaulted_identity_id(&auth.wallet_address) {
+            return Err(ApiError::Forbidden(format!(
+                "{field_name} does not match authenticated identity"
+            )));
+        }
+
+        let linked = sqlx::query_scalar::<_, bool>(
+            r#"SELECT EXISTS(
+                   SELECT 1
+                   FROM linked_wallets lw
+                   JOIN vaulted_identities vi ON vi.id = lw.identity_id
+                   WHERE lw.identity_id = $1
+                     AND lw.chain = 'xrpl'
+                     AND lw.address = $2
+                     AND lw.revoked_at IS NULL
+                     AND vi.status = 'active'
+               )"#,
+        )
+        .bind(identity_id)
+        .bind(&auth.wallet_address)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e| ApiError::Database(format!("Failed to verify linked identity: {e}")))?;
+
+        if linked {
+            return Ok(identity_id.to_string());
+        }
+
+        return Err(ApiError::Forbidden(format!(
+            "{field_name} does not match authenticated identity"
+        )));
+    }
+
+    if is_canonical_vaulted_identity_id(&auth.wallet_address) {
+        return Ok(auth.wallet_address.clone());
+    }
+
+    let rows = sqlx::query_scalar::<_, String>(
+        r#"SELECT vi.id
+           FROM linked_wallets lw
+           JOIN vaulted_identities vi ON vi.id = lw.identity_id
+           WHERE lw.chain = 'xrpl'
+             AND lw.address = $1
+             AND lw.revoked_at IS NULL
+             AND vi.status = 'active'
+           ORDER BY lw.created_at DESC
+           LIMIT 2"#,
+    )
+    .bind(&auth.wallet_address)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| ApiError::Database(format!("Failed to resolve authenticated identity: {e}")))?;
+
+    match rows.as_slice() {
+        [identity_id] => Ok(identity_id.clone()),
+        [] => Err(ApiError::Forbidden(
+            "authenticated subject is not linked to a Vaulted identity".into(),
+        )),
+        _ => Err(ApiError::Forbidden(
+            "authenticated subject is linked to multiple Vaulted identities".into(),
+        )),
+    }
+}
+
+async fn require_vault_object_owner(
+    state: &AppState,
+    vault_object_id: &str,
+    caller_identity_id: &str,
+) -> Result<()> {
+    let owner_identity_id = sqlx::query_scalar::<_, String>(
+        "SELECT owner_identity_id FROM vault_objects WHERE id = $1 AND status = 'active'",
+    )
+    .bind(vault_object_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| ApiError::NotFound(format!("vault object not found: {vault_object_id}")))?;
+
+    if owner_identity_id != caller_identity_id {
+        return Err(ApiError::Forbidden(
+            "vault object owner identity mismatch".into(),
+        ));
+    }
+
+    Ok(())
+}
+
+async fn authorize_vault_object_access(
+    state: &AppState,
+    vault_object_id: &str,
+    owner_identity_id: &str,
+    caller_identity_id: &str,
+) -> Result<()> {
+    if owner_identity_id == caller_identity_id {
+        return Ok(());
+    }
+
+    let has_active_grant = sqlx::query_scalar::<_, bool>(
+        r#"SELECT EXISTS(
+               SELECT 1
+               FROM grants
+               WHERE vault_object_id = $1
+                 AND recipient_identity_id = $2
+                 AND status = 'active'
+                 AND (expires_at IS NULL OR expires_at > now())
+           )"#,
+    )
+    .bind(vault_object_id)
+    .bind(caller_identity_id)
+    .fetch_one(&state.db)
+    .await?;
+
+    if has_active_grant {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden(
+            "authenticated identity cannot access vault object".into(),
+        ))
+    }
+}
+
+fn is_canonical_vaulted_identity_id(value: &str) -> bool {
+    value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 fn normalize_grant_key_envelope(

@@ -17,6 +17,7 @@ use uuid::Uuid;
 use xrpl_vault_crypto_core::encryption_public_key_fingerprint_hex;
 
 use crate::{
+    auth::AuthenticatedUser,
     auth::{self, Claims},
     error::{ApiError, Result},
     services::AppState,
@@ -64,7 +65,7 @@ pub struct PublicIdentityResponse {
 /// Request to persist a TOFU/manual trust decision for a recipient encryption key.
 #[derive(Debug, Deserialize)]
 pub struct TrustRecipientKeyRequest {
-    pub owner_identity_id: String,
+    pub owner_identity_id: Option<String>,
     pub recipient_identity_id: String,
     pub recipient_encryption_public_key: String,
     pub recipient_encryption_public_key_fingerprint: String,
@@ -75,7 +76,7 @@ pub struct TrustRecipientKeyRequest {
 /// Query for a recipient key trust record.
 #[derive(Debug, Deserialize)]
 pub struct RecipientKeyTrustQuery {
-    pub owner_identity_id: String,
+    pub owner_identity_id: Option<String>,
     pub recipient_identity_id: String,
     pub fingerprint: Option<String>,
 }
@@ -83,7 +84,7 @@ pub struct RecipientKeyTrustQuery {
 /// Request to revoke a TOFU/manual trust decision for a recipient encryption key.
 #[derive(Debug, Deserialize)]
 pub struct RevokeRecipientKeyTrustRequest {
-    pub owner_identity_id: String,
+    pub owner_identity_id: Option<String>,
     pub recipient_identity_id: String,
     /// If omitted, revokes trust for the recipient identity's current encryption key.
     /// Supplying a fingerprint allows old trusted keys to be revoked after rotation.
@@ -93,7 +94,7 @@ pub struct RevokeRecipientKeyTrustRequest {
 /// Query for registered devices belonging to a Vaulted identity.
 #[derive(Debug, Deserialize)]
 pub struct IdentityDevicesQuery {
-    pub identity_id: String,
+    pub identity_id: Option<String>,
     /// Include revoked devices for audit/history views. Defaults to false.
     pub include_revoked: Option<bool>,
 }
@@ -101,7 +102,7 @@ pub struct IdentityDevicesQuery {
 /// Request to revoke/deactivate a registered device.
 #[derive(Debug, Deserialize)]
 pub struct RevokeIdentityDeviceRequest {
-    pub identity_id: String,
+    pub identity_id: Option<String>,
 }
 
 /// Registered device response. Contains public key material only.
@@ -276,9 +277,17 @@ pub async fn get_identity(
 
 /// Persists a TOFU/manual trust decision for a recipient encryption key.
 pub async fn trust_recipient_key(
+    auth: AuthenticatedUser,
     State(state): State<AppState>,
     Json(req): Json<TrustRecipientKeyRequest>,
 ) -> Result<Json<RecipientKeyTrustResponse>> {
+    let owner_identity_id = authenticated_identity_for_request(
+        &state,
+        &auth,
+        req.owner_identity_id.as_deref(),
+        "owner_identity_id",
+    )
+    .await?;
     validate_hex_key(
         &req.recipient_encryption_public_key,
         32,
@@ -329,7 +338,7 @@ pub async fn trust_recipient_key(
                      recipient_encryption_public_key_fingerprint, trust_level, trust_source, trusted_at, revoked_at"#,
     )
     .bind(Uuid::new_v4())
-    .bind(&req.owner_identity_id)
+    .bind(&owner_identity_id)
     .bind(&req.recipient_identity_id)
     .bind(&req.recipient_encryption_public_key)
     .bind(&req.recipient_encryption_public_key_fingerprint)
@@ -351,9 +360,17 @@ pub async fn trust_recipient_key(
 
 /// Returns the current trust state for a recipient encryption key.
 pub async fn recipient_key_trust_status(
+    auth: AuthenticatedUser,
     State(state): State<AppState>,
     Query(q): Query<RecipientKeyTrustQuery>,
 ) -> Result<Json<RecipientKeyTrustResponse>> {
+    let owner_identity_id = authenticated_identity_for_request(
+        &state,
+        &auth,
+        q.owner_identity_id.as_deref(),
+        "owner_identity_id",
+    )
+    .await?;
     let recipient = sqlx::query(
         r#"SELECT encryption_public_key FROM vaulted_identities WHERE id = $1 AND status = 'active'"#,
     )
@@ -378,7 +395,7 @@ pub async fn recipient_key_trust_status(
              AND recipient_identity_id = $2
              AND recipient_encryption_public_key_fingerprint = $3"#,
     )
-    .bind(&q.owner_identity_id)
+    .bind(&owner_identity_id)
     .bind(&q.recipient_identity_id)
     .bind(&fingerprint)
     .fetch_optional(&state.db)
@@ -390,7 +407,7 @@ pub async fn recipient_key_trust_status(
         let is_trusted = revoked_at.is_none();
         let different = load_latest_trusted_different_key(
             &state,
-            &q.owner_identity_id,
+            &owner_identity_id,
             &q.recipient_identity_id,
             &active_fingerprint,
         )
@@ -407,14 +424,14 @@ pub async fn recipient_key_trust_status(
 
     let different = load_latest_trusted_different_key(
         &state,
-        &q.owner_identity_id,
+        &owner_identity_id,
         &q.recipient_identity_id,
         &active_fingerprint,
     )
     .await?;
 
     Ok(Json(RecipientKeyTrustResponse {
-        owner_identity_id: q.owner_identity_id,
+        owner_identity_id,
         recipient_identity_id: q.recipient_identity_id,
         recipient_encryption_public_key: recipient_key,
         recipient_encryption_public_key_fingerprint: fingerprint,
@@ -436,9 +453,17 @@ pub async fn recipient_key_trust_status(
 
 /// Revokes a stored TOFU/manual trust decision for a recipient encryption key.
 pub async fn revoke_recipient_key_trust(
+    auth: AuthenticatedUser,
     State(state): State<AppState>,
     Json(req): Json<RevokeRecipientKeyTrustRequest>,
 ) -> Result<Json<RecipientKeyTrustResponse>> {
+    let owner_identity_id = authenticated_identity_for_request(
+        &state,
+        &auth,
+        req.owner_identity_id.as_deref(),
+        "owner_identity_id",
+    )
+    .await?;
     let recipient = sqlx::query(
         r#"SELECT encryption_public_key FROM vaulted_identities WHERE id = $1 AND status = 'active'"#,
     )
@@ -463,7 +488,7 @@ pub async fn revoke_recipient_key_trust(
            RETURNING owner_identity_id, recipient_identity_id, recipient_encryption_public_key,
                      recipient_encryption_public_key_fingerprint, trust_level, trust_source, trusted_at, revoked_at"#,
     )
-    .bind(&req.owner_identity_id)
+    .bind(&owner_identity_id)
     .bind(&req.recipient_identity_id)
     .bind(&fingerprint)
     .fetch_optional(&state.db)
@@ -486,7 +511,7 @@ pub async fn revoke_recipient_key_trust(
     let active_fingerprint = encryption_public_key_fingerprint_hex(&current_recipient_key)
         .map_err(|e| ApiError::Database(format!("Malformed identity encryption key: {e}")))?;
     Ok(Json(RecipientKeyTrustResponse {
-        owner_identity_id: req.owner_identity_id,
+        owner_identity_id,
         recipient_identity_id: req.recipient_identity_id,
         recipient_encryption_public_key: current_recipient_key,
         recipient_encryption_public_key_fingerprint: fingerprint,
@@ -566,9 +591,13 @@ async fn load_latest_trusted_different_key(
 
 /// Lists registered devices for a Vaulted identity.
 pub async fn list_identity_devices(
+    auth: AuthenticatedUser,
     State(state): State<AppState>,
     Query(q): Query<IdentityDevicesQuery>,
 ) -> Result<Json<Vec<IdentityDeviceResponse>>> {
+    let identity_id =
+        authenticated_identity_for_request(&state, &auth, q.identity_id.as_deref(), "identity_id")
+            .await?;
     let include_revoked = q.include_revoked.unwrap_or(false);
     let rows = if include_revoked {
         sqlx::query(
@@ -577,7 +606,7 @@ pub async fn list_identity_devices(
                WHERE identity_id = $1
                ORDER BY revoked_at IS NULL DESC, created_at DESC"#,
         )
-        .bind(&q.identity_id)
+        .bind(&identity_id)
         .fetch_all(&state.db)
         .await
     } else {
@@ -587,7 +616,7 @@ pub async fn list_identity_devices(
                WHERE identity_id = $1 AND revoked_at IS NULL
                ORDER BY created_at DESC"#,
         )
-        .bind(&q.identity_id)
+        .bind(&identity_id)
         .fetch_all(&state.db)
         .await
     }
@@ -604,10 +633,18 @@ pub async fn list_identity_devices(
 /// This foundation endpoint blocks future device-list UX from treating the device as active.
 /// Existing token-family revocation can be connected later once per-device token ids are stored.
 pub async fn revoke_identity_device(
+    auth: AuthenticatedUser,
     State(state): State<AppState>,
     Path(device_id): Path<String>,
     Json(req): Json<RevokeIdentityDeviceRequest>,
 ) -> Result<Json<IdentityDeviceResponse>> {
+    let identity_id = authenticated_identity_for_request(
+        &state,
+        &auth,
+        req.identity_id.as_deref(),
+        "identity_id",
+    )
+    .await?;
     let device_uuid = Uuid::parse_str(&device_id)
         .map_err(|_| ApiError::BadRequest("invalid device id".into()))?;
 
@@ -618,7 +655,7 @@ pub async fn revoke_identity_device(
            RETURNING id, identity_id, device_public_key, device_name, created_at, revoked_at"#,
     )
     .bind(device_uuid)
-    .bind(&req.identity_id)
+    .bind(&identity_id)
     .fetch_optional(&state.db)
     .await
     .map_err(|e| ApiError::Database(format!("Failed to revoke identity device: {e}")))?
@@ -656,6 +693,89 @@ fn device_public_key_fingerprint_hex(device_public_key: &str) -> String {
     hasher.update(b"vaulted-device-public-key-fingerprint-v1");
     hasher.update(device_public_key.as_bytes());
     hex::encode(hasher.finalize())
+}
+
+async fn authenticated_identity_for_request(
+    state: &AppState,
+    auth: &AuthenticatedUser,
+    requested_identity_id: Option<&str>,
+    field_name: &str,
+) -> Result<String> {
+    let requested = requested_identity_id
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+
+    if let Some(identity_id) = requested {
+        if identity_id == auth.wallet_address {
+            return Ok(identity_id.to_string());
+        }
+
+        if is_canonical_vaulted_identity_id(&auth.wallet_address) {
+            return Err(ApiError::Forbidden(format!(
+                "{field_name} does not match authenticated identity"
+            )));
+        }
+
+        let linked = sqlx::query_scalar::<_, bool>(
+            r#"SELECT EXISTS(
+                   SELECT 1
+                   FROM linked_wallets lw
+                   JOIN vaulted_identities vi ON vi.id = lw.identity_id
+                   WHERE lw.identity_id = $1
+                     AND lw.chain = 'xrpl'
+                     AND lw.address = $2
+                     AND lw.revoked_at IS NULL
+                     AND vi.status = 'active'
+               )"#,
+        )
+        .bind(identity_id)
+        .bind(&auth.wallet_address)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e| ApiError::Database(format!("Failed to verify linked identity: {e}")))?;
+
+        if linked {
+            return Ok(identity_id.to_string());
+        }
+
+        return Err(ApiError::Forbidden(format!(
+            "{field_name} does not match authenticated identity"
+        )));
+    }
+
+    if is_canonical_vaulted_identity_id(&auth.wallet_address) {
+        return Ok(auth.wallet_address.clone());
+    }
+
+    let rows = sqlx::query_scalar::<_, String>(
+        r#"SELECT vi.id
+           FROM linked_wallets lw
+           JOIN vaulted_identities vi ON vi.id = lw.identity_id
+           WHERE lw.chain = 'xrpl'
+             AND lw.address = $1
+             AND lw.revoked_at IS NULL
+             AND vi.status = 'active'
+           ORDER BY lw.created_at DESC
+           LIMIT 2"#,
+    )
+    .bind(&auth.wallet_address)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| ApiError::Database(format!("Failed to resolve authenticated identity: {e}")))?;
+
+    match rows.as_slice() {
+        [identity_id] => Ok(identity_id.clone()),
+        [] => Err(ApiError::Forbidden(
+            "authenticated subject is not linked to a Vaulted identity".into(),
+        )),
+        _ => Err(ApiError::Forbidden(
+            "authenticated subject is linked to multiple Vaulted identities".into(),
+        )),
+    }
+}
+
+fn is_canonical_vaulted_identity_id(value: &str) -> bool {
+    value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// Creates a challenge that must be signed by the Vaulted identity signing key.

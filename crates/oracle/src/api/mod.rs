@@ -263,3 +263,222 @@ fn api_v1_routes(auth_rate_limiter: RateLimiter) -> Router<AppState> {
         .route("/sync/nft/:nft_token_id", post(sync::sync_nft))
         .route("/sync/status", get(sync::sync_status))
 }
+
+#[cfg(test)]
+mod authz_tests {
+    use super::*;
+    use axum::{
+        body::Body,
+        http::{Method, Request, StatusCode},
+    };
+    use ed25519_dalek::SigningKey;
+    use rand::rngs::OsRng;
+    use sqlx::postgres::PgPoolOptions;
+    use tower::Service;
+
+    use crate::{
+        auth::{create_token, Claims},
+        config::Config,
+        services::AppState,
+    };
+
+    fn test_state() -> AppState {
+        let db = PgPoolOptions::new()
+            .connect_lazy("postgres://vaulted_test:vaulted_test@127.0.0.1/vaulted_test")
+            .expect("lazy test database URL should parse");
+        let config = Config {
+            host: "127.0.0.1".to_string(),
+            port: 3000,
+            database_url: "postgres://vaulted_test:vaulted_test@127.0.0.1/vaulted_test".to_string(),
+            redis_url: None,
+            xrpl_node_url: None,
+            xrpl_rpc_url: Some("http://127.0.0.1:51234".to_string()),
+            xrpl_wallet_seed: None,
+            jwt_secret: "test".to_string(),
+            jwt_expiration_hours: 1,
+            max_file_size: 1024 * 1024,
+            min_replication: 1,
+            rate_limit_rpm: 1000,
+            cors_origins: Vec::new(),
+            environment: "test".to_string(),
+            audit_encryption_key: None,
+            db_encryption_key: None,
+            public_url: None,
+            node_secret: None,
+            xrpl_wallet_seed_file: None,
+            trusted_proxies: Vec::new(),
+            auth_rate_limit_rpm: 1000,
+        };
+        AppState::new(config, db, SigningKey::generate(&mut OsRng))
+    }
+
+    async fn request_without_auth(method: Method, path: &str, body: &'static str) -> StatusCode {
+        let mut app = api_v1_routes(RateLimiter::new(1000)).with_state(test_state());
+        let request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .expect("test request should build");
+
+        app.call(request).await.unwrap().status()
+    }
+
+    fn bearer_for_subject(state: &AppState, subject: &str) -> String {
+        let claims = Claims::new_access_with_role(subject, 1, "user");
+        format!("Bearer {}", create_token(&claims, &state.signing_key))
+    }
+
+    async fn request_with_auth(
+        method: Method,
+        path: &str,
+        body: &'static str,
+        subject: &str,
+    ) -> StatusCode {
+        let state = test_state();
+        let bearer = bearer_for_subject(&state, subject);
+        let mut app = api_v1_routes(RateLimiter::new(1000)).with_state(state);
+        let request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("authorization", bearer)
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .expect("test request should build");
+
+        app.call(request).await.unwrap().status()
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_vault_object_and_grant_routes_return_401() {
+        let grant_id = uuid::Uuid::new_v4();
+        let cases = [
+            (
+                Method::POST,
+                "/vault-objects/register",
+                r#"{"id":"obj","owner_identity_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","manifest_uri":"uri","manifest_hash":"hash"}"#,
+            ),
+            (Method::GET, "/vault-objects/obj", ""),
+            (Method::GET, "/vault-objects/by-nft/token", ""),
+            (
+                Method::POST,
+                "/grants",
+                r#"{"vault_object_id":"obj","recipient_identity_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","permissions":["read"],"key_envelope":{"alg":"legacy-pre-aes-key","recipient_identity_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","encrypted_file_key":"ciphertext"},"owner_signature":"sig"}"#,
+            ),
+            (Method::GET, "/grants/incoming?identity_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ""),
+            (Method::GET, "/grants/outgoing?owner_identity_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ""),
+            (
+                Method::POST,
+                Box::leak(format!("/grants/{grant_id}/revoke").into_boxed_str()),
+                r#"{"owner_identity_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+            ),
+            (
+                Method::GET,
+                Box::leak(format!("/grants/{grant_id}/access?identity_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").into_boxed_str()),
+                "",
+            ),
+        ];
+
+        for (method, path, body) in cases {
+            assert_eq!(
+                request_without_auth(method, path, body).await,
+                StatusCode::UNAUTHORIZED,
+                "{path} should require auth"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_identity_trust_and_device_routes_return_401() {
+        let device_id = uuid::Uuid::new_v4();
+        let cases = [
+            (
+                Method::POST,
+                "/identity/trust-recipient-key",
+                r#"{"owner_identity_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","recipient_identity_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","recipient_encryption_public_key":"0000000000000000000000000000000000000000000000000000000000000000","recipient_encryption_public_key_fingerprint":"fp"}"#,
+            ),
+            (Method::GET, "/identity/trust-recipient-key?owner_identity_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&recipient_identity_id=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", ""),
+            (
+                Method::POST,
+                "/identity/trust-recipient-key/revoke",
+                r#"{"owner_identity_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","recipient_identity_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}"#,
+            ),
+            (Method::GET, "/identity/devices?identity_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ""),
+            (
+                Method::POST,
+                Box::leak(format!("/identity/devices/{device_id}/revoke").into_boxed_str()),
+                r#"{"identity_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+            ),
+        ];
+
+        for (method, path, body) in cases {
+            assert_eq!(
+                request_without_auth(method, path, body).await,
+                StatusCode::UNAUTHORIZED,
+                "{path} should require auth"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn authenticated_identity_subject_cannot_use_another_identity_parameter() {
+        let identity_a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let identity_b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let grant_id = uuid::Uuid::new_v4();
+        let device_id = uuid::Uuid::new_v4();
+        let cases = [
+            (
+                Method::GET,
+                format!("/grants/incoming?identity_id={identity_b}"),
+                "",
+            ),
+            (
+                Method::GET,
+                format!("/grants/outgoing?owner_identity_id={identity_b}"),
+                "",
+            ),
+            (
+                Method::POST,
+                format!("/grants/{grant_id}/revoke"),
+                r#"{"owner_identity_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}"#,
+            ),
+            (
+                Method::GET,
+                format!("/grants/{grant_id}/access?identity_id={identity_b}"),
+                "",
+            ),
+            (
+                Method::POST,
+                "/identity/trust-recipient-key".to_string(),
+                r#"{"owner_identity_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","recipient_identity_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","recipient_encryption_public_key":"0000000000000000000000000000000000000000000000000000000000000000","recipient_encryption_public_key_fingerprint":"fp"}"#,
+            ),
+            (
+                Method::GET,
+                format!("/identity/trust-recipient-key?owner_identity_id={identity_b}&recipient_identity_id={identity_a}"),
+                "",
+            ),
+            (
+                Method::POST,
+                "/identity/trust-recipient-key/revoke".to_string(),
+                r#"{"owner_identity_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","recipient_identity_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+            ),
+            (
+                Method::GET,
+                format!("/identity/devices?identity_id={identity_b}"),
+                "",
+            ),
+            (
+                Method::POST,
+                format!("/identity/devices/{device_id}/revoke"),
+                r#"{"identity_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}"#,
+            ),
+        ];
+
+        for (method, path, body) in cases {
+            assert_eq!(
+                request_with_auth(method, Box::leak(path.into_boxed_str()), body, identity_a).await,
+                StatusCode::FORBIDDEN
+            );
+        }
+    }
+}
