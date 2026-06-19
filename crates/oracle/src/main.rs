@@ -6,6 +6,7 @@
 use axum::http::{header, Method};
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
+use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
 use std::time::Duration;
 use tower::ServiceBuilder;
@@ -50,12 +51,26 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Load or generate the Oracle signing key
-    let signing_key = load_or_generate_signing_key(&config)?;
+    let loaded_signing_key = load_or_generate_signing_key(&config)?;
+    let signing_key = loaded_signing_key.signing_key;
     let verifying_key = signing_key.verifying_key();
-    tracing::info!(
-        "Oracle signing public key: {}",
-        hex::encode(verifying_key.as_bytes())
-    );
+    let signing_public_key = hex::encode(verifying_key.as_bytes());
+    let signing_public_key_fingerprint = signing_public_key_fingerprint(verifying_key.as_bytes());
+    match loaded_signing_key.source {
+        SigningKeySource::Configured => {
+            tracing::info!(
+                public_key_fingerprint = %signing_public_key_fingerprint,
+                "Oracle signing key loaded from configured environment source"
+            );
+        },
+        SigningKeySource::EphemeralDevelopment => {
+            tracing::warn!(
+                public_key_fingerprint = %signing_public_key_fingerprint,
+                "Ephemeral development Oracle signing key generated; JWT and storage tokens will be invalid after restart"
+            );
+        },
+    }
+    tracing::info!("Oracle signing public key: {}", signing_public_key);
 
     // Build CORS layer based on environment
     let cors = build_cors_layer(&config);
@@ -228,34 +243,134 @@ fn build_cors_layer(config: &Config) -> CorsLayer {
     }
 }
 
-/// Loads the signing key from configuration or generates a new one
-fn load_or_generate_signing_key(config: &Config) -> anyhow::Result<SigningKey> {
-    // Try to load from env
-    if let Ok(key_hex) = std::env::var("ORACLE_SIGNING_KEY") {
-        let key_bytes = hex::decode(&key_hex)?;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SigningKeySource {
+    Configured,
+    EphemeralDevelopment,
+}
+
+struct LoadedSigningKey {
+    signing_key: SigningKey,
+    source: SigningKeySource,
+}
+
+/// Loads the Oracle signing key from configuration or creates an ephemeral development key.
+fn load_or_generate_signing_key(config: &Config) -> anyhow::Result<LoadedSigningKey> {
+    load_or_generate_signing_key_from_hex(config, std::env::var("ORACLE_SIGNING_KEY").ok())
+}
+
+fn load_or_generate_signing_key_from_hex(
+    config: &Config,
+    configured_key_hex: Option<String>,
+) -> anyhow::Result<LoadedSigningKey> {
+    if let Some(key_hex) = configured_key_hex {
+        let key_bytes = hex::decode(key_hex.trim())?;
         if key_bytes.len() != 32 {
             anyhow::bail!("ORACLE_SIGNING_KEY must be 32 bytes (64 hex chars)");
         }
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&key_bytes);
-        tracing::info!("Loaded signing key from ORACLE_SIGNING_KEY env");
-        return Ok(SigningKey::from_bytes(&arr));
+        return Ok(LoadedSigningKey {
+            signing_key: SigningKey::from_bytes(&arr),
+            source: SigningKeySource::Configured,
+        });
     }
 
-    // Production check
     if config.is_production() {
-        anyhow::bail!("ORACLE_SIGNING_KEY must be set in production!");
+        anyhow::bail!(
+            "ORACLE_SIGNING_KEY or an approved secure signing key source is required in production"
+        );
     }
 
-    // Generate a new one (dev only)
-    tracing::warn!("⚠️  Generating random signing key. Set ORACLE_SIGNING_KEY in production!");
-    let signing_key = SigningKey::generate(&mut OsRng);
+    Ok(LoadedSigningKey {
+        signing_key: SigningKey::generate(&mut OsRng),
+        source: SigningKeySource::EphemeralDevelopment,
+    })
+}
 
-    // Print it for saving
-    tracing::info!(
-        "Generated signing key (save this!): {}",
-        hex::encode(signing_key.to_bytes())
-    );
+fn signing_public_key_fingerprint(public_key_bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"vaulted-oracle-signing-public-key-fingerprint-v1");
+    hasher.update(public_key_bytes);
+    hex::encode(hasher.finalize())
+}
 
-    Ok(signing_key)
+#[cfg(test)]
+mod signing_key_tests {
+    use super::*;
+
+    fn test_config(environment: &str) -> Config {
+        Config {
+            host: "127.0.0.1".to_string(),
+            port: 3000,
+            database_url: "postgres://localhost/test".to_string(),
+            redis_url: None,
+            xrpl_node_url: None,
+            xrpl_rpc_url: None,
+            xrpl_wallet_seed: None,
+            jwt_secret: "test".to_string(),
+            jwt_expiration_hours: 1,
+            max_file_size: 1024,
+            min_replication: 1,
+            rate_limit_rpm: 60,
+            cors_origins: Vec::new(),
+            environment: environment.to_string(),
+            audit_encryption_key: None,
+            db_encryption_key: None,
+            public_url: None,
+            node_secret: None,
+            xrpl_wallet_seed_file: None,
+            trusted_proxies: Vec::new(),
+            auth_rate_limit_rpm: 10,
+        }
+    }
+
+    #[test]
+    fn production_without_oracle_signing_key_fails_closed() {
+        let err = match load_or_generate_signing_key_from_hex(&test_config("production"), None) {
+            Ok(_) => panic!("production startup should require a configured signing key"),
+            Err(err) => err.to_string(),
+        };
+
+        assert!(err.contains("ORACLE_SIGNING_KEY"));
+        assert!(!err.contains("private"));
+    }
+
+    #[test]
+    fn development_without_oracle_signing_key_uses_ephemeral_source() {
+        let loaded =
+            load_or_generate_signing_key_from_hex(&test_config("development"), None).unwrap();
+
+        assert_eq!(loaded.source, SigningKeySource::EphemeralDevelopment);
+        assert_eq!(loaded.signing_key.to_bytes().len(), 32);
+    }
+
+    #[test]
+    fn configured_oracle_signing_key_still_parses() {
+        let configured_key = "11".repeat(32);
+        let loaded = load_or_generate_signing_key_from_hex(
+            &test_config("production"),
+            Some(configured_key.clone()),
+        )
+        .unwrap();
+
+        assert_eq!(loaded.source, SigningKeySource::Configured);
+        assert_eq!(hex::encode(loaded.signing_key.to_bytes()), configured_key);
+    }
+
+    #[test]
+    fn public_fingerprint_does_not_expose_private_key_material() {
+        let configured_key = "22".repeat(32);
+        let loaded = load_or_generate_signing_key_from_hex(
+            &test_config("development"),
+            Some(configured_key.clone()),
+        )
+        .unwrap();
+        let public_key = loaded.signing_key.verifying_key();
+        let fingerprint = signing_public_key_fingerprint(public_key.as_bytes());
+
+        assert_eq!(fingerprint.len(), 64);
+        assert_ne!(fingerprint, configured_key);
+        assert!(!fingerprint.contains(&configured_key[..16]));
+    }
 }
