@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
+    api::ownership::require_verified_nft_owner,
     auth::AuthenticatedUser,
     error::{ApiError, Result},
     services::AppState,
@@ -871,32 +872,13 @@ pub async fn get_file_by_nft(
     State(state): State<AppState>,
     axum::extract::Path(nft_token_id): axum::extract::Path<String>,
 ) -> Result<Json<FileDownloadInfo>> {
-    // Verify NFT ownership (CRIT-03)
-    let owner_wallet: Option<String> = sqlx::query_scalar(
-        r#"
-        SELECT u.wallet_address FROM nft_metadata nm
-        JOIN users u ON nm.owner_id = u.id
-        WHERE nm.nft_token_id = $1
-        "#,
+    require_verified_nft_owner(
+        &state,
+        &nft_token_id,
+        &auth.wallet_address,
+        "Only the NFT owner can access file data",
     )
-    .bind(&nft_token_id)
-    .fetch_optional(&state.db)
     .await?;
-
-    match owner_wallet {
-        Some(ref wallet) if !auth.wallet_address.eq_ignore_ascii_case(wallet) => {
-            return Err(ApiError::Forbidden(
-                "Only the NFT owner can access file data".into(),
-            ));
-        },
-        None => {
-            return Err(ApiError::NotFound(format!(
-                "NFT {} not found",
-                nft_token_id
-            )));
-        },
-        _ => {},
-    }
 
     // Get NFT metadata including the manifest
     let row = sqlx::query_as::<_, (String, serde_json::Value)>(

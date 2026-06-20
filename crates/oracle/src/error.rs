@@ -54,6 +54,10 @@ pub enum ApiError {
     #[error("XRPL error: {0}")]
     Xrpl(String),
 
+    /// XRPL ownership verification is temporarily unavailable
+    #[error("XRPL ownership verification unavailable: {0}")]
+    OwnershipVerificationUnavailable(String),
+
     /// NFT not found
     #[error("NFT not found: {0}")]
     NftNotFound(String),
@@ -153,6 +157,11 @@ impl IntoResponse for ApiError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "pre_error", msg.clone())
             },
             ApiError::Xrpl(msg) => (StatusCode::BAD_GATEWAY, "xrpl_error", msg.clone()),
+            ApiError::OwnershipVerificationUnavailable(msg) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "verification_unavailable",
+                msg.clone(),
+            ),
             ApiError::NftNotFound(id) => (
                 StatusCode::NOT_FOUND,
                 "nft_not_found",

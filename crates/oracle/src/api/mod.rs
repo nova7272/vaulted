@@ -7,6 +7,7 @@ mod health;
 mod identity;
 mod nft_public;
 mod nfts;
+mod ownership;
 mod qr_auth;
 mod storage;
 mod sync;

@@ -6,6 +6,7 @@ use axum::{
 };
 
 use crate::{
+    api::ownership::require_verified_nft_owner,
     auth::AuthenticatedUser,
     error::{ApiError, Result},
     models::{
@@ -131,56 +132,13 @@ pub async fn request_access(
     State(state): State<AppState>,
     Path(nft_token_id): Path<String>,
 ) -> Result<Json<FileAccessResponse>> {
-    // Verify the authenticated user owns this NFT (CRIT-03)
-    let nft_owner_wallet = sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT u.wallet_address
-        FROM nft_metadata nm
-        JOIN users u ON nm.owner_id = u.id
-        WHERE nm.nft_token_id = $1 AND nm.status IN ('active', 'pending_claim')
-        "#,
+    let nft_owner_wallet = require_verified_nft_owner(
+        &state,
+        &nft_token_id,
+        &auth.wallet_address,
+        "Only the NFT owner can access this file",
     )
-    .bind(&nft_token_id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| ApiError::NftNotFound(nft_token_id.clone()))?;
-
-    if !nft_owner_wallet.eq_ignore_ascii_case(&auth.wallet_address) {
-        return Err(ApiError::Forbidden(
-            "Only the NFT owner can access this file".into(),
-        ));
-    }
-
-    // MED-06: On-chain verification for encrypted key access
-    match state
-        .xrpl
-        .verify_nft_owner(&nft_token_id, &auth.wallet_address)
-        .await
-    {
-        Ok(true) => {
-            tracing::debug!(
-                "On-chain NFT ownership verified for access to {}",
-                nft_token_id
-            );
-        },
-        Ok(false) => {
-            tracing::warn!(
-                "On-chain ownership mismatch for NFT {} — wallet {}",
-                nft_token_id,
-                auth.wallet_address
-            );
-            return Err(ApiError::Forbidden(
-                "NFT ownership could not be verified on XRPL ledger".into(),
-            ));
-        },
-        Err(e) => {
-            tracing::warn!(
-                "On-chain verification failed for NFT {}: {} — falling back to DB",
-                nft_token_id,
-                e
-            );
-        },
-    }
+    .await?;
 
     // Get NFT metadata including the manifest (encrypted or plain)
     let manifest_json: serde_json::Value = if let Some(ref enc_key) = state.config.db_encryption_key

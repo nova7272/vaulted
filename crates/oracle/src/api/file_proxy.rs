@@ -13,6 +13,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    api::ownership::require_verified_nft_owner,
     auth::AuthenticatedUser,
     error::{ApiError, Result},
     services::{AppState, ReplicationService},
@@ -299,62 +300,13 @@ pub async fn download_file(
 ) -> Result<Response> {
     tracing::debug!("Downloading file for NFT: {}", nft_token_id);
 
-    // Verify NFT ownership (CRIT-03)
-    let nft_owner_wallet: Option<String> = sqlx::query_scalar(
-        r#"
-        SELECT u.wallet_address
-        FROM nft_metadata nm
-        JOIN users u ON nm.owner_id = u.id
-        WHERE nm.nft_token_id = $1
-        "#,
+    require_verified_nft_owner(
+        &state,
+        &nft_token_id,
+        &auth.wallet_address,
+        "Only the NFT owner can download this file",
     )
-    .bind(&nft_token_id)
-    .fetch_optional(&state.db)
     .await?;
-
-    match nft_owner_wallet {
-        Some(ref wallet) if !auth.wallet_address.eq_ignore_ascii_case(wallet) => {
-            return Err(ApiError::Forbidden(
-                "Only the NFT owner can download this file".into(),
-            ));
-        },
-        None => {
-            return Err(ApiError::NotFound(format!(
-                "NFT not found: {}",
-                nft_token_id
-            )));
-        },
-        _ => {},
-    }
-
-    // MED-06: Additional on-chain verification for critical download operation
-    match state
-        .xrpl
-        .verify_nft_owner(&nft_token_id, &auth.wallet_address)
-        .await
-    {
-        Ok(true) => {
-            tracing::debug!("On-chain NFT ownership verified for {}", nft_token_id);
-        },
-        Ok(false) => {
-            tracing::warn!(
-                "On-chain ownership mismatch for NFT {} — DB says {} but XRPL disagrees",
-                nft_token_id,
-                auth.wallet_address
-            );
-            return Err(ApiError::Forbidden(
-                "NFT ownership could not be verified on XRPL ledger".into(),
-            ));
-        },
-        Err(e) => {
-            // Log warning but allow access based on DB (XRPL node might be down)
-            tracing::warn!(
-                "On-chain verification failed for NFT {}: {} — falling back to DB check",
-                nft_token_id,
-                e
-            );
-        },
-    }
 
     // Get active replicas for this file
     let mut replicas: Vec<(String, String, String)> = sqlx::query_as(
@@ -523,31 +475,13 @@ pub async fn delete_file_storage(
 ) -> Result<Json<DeleteFileResponse>> {
     tracing::info!("Deleting file storage for NFT: {}", nft_token_id);
 
-    // Verify the authenticated user is the NFT owner
-    let owner_wallet: Option<String> = sqlx::query_scalar(
-        r#"
-        SELECT u.wallet_address
-        FROM nft_metadata nm
-        JOIN users u ON nm.owner_id = u.id
-        WHERE nm.nft_token_id = $1
-        "#,
+    require_verified_nft_owner(
+        &state,
+        &nft_token_id,
+        &auth.wallet_address,
+        "Only the NFT owner can delete files",
     )
-    .bind(&nft_token_id)
-    .fetch_optional(&state.db)
     .await?;
-
-    match owner_wallet {
-        Some(wallet) if !auth.wallet_address.eq_ignore_ascii_case(&wallet) => {
-            return Err(ApiError::Forbidden(
-                "Only the NFT owner can delete files".into(),
-            ));
-        },
-        None => {
-            // NFT not found in DB, but we should still allow deletion of orphaned files
-            tracing::warn!("NFT {} not found in DB, allowing deletion", nft_token_id);
-        },
-        _ => {},
-    }
 
     // Get all replicas
     let replicas: Vec<(String, String, String)> = sqlx::query_as(
