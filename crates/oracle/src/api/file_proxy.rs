@@ -11,6 +11,7 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::{
     api::ownership::require_verified_nft_owner,
@@ -59,6 +60,18 @@ fn classify_reqwest_error(error: &reqwest::Error) -> &'static str {
     } else {
         "unknown"
     }
+}
+
+fn storage_node_scope(node_id: &str) -> &str {
+    if node_id.is_empty() {
+        "node-local-1"
+    } else {
+        node_id
+    }
+}
+
+fn sha256_fragment_hash(bytes: &[u8]) -> String {
+    format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
 }
 
 // ==================== Handlers ====================
@@ -147,15 +160,23 @@ pub async fn upload_file(
     let mut successful_uploads = 0;
     let storage_key = format!("file_{}", params.nft_token_id);
     let mut successful_fragment_infos: Vec<serde_json::Value> = Vec::new();
+    let encrypted_hash = sha256_fragment_hash(&body);
 
     for (replica_idx, node) in nodes.iter().enumerate() {
         let node_storage_key = format!("{}_r{}", storage_key, replica_idx);
         let upload_url = {
-            let token = StorageToken::new_write(&params.nft_token_id, &node_storage_key, 10);
+            let token = StorageToken::new_scoped(
+                &params.nft_token_id,
+                &node_storage_key,
+                "write",
+                10,
+                Some(&node.id),
+                Some(&encrypted_hash),
+            );
             let signed = sign_storage_token(&token, &state.signing_key);
             format!(
-                "{}/fragments/{}?token={}",
-                node.endpoint_url, node_storage_key, signed
+                "{}/fragments/{}?token={}&fragment_hash={}",
+                node.endpoint_url, node_storage_key, signed, encrypted_hash
             )
         };
 
@@ -176,7 +197,7 @@ pub async fn upload_file(
                     "index": replica_idx,
                     "storage_node_id": node.id,
                     "storage_key": node_storage_key,
-                    "encrypted_hash": "",
+                    "encrypted_hash": encrypted_hash.clone(),
                     "size": file_size
                 }));
 
@@ -386,7 +407,14 @@ pub async fn download_file(
 
     for (node_id, storage_key, endpoint_url) in &replicas {
         let url = {
-            let token = StorageToken::new_read(&nft_token_id, storage_key, 10);
+            let token = StorageToken::new_scoped(
+                &nft_token_id,
+                storage_key,
+                "read",
+                10,
+                Some(storage_node_scope(node_id)),
+                None,
+            );
             let signed = sign_storage_token(&token, &state.signing_key);
             format!(
                 "{}/fragments/{}?token={}",
@@ -513,7 +541,14 @@ pub async fn delete_file_storage(
 
     for (node_id, storage_key, endpoint_url) in &replicas {
         let url = {
-            let token = StorageToken::new_delete(&nft_token_id, storage_key, 10);
+            let token = StorageToken::new_scoped(
+                &nft_token_id,
+                storage_key,
+                "delete",
+                10,
+                Some(storage_node_scope(node_id)),
+                None,
+            );
             let signed = sign_storage_token(&token, &state.signing_key);
             format!(
                 "{}/fragments/{}?token={}",

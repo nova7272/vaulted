@@ -21,43 +21,74 @@ pub struct StorageToken {
     pub exp: i64,
     /// Issued at (unix timestamp)
     pub iat: i64,
+    /// Storage node ID this token is valid for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_node_id: Option<String>,
+    /// Expected encrypted fragment hash, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fragment_hash: Option<String>,
+    /// Unique token ID for replay prevention on storage nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jti: Option<String>,
 }
 
 impl StorageToken {
-    /// Create a new read token
-    pub fn new_read(nft_token_id: &str, storage_key: &str, expires_in_minutes: i64) -> Self {
+    /// Create a scoped storage token.
+    pub fn new_scoped(
+        nft_token_id: &str,
+        storage_key: &str,
+        operation: &str,
+        expires_in_minutes: i64,
+        storage_node_id: Option<&str>,
+        fragment_hash: Option<&str>,
+    ) -> Self {
         let now = Utc::now();
         Self {
             nft_token_id: nft_token_id.to_string(),
             storage_key: storage_key.to_string(),
-            operation: "read".to_string(),
+            operation: operation.to_string(),
             exp: (now + Duration::minutes(expires_in_minutes)).timestamp(),
             iat: now.timestamp(),
+            storage_node_id: storage_node_id.map(ToOwned::to_owned),
+            fragment_hash: fragment_hash.map(ToOwned::to_owned),
+            jti: Some(uuid::Uuid::new_v4().to_string()),
         }
+    }
+
+    /// Create a new read token
+    pub fn new_read(nft_token_id: &str, storage_key: &str, expires_in_minutes: i64) -> Self {
+        Self::new_scoped(
+            nft_token_id,
+            storage_key,
+            "read",
+            expires_in_minutes,
+            None,
+            None,
+        )
     }
 
     /// Create a new write token
     pub fn new_write(nft_token_id: &str, storage_key: &str, expires_in_minutes: i64) -> Self {
-        let now = Utc::now();
-        Self {
-            nft_token_id: nft_token_id.to_string(),
-            storage_key: storage_key.to_string(),
-            operation: "write".to_string(),
-            exp: (now + Duration::minutes(expires_in_minutes)).timestamp(),
-            iat: now.timestamp(),
-        }
+        Self::new_scoped(
+            nft_token_id,
+            storage_key,
+            "write",
+            expires_in_minutes,
+            None,
+            None,
+        )
     }
 
     /// Create a new delete token
     pub fn new_delete(nft_token_id: &str, storage_key: &str, expires_in_minutes: i64) -> Self {
-        let now = Utc::now();
-        Self {
-            nft_token_id: nft_token_id.to_string(),
-            storage_key: storage_key.to_string(),
-            operation: "delete".to_string(),
-            exp: (now + Duration::minutes(expires_in_minutes)).timestamp(),
-            iat: now.timestamp(),
-        }
+        Self::new_scoped(
+            nft_token_id,
+            storage_key,
+            "delete",
+            expires_in_minutes,
+            None,
+            None,
+        )
     }
 
     /// Check if token is expired

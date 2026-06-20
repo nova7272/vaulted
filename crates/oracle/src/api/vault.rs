@@ -1032,8 +1032,19 @@ pub async fn delete_vault(
         };
 
         // Create signed delete token
-        let token =
-            crate::storage_token::StorageToken::new_delete(&nft_token_id, &fragment.storage_key, 5);
+        let storage_node_scope = if fragment.storage_node_id.is_empty() {
+            "node-local-1"
+        } else {
+            &fragment.storage_node_id
+        };
+        let token = crate::storage_token::StorageToken::new_scoped(
+            &nft_token_id,
+            &fragment.storage_key,
+            "delete",
+            5,
+            Some(storage_node_scope),
+            Some(&fragment.encrypted_hash),
+        );
         let signed = crate::storage_token::sign_storage_token(&token, &state.signing_key);
         let url = format!(
             "{}/fragments/{}?token={}",
@@ -1043,7 +1054,11 @@ pub async fn delete_vault(
         match http_client.delete(&url).send().await {
             Ok(resp) if resp.status().is_success() || resp.status() == 404 => {
                 deleted_fragments += 1;
-                tracing::debug!("Deleted fragment {} from storage", fragment.storage_key);
+                tracing::debug!(
+                    fragment_index = fragment.index,
+                    storage_node_id = %fragment.storage_node_id,
+                    "Deleted encrypted fragment from storage"
+                );
             },
             Ok(resp) => {
                 failures.push(format!(
@@ -1052,14 +1067,20 @@ pub async fn delete_vault(
                     fragment.index
                 ));
                 tracing::warn!(
-                    "Failed to delete fragment {}: HTTP {}",
-                    fragment.storage_key,
-                    resp.status()
+                    fragment_index = fragment.index,
+                    storage_node_id = %fragment.storage_node_id,
+                    endpoint_status = resp.status().as_u16(),
+                    "Storage node returned non-success while deleting encrypted fragment"
                 );
             },
             Err(e) => {
                 failures.push(format!("storage_delete_error_fragment_{}", fragment.index));
-                tracing::warn!("Failed to delete fragment {}: {}", fragment.storage_key, e);
+                tracing::warn!(
+                    fragment_index = fragment.index,
+                    storage_node_id = %fragment.storage_node_id,
+                    error = %e,
+                    "Failed to delete encrypted fragment from storage node"
+                );
             },
         }
     }

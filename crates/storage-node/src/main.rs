@@ -6,8 +6,8 @@
 
 use axum::{
     body::Bytes,
-    extract::{Path, Query, State},
-    http::StatusCode,
+    extract::{Path as AxumPath, Query, State},
+    http::{Request, StatusCode},
     response::Json,
     routing::{delete, get, put},
     Router,
@@ -16,9 +16,10 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -35,8 +36,12 @@ struct AppState {
     oracle_public_key: Option<VerifyingKey>,
     /// Whether to require token authentication
     require_auth: bool,
+    /// Maximum encrypted fragment size accepted by upload endpoint.
+    max_fragment_size: usize,
     /// In-memory index of stored fragments
     fragments: RwLock<HashMap<String, FragmentInfo>>,
+    /// In-memory replay cache for mutating token IDs.
+    consumed_token_ids: RwLock<HashMap<String, i64>>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -48,7 +53,7 @@ struct FragmentInfo {
 }
 
 /// Storage access token payload (must match Oracle's StorageToken)
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[allow(dead_code)]
 struct StorageToken {
     nft_token_id: String,
@@ -56,6 +61,12 @@ struct StorageToken {
     operation: String,
     exp: i64,
     iat: i64,
+    #[serde(default)]
+    storage_node_id: Option<String>,
+    #[serde(default)]
+    fragment_hash: Option<String>,
+    #[serde(default)]
+    jti: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -187,7 +198,9 @@ async fn main() -> anyhow::Result<()> {
         region: region.clone(),
         oracle_public_key,
         require_auth,
+        max_fragment_size,
         fragments: RwLock::new(fragments),
+        consumed_token_ids: RwLock::new(HashMap::new()),
     });
 
     tracing::info!("Loaded {} existing fragments", fragments_count);
@@ -255,7 +268,15 @@ async fn main() -> anyhow::Result<()> {
         .route("/fragments/:key", put(put_fragment))
         .route("/fragments/:key", delete(delete_fragment))
         .route("/stats", get(stats))
-        .layer(TraceLayer::new_for_http())
+        .layer(
+            TraceLayer::new_for_http().make_span_with(|request: &Request<_>| {
+                tracing::debug_span!(
+                    "http_request",
+                    method = %request.method(),
+                    path = %request.uri().path()
+                )
+            }),
+        )
         .layer(axum::extract::DefaultBodyLimit::max(max_fragment_size)) // MED-05: body size limit
         .with_state(state);
 
@@ -347,7 +368,7 @@ async fn send_heartbeat(
 
 /// Load existing fragments from disk
 async fn load_existing_fragments(
-    storage_dir: &PathBuf,
+    storage_dir: &Path,
 ) -> anyhow::Result<HashMap<String, FragmentInfo>> {
     let mut fragments = HashMap::new();
 
@@ -402,19 +423,9 @@ async fn stats(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     }))
 }
 
-/// Validate storage key to prevent path traversal (HIGH-02)
+/// Validate storage key to prevent path traversal and fragment ID confusion.
 fn validate_storage_key(key: &str) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
-    // Block path traversal characters
-    if key.contains("..") || key.contains('/') || key.contains('\\') || key.contains('\0') {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Invalid fragment key: path traversal characters not allowed".to_string(),
-            }),
-        ));
-    }
-    // Key must be non-empty and reasonable length
-    if key.is_empty() || key.len() > 512 {
+    if key.is_empty() || key.len() > 255 {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -422,39 +433,145 @@ fn validate_storage_key(key: &str) -> Result<(), (StatusCode, Json<ErrorResponse
             }),
         ));
     }
+
+    let path = Path::new(key);
+    if path.is_absolute()
+        || key.starts_with('.')
+        || key.contains("..")
+        || key.contains('/')
+        || key.contains('\\')
+        || key.contains('%')
+        || key.contains(':')
+        || key.contains('?')
+        || key.contains('#')
+        || key.chars().any(|c| c.is_control())
+        || !key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Invalid fragment key".to_string(),
+            }),
+        ));
+    }
+
     Ok(())
+}
+
+fn validate_fragment_size(
+    size: usize,
+    max_size: usize,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    if size > max_size {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(ErrorResponse {
+                error: "Encrypted fragment exceeds maximum allowed size".to_string(),
+            }),
+        ));
+    }
+
+    Ok(())
+}
+
+async fn canonical_storage_root(
+    storage_dir: &Path,
+) -> Result<PathBuf, (StatusCode, Json<ErrorResponse>)> {
+    fs::create_dir_all(storage_dir).await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Storage root unavailable".to_string(),
+            }),
+        )
+    })?;
+
+    fs::canonicalize(storage_dir).await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Storage root unavailable".to_string(),
+            }),
+        )
+    })
+}
+
+async fn fragment_path_for_create(
+    storage_dir: &Path,
+    key: &str,
+) -> Result<(PathBuf, PathBuf), (StatusCode, Json<ErrorResponse>)> {
+    validate_storage_key(key)?;
+    let root = canonical_storage_root(storage_dir).await?;
+    let path = root.join(key);
+    if path.parent() != Some(root.as_path()) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Access denied".to_string(),
+            }),
+        ));
+    }
+    Ok((root, path))
+}
+
+async fn existing_fragment_path(
+    storage_dir: &Path,
+    key: &str,
+) -> Result<PathBuf, (StatusCode, Json<ErrorResponse>)> {
+    let (root, path) = fragment_path_for_create(storage_dir, key).await?;
+    let metadata = fs::symlink_metadata(&path).await.map_err(|_| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Fragment not found".to_string(),
+            }),
+        )
+    })?;
+
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Access denied".to_string(),
+            }),
+        ));
+    }
+
+    let canonical_path = fs::canonicalize(&path).await.map_err(|_| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Fragment not found".to_string(),
+            }),
+        )
+    })?;
+
+    if !canonical_path.starts_with(&root) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Access denied".to_string(),
+            }),
+        ));
+    }
+
+    Ok(canonical_path)
 }
 
 /// Get a fragment by key (with token verification)
 async fn get_fragment(
     State(state): State<Arc<AppState>>,
-    Path(key): Path<String>,
+    AxumPath(key): AxumPath<String>,
     Query(params): Query<TokenQuery>,
 ) -> Result<Vec<u8>, (StatusCode, Json<ErrorResponse>)> {
-    // Path traversal protection (HIGH-02)
-    validate_storage_key(&key)?;
     // Verify token if required
     if state.require_auth {
-        verify_token_for_operation(&state, &params.token, &key, "read")?;
+        verify_token_for_operation(&state, &params.token, &key, "read", None).await?;
     }
 
-    let path = state.storage_dir.join(&key);
-
-    // Second defense: verify canonical path stays within storage_dir (HIGH-02)
-    let canonical_storage = state
-        .storage_dir
-        .canonicalize()
-        .unwrap_or_else(|_| state.storage_dir.clone());
-    if let Ok(canonical_path) = path.canonicalize() {
-        if !canonical_path.starts_with(&canonical_storage) {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(ErrorResponse {
-                    error: "Access denied: path outside storage directory".to_string(),
-                }),
-            ));
-        }
-    }
+    let path = existing_fragment_path(&state.storage_dir, &key).await?;
 
     match fs::read(&path).await {
         Ok(data) => {
@@ -477,20 +594,20 @@ async fn get_fragment(
 /// Store a fragment (with token verification)
 async fn put_fragment(
     State(state): State<Arc<AppState>>,
-    Path(key): Path<String>,
+    AxumPath(key): AxumPath<String>,
     Query(params): Query<TokenQuery>,
     body: Bytes,
 ) -> Result<Json<UploadResponse>, (StatusCode, Json<ErrorResponse>)> {
-    // Path traversal protection (HIGH-02)
-    validate_storage_key(&key)?;
-    // Verify token if required
-    if state.require_auth {
-        verify_token_for_operation(&state, &params.token, &key, "write")?;
-    }
+    validate_fragment_size(body.len(), state.max_fragment_size)?;
 
-    let path = state.storage_dir.join(&key);
     let size = body.len() as u64;
     let computed_hash = format!("sha256:{}", sha256_hex(&body));
+
+    // Verify token before touching the filesystem.
+    if state.require_auth {
+        verify_token_for_operation(&state, &params.token, &key, "write", Some(&computed_hash))
+            .await?;
+    }
 
     if let Some(ref declared_hash) = params.fragment_hash {
         if !fragment_hash_matches(declared_hash, &body) {
@@ -503,78 +620,138 @@ async fn put_fragment(
         }
     }
 
-    // Second defense: verify path stays within storage_dir (HIGH-02)
-    let canonical_storage = state
-        .storage_dir
-        .canonicalize()
-        .unwrap_or_else(|_| state.storage_dir.clone());
-    if let Some(parent) = path.parent() {
-        let canonical_parent = parent
-            .canonicalize()
-            .unwrap_or_else(|_| parent.to_path_buf());
-        if !canonical_parent.starts_with(&canonical_storage) {
+    let (root, path) = fragment_path_for_create(&state.storage_dir, &key).await?;
+
+    if let Ok(metadata) = fs::symlink_metadata(&path).await {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
             return Err((
                 StatusCode::FORBIDDEN,
                 Json(ErrorResponse {
-                    error: "Access denied: path outside storage directory".to_string(),
+                    error: "Access denied".to_string(),
                 }),
             ));
         }
+
+        let existing = fs::read(&path).await.map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Failed to inspect existing fragment".to_string(),
+                }),
+            )
+        })?;
+        if existing.as_slice() != body.as_ref() {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error: "Encrypted fragment already exists with different content".to_string(),
+                }),
+            ));
+        }
+    } else {
+        atomic_write_new_fragment(&root, &path, &key, &body).await?;
     }
 
-    match fs::write(&path, &body).await {
-        Ok(_) => {
-            // Update index
-            let mut fragments = state.fragments.write().await;
-            fragments.insert(
-                key.clone(),
-                FragmentInfo {
-                    key: key.clone(),
-                    size,
-                    created_at: chrono::Utc::now().to_rfc3339(),
-                    encrypted_hash: params
-                        .fragment_hash
-                        .clone()
-                        .or_else(|| Some(computed_hash.clone())),
-                },
-            );
-
-            tracing::info!(
-                storage_key_hash = %safe_storage_key_label(&key),
-                bytes = size,
-                "Stored encrypted fragment"
-            );
-
-            Ok(Json(UploadResponse {
-                key,
+    {
+        // Update index
+        let mut fragments = state.fragments.write().await;
+        fragments.insert(
+            key.clone(),
+            FragmentInfo {
+                key: key.clone(),
                 size,
-                node_id: state.node_id.clone(),
-                encrypted_hash: params.fragment_hash.unwrap_or(computed_hash),
-            }))
+                created_at: chrono::Utc::now().to_rfc3339(),
+                encrypted_hash: params
+                    .fragment_hash
+                    .clone()
+                    .or_else(|| Some(computed_hash.clone())),
+            },
+        );
+    }
+
+    tracing::info!(
+        storage_key_hash = %safe_storage_key_label(&key),
+        bytes = size,
+        "Stored encrypted fragment"
+    );
+
+    Ok(Json(UploadResponse {
+        key,
+        size,
+        node_id: state.node_id.clone(),
+        encrypted_hash: params.fragment_hash.unwrap_or(computed_hash),
+    }))
+}
+
+async fn atomic_write_new_fragment(
+    root: &Path,
+    path: &Path,
+    key: &str,
+    body: &[u8],
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let temp_path = root.join(format!(
+        ".upload-{}-{}",
+        safe_storage_key_label(key).replace(':', "_"),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+
+    let write_result = async {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .await?;
+        file.write_all(body).await?;
+        file.sync_all().await?;
+        drop(file);
+        fs::hard_link(&temp_path, path).await?;
+        fs::remove_file(&temp_path).await
+    }
+    .await;
+
+    match write_result {
+        Ok(_) => {
+            if let Err(_e) = fs::symlink_metadata(path).await {
+                let _ = fs::remove_file(&temp_path).await;
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "Failed to store fragment".to_string(),
+                    }),
+                ));
+            }
+            Ok(())
         },
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err((
+            StatusCode::CONFLICT,
             Json(ErrorResponse {
-                error: format!("Failed to store fragment: {}", e),
+                error: "Encrypted fragment already exists".to_string(),
             }),
         )),
+        Err(_) => {
+            let _ = fs::remove_file(&temp_path).await;
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Failed to store fragment".to_string(),
+                }),
+            ))
+        },
     }
 }
 
 /// Delete a fragment (with token verification)
 async fn delete_fragment(
     State(state): State<Arc<AppState>>,
-    Path(key): Path<String>,
+    AxumPath(key): AxumPath<String>,
     Query(params): Query<TokenQuery>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    // Path traversal protection (HIGH-02)
-    validate_storage_key(&key)?;
     // Verify token if required
     if state.require_auth {
-        verify_token_for_operation(&state, &params.token, &key, "delete")?;
+        verify_token_for_operation(&state, &params.token, &key, "delete", None).await?;
     }
 
-    let path = state.storage_dir.join(&key);
+    let path = existing_fragment_path(&state.storage_dir, &key).await?;
 
     match fs::remove_file(&path).await {
         Ok(_) => {
@@ -659,12 +836,13 @@ async fn fetch_oracle_public_key(oracle_url: &str) -> anyhow::Result<VerifyingKe
     VerifyingKey::from_bytes(&arr).map_err(|e| anyhow::anyhow!("Invalid public key: {}", e))
 }
 
-/// Verify a storage token for the given operation
-fn verify_token_for_operation(
+/// Verify a storage token for the given operation.
+async fn verify_token_for_operation(
     state: &AppState,
     token: &Option<String>,
     storage_key: &str,
     operation: &str,
+    computed_fragment_hash: Option<&str>,
 ) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
     let token_str = token.as_ref().ok_or_else(|| {
         (
@@ -782,6 +960,19 @@ fn verify_token_for_operation(
         ));
     }
 
+    if token.storage_node_id.as_deref() != Some(state.node_id.as_str()) {
+        tracing::warn!(
+            storage_key_hash = %safe_storage_key_label(storage_key),
+            "Token storage node mismatch"
+        );
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Token not valid for this storage node".to_string(),
+            }),
+        ));
+    }
+
     // Check operation matches
     if token.operation != operation {
         tracing::warn!(
@@ -797,11 +988,69 @@ fn verify_token_for_operation(
         ));
     }
 
+    if let Some(expected_hash) = token.fragment_hash.as_deref() {
+        if let Some(computed_hash) = computed_fragment_hash {
+            if !expected_hash.eq_ignore_ascii_case(computed_hash) {
+                tracing::warn!(
+                    storage_key_hash = %safe_storage_key_label(storage_key),
+                    "Token fragment hash mismatch"
+                );
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    Json(ErrorResponse {
+                        error: "Token not valid for this encrypted fragment".to_string(),
+                    }),
+                ));
+            }
+        }
+    }
+
+    if matches!(operation, "write" | "delete") {
+        let jti = token.jti.as_deref().ok_or_else(|| {
+            (
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "Token missing replay protection".to_string(),
+                }),
+            )
+        })?;
+        consume_token_id(state, jti, token.exp, now).await?;
+    }
+
     tracing::debug!(
         operation,
         storage_key_hash = %safe_storage_key_label(storage_key),
         "Token verified for storage operation"
     );
+    Ok(())
+}
+
+async fn consume_token_id(
+    state: &AppState,
+    jti: &str,
+    exp: i64,
+    now: i64,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    if jti.is_empty() || jti.len() > 128 || jti.chars().any(|c| c.is_control()) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "Invalid token payload".to_string(),
+            }),
+        ));
+    }
+
+    let mut consumed = state.consumed_token_ids.write().await;
+    consumed.retain(|_, expires_at| *expires_at >= now);
+    if consumed.contains_key(jti) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Token has already been used".to_string(),
+            }),
+        ));
+    }
+    consumed.insert(jti.to_string(), exp);
     Ok(())
 }
 
@@ -840,7 +1089,73 @@ fn hex_decode(s: &str) -> Result<Vec<u8>, ()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{fragment_hash_matches, safe_storage_key_label};
+    use super::*;
+    use axum::extract::{Path as AxumPath, Query, State};
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use ed25519_dalek::{Signer, SigningKey};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn signing_key() -> SigningKey {
+        SigningKey::from_bytes(&[7u8; 32])
+    }
+
+    fn signed_token_for(
+        signing_key: &SigningKey,
+        operation: &str,
+        storage_key: &str,
+        node_id: &str,
+        exp_offset_seconds: i64,
+        fragment_hash: Option<&str>,
+        jti: &str,
+    ) -> String {
+        let now = chrono::Utc::now().timestamp();
+        let token = StorageToken {
+            nft_token_id: "nft123".to_string(),
+            storage_key: storage_key.to_string(),
+            operation: operation.to_string(),
+            exp: now + exp_offset_seconds,
+            iat: now,
+            storage_node_id: Some(node_id.to_string()),
+            fragment_hash: fragment_hash.map(ToOwned::to_owned),
+            jti: Some(jti.to_string()),
+        };
+        let payload = serde_json::to_string(&token).unwrap();
+        let payload_b64 = URL_SAFE_NO_PAD.encode(payload);
+        let signature = signing_key.sign(payload_b64.as_bytes());
+        format!(
+            "{}.{}",
+            payload_b64,
+            URL_SAFE_NO_PAD.encode(signature.to_bytes())
+        )
+    }
+
+    fn temp_storage_dir(name: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("vaulted-storage-node-test-{name}-{suffix}"));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn test_state(
+        storage_dir: PathBuf,
+        signing_key: &SigningKey,
+        require_auth: bool,
+    ) -> Arc<AppState> {
+        Arc::new(AppState {
+            node_id: "node-a".to_string(),
+            storage_dir,
+            oracle_url: None,
+            region: "local".to_string(),
+            oracle_public_key: Some(signing_key.verifying_key()),
+            require_auth,
+            max_fragment_size: 16,
+            fragments: RwLock::new(HashMap::new()),
+            consumed_token_ids: RwLock::new(HashMap::new()),
+        })
+    }
 
     #[test]
     fn safe_storage_key_label_does_not_include_raw_key() {
@@ -858,5 +1173,212 @@ mod tests {
         let data = b"encrypted fragment bytes";
         let declared = format!("sha256:{}", super::sha256_hex(data));
         assert!(fragment_hash_matches(&declared, data));
+    }
+
+    #[tokio::test]
+    async fn valid_scoped_write_token_is_accepted_once() {
+        let key = signing_key();
+        let state = test_state(temp_storage_dir("valid-token"), &key, true);
+        let token = signed_token_for(&key, "write", "fragment_a", "node-a", 60, None, "jti-valid");
+
+        assert!(verify_token_for_operation(
+            &state,
+            &Some(token.clone()),
+            "fragment_a",
+            "write",
+            None
+        )
+        .await
+        .is_ok());
+
+        let err = verify_token_for_operation(&state, &Some(token), "fragment_a", "write", None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert_eq!(err.1 .0.error, "Token has already been used");
+    }
+
+    #[tokio::test]
+    async fn scoped_tokens_reject_wrong_action_fragment_node_expiry_and_malformed() {
+        let key = signing_key();
+        let state = test_state(temp_storage_dir("scope"), &key, true);
+
+        let upload = signed_token_for(
+            &key,
+            "write",
+            "fragment_a",
+            "node-a",
+            60,
+            None,
+            "jti-upload",
+        );
+        let err = verify_token_for_operation(&state, &Some(upload), "fragment_a", "read", None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+
+        let download = signed_token_for(&key, "read", "fragment_a", "node-a", 60, None, "jti-read");
+        let err = verify_token_for_operation(&state, &Some(download), "fragment_a", "delete", None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+
+        let fragment_a =
+            signed_token_for(&key, "read", "fragment_a", "node-a", 60, None, "jti-frag");
+        let err = verify_token_for_operation(&state, &Some(fragment_a), "fragment_b", "read", None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+
+        let wrong_node =
+            signed_token_for(&key, "read", "fragment_a", "node-b", 60, None, "jti-node");
+        let err = verify_token_for_operation(&state, &Some(wrong_node), "fragment_a", "read", None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+
+        let expired = signed_token_for(
+            &key,
+            "read",
+            "fragment_a",
+            "node-a",
+            -60,
+            None,
+            "jti-expired",
+        );
+        let err = verify_token_for_operation(&state, &Some(expired), "fragment_a", "read", None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+
+        let raw = "raw-secret-token-value".to_string();
+        let err =
+            verify_token_for_operation(&state, &Some(raw.clone()), "fragment_a", "read", None)
+                .await
+                .unwrap_err();
+        assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+        assert!(!err.1 .0.error.contains(&raw));
+    }
+
+    #[tokio::test]
+    async fn upload_token_fragment_hash_must_match_body() {
+        let key = signing_key();
+        let state = test_state(temp_storage_dir("hash-token"), &key, true);
+        let token = signed_token_for(
+            &key,
+            "write",
+            "fragment_a",
+            "node-a",
+            60,
+            Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            "jti-hash",
+        );
+
+        let err = verify_token_for_operation(
+            &state,
+            &Some(token),
+            "fragment_a",
+            "write",
+            Some("sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn path_traversal_and_unsafe_keys_are_rejected() {
+        for key in [
+            "../secret",
+            "..\\secret",
+            "/tmp/secret",
+            "C:\\secret",
+            "%2e%2e%2fsecret",
+            "fragment\nid",
+            ".hidden",
+        ] {
+            assert!(
+                validate_storage_key(key).is_err(),
+                "{key} should be rejected"
+            );
+        }
+        assert!(validate_storage_key("fragment_01-A.sha256").is_ok());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlink_escape_is_rejected_and_delete_does_not_remove_target() {
+        use std::os::unix::fs::symlink;
+
+        let key = signing_key();
+        let storage_dir = temp_storage_dir("symlink");
+        let outside = temp_storage_dir("outside").join("target");
+        std::fs::write(&outside, b"outside").unwrap();
+        symlink(&outside, storage_dir.join("fragment_link")).unwrap();
+        let state = test_state(storage_dir, &key, true);
+        let token = signed_token_for(
+            &key,
+            "delete",
+            "fragment_link",
+            "node-a",
+            60,
+            None,
+            "jti-delete-link",
+        );
+
+        let err = delete_fragment(
+            State(state),
+            AxumPath("fragment_link".to_string()),
+            Query(TokenQuery {
+                token: Some(token),
+                fragment_hash: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert_eq!(std::fs::read(&outside).unwrap(), b"outside");
+    }
+
+    #[tokio::test]
+    async fn oversized_upload_and_hash_mismatch_are_rejected() {
+        let key = signing_key();
+        let state = test_state(temp_storage_dir("upload"), &key, false);
+
+        let oversized = match put_fragment(
+            State(state.clone()),
+            AxumPath("fragment_big".to_string()),
+            Query(TokenQuery {
+                token: None,
+                fragment_hash: None,
+            }),
+            Bytes::from(vec![1u8; 17]),
+        )
+        .await
+        {
+            Ok(_) => panic!("oversized upload should be rejected"),
+            Err(err) => err,
+        };
+        assert_eq!(oversized.0, StatusCode::PAYLOAD_TOO_LARGE);
+
+        let mismatch = match put_fragment(
+            State(state),
+            AxumPath("fragment_hash".to_string()),
+            Query(TokenQuery {
+                token: None,
+                fragment_hash: Some(
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .to_string(),
+                ),
+            }),
+            Bytes::from_static(b"ciphertext"),
+        )
+        .await
+        {
+            Ok(_) => panic!("hash mismatch should be rejected"),
+            Err(err) => err,
+        };
+        assert_eq!(mismatch.0, StatusCode::BAD_REQUEST);
     }
 }
