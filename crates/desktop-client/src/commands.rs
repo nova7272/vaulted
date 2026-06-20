@@ -35,6 +35,10 @@ use crate::state::AppState;
 use crate::xrpl::client::is_xrpl_tx_blob_hex;
 use crate::xrpl::XrplClient;
 
+fn signed_xrpl_tx_blob_ttl() -> chrono::Duration {
+    chrono::Duration::minutes(5)
+}
+
 // ==================== Vaulted Identity Commands ====================
 
 /// Response returned when creating/restoring the seed-based Vaulted wallet.
@@ -391,9 +395,22 @@ pub async fn sign_vaulted_xrpl_qr_request(
         return Err(ClientError::Auth("QR signing request expired".to_string()));
     }
     let wallet = state.get_xrpl_wallet().await?;
-    wallet
+    let account = wallet.classic_address()?;
+    let signed = wallet
         .sign_transaction_json(&request.tx_json)
-        .map_err(Into::into)
+        .map_err(ClientError::from)?;
+    if let Some(tx_blob) = signed.tx_blob.as_deref() {
+        state
+            .register_signed_xrpl_tx_blob(
+                tx_blob,
+                "QrSignXrplTransaction",
+                account,
+                expires_at,
+                Some(request.request_id),
+            )
+            .await?;
+    }
+    Ok(signed)
 }
 
 /// Generate a deterministic Vaulted NFT image and metadata preview locally.
@@ -543,9 +560,21 @@ async fn sign_vaulted_nft_mint_transaction_inner(
         flags: request.flags.unwrap_or(8),
         transfer_fee: request.transfer_fee,
     };
-    wallet
+    let signed = wallet
         .sign_xrpl_transaction_for_intent(&intent, &tx)
-        .map_err(Into::into)
+        .map_err(ClientError::from)?;
+    if let Some(tx_blob) = signed.tx_blob.as_deref() {
+        state
+            .register_signed_xrpl_tx_blob(
+                tx_blob,
+                "MintVaultNft",
+                account,
+                chrono::Utc::now() + signed_xrpl_tx_blob_ttl(),
+                None,
+            )
+            .await?;
+    }
+    Ok(signed)
 }
 
 /// Builds, locally signs, and optionally submits an NFTokenMint transaction to XRPL.
@@ -610,6 +639,7 @@ async fn submit_vaulted_xrpl_tx_blob_inner(
     tx_blob: String,
     diagnostics: Option<MintSubmitDiagnostics>,
 ) -> Result<VaultedSubmitResponse> {
+    let submit_authorization = state.consume_signed_xrpl_tx_blob(&tx_blob).await?;
     let mut client = XrplClient::new(&state.config.xrpl_node_url);
     client.connect().await?;
     tracing::info!(
@@ -617,7 +647,10 @@ async fn submit_vaulted_xrpl_tx_blob_inner(
         phase = "prepared",
         tx_blob_len = tx_blob.len(),
         tx_blob_is_hex = is_xrpl_tx_blob_hex(&tx_blob),
-        "Submitting locally signed Vaulted NFTokenMint transaction"
+        signing_intent = %submit_authorization.signing_intent,
+        wallet_address = %submit_authorization.wallet_address,
+        request_id = submit_authorization.request_id.as_deref().unwrap_or(""),
+        "Submitting registered locally signed Vaulted XRPL transaction"
     );
     let result = client.submit(&tx_blob).await?;
     let accepted = result.engine_result.starts_with("tes");

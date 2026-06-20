@@ -5,6 +5,8 @@
 //! Vaulted identity keys are derived from the Vaulted seed phrase and kept only in memory.
 //! The bundled wallet layer derives XRPL signing keys from the Vaulted seed with a separate domain; external wallet signing is not required.
 
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use xrpl_vault_crypto_core::{
@@ -88,6 +90,188 @@ mod tests {
         assert!(!state.has_xrpl_wallet().await);
         assert_eq!(state.device_fingerprint(), fingerprint);
     }
+
+    #[tokio::test]
+    async fn signed_xrpl_tx_blob_registry_accepts_locally_signed_blob_once() {
+        let state = AppState::new(AppConfig::default()).unwrap();
+        let mnemonic = SeedManager::generate_mnemonic(DEFAULT_MNEMONIC_WORDS).unwrap();
+        state
+            .init_vaulted_identity_from_mnemonic(&mnemonic, None)
+            .await
+            .unwrap();
+        let wallet_address = state
+            .get_xrpl_wallet()
+            .await
+            .unwrap()
+            .classic_address()
+            .unwrap();
+        let tx_blob = "120019ABCD";
+
+        let registered = state
+            .register_signed_xrpl_tx_blob(
+                tx_blob,
+                "MintVaultNft",
+                wallet_address,
+                chrono::Utc::now() + chrono::Duration::minutes(2),
+                None,
+            )
+            .await
+            .unwrap();
+        let consumed = state.consume_signed_xrpl_tx_blob(tx_blob).await.unwrap();
+
+        assert_eq!(consumed.tx_blob_hash, registered.tx_blob_hash);
+        assert!(consumed.consumed);
+
+        let second = state
+            .consume_signed_xrpl_tx_blob(tx_blob)
+            .await
+            .unwrap_err();
+        assert!(second.to_string().contains("already submitted"));
+    }
+
+    #[tokio::test]
+    async fn signed_xrpl_tx_blob_registry_rejects_unknown_blob() {
+        let state = AppState::new(AppConfig::default()).unwrap();
+        let mnemonic = SeedManager::generate_mnemonic(DEFAULT_MNEMONIC_WORDS).unwrap();
+        state
+            .init_vaulted_identity_from_mnemonic(&mnemonic, None)
+            .await
+            .unwrap();
+
+        let err = state
+            .consume_signed_xrpl_tx_blob("120019UNKNOWN")
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("not bound"));
+        assert!(!err.to_string().contains("120019UNKNOWN"));
+    }
+
+    #[tokio::test]
+    async fn signed_xrpl_tx_blob_registry_rejects_expired_blob() {
+        let state = AppState::new(AppConfig::default()).unwrap();
+        let mnemonic = SeedManager::generate_mnemonic(DEFAULT_MNEMONIC_WORDS).unwrap();
+        state
+            .init_vaulted_identity_from_mnemonic(&mnemonic, None)
+            .await
+            .unwrap();
+        let wallet_address = state
+            .get_xrpl_wallet()
+            .await
+            .unwrap()
+            .classic_address()
+            .unwrap();
+        let tx_blob = "120019EXPIRED";
+
+        state
+            .register_signed_xrpl_tx_blob(
+                tx_blob,
+                "MintVaultNft",
+                wallet_address,
+                chrono::Utc::now() + chrono::Duration::minutes(2),
+                None,
+            )
+            .await
+            .unwrap();
+        state.expire_signed_xrpl_tx_blob_for_test(tx_blob).await;
+        let err = state
+            .consume_signed_xrpl_tx_blob(tx_blob)
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("approval expired"));
+    }
+
+    #[tokio::test]
+    async fn signed_xrpl_tx_blob_registry_rejects_different_wallet_session() {
+        let state = AppState::new(AppConfig::default()).unwrap();
+        let mnemonic = SeedManager::generate_mnemonic(DEFAULT_MNEMONIC_WORDS).unwrap();
+        state
+            .init_vaulted_identity_from_mnemonic(&mnemonic, None)
+            .await
+            .unwrap();
+
+        state
+            .register_signed_xrpl_tx_blob(
+                "120019ABCD",
+                "SendXrp",
+                "rDifferentWalletSession",
+                chrono::Utc::now() + chrono::Duration::minutes(2),
+                None,
+            )
+            .await
+            .unwrap();
+        let err = state
+            .consume_signed_xrpl_tx_blob("120019ABCD")
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("different wallet session"));
+    }
+
+    #[tokio::test]
+    async fn signed_xrpl_tx_blob_registry_binds_and_accepts_qr_request_metadata() {
+        let state = AppState::new(AppConfig::default()).unwrap();
+        let mnemonic = SeedManager::generate_mnemonic(DEFAULT_MNEMONIC_WORDS).unwrap();
+        state
+            .init_vaulted_identity_from_mnemonic(&mnemonic, None)
+            .await
+            .unwrap();
+        let wallet_address = state
+            .get_xrpl_wallet()
+            .await
+            .unwrap()
+            .classic_address()
+            .unwrap();
+
+        let record = state
+            .register_signed_xrpl_tx_blob(
+                "120019QR",
+                "QrSignXrplTransaction",
+                wallet_address,
+                chrono::Utc::now() + chrono::Duration::minutes(2),
+                Some("qr-request-1".to_string()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(record.request_id.as_deref(), Some("qr-request-1"));
+        assert_eq!(record.signing_intent, "QrSignXrplTransaction");
+
+        let consumed = state.consume_signed_xrpl_tx_blob("120019QR").await.unwrap();
+        assert_eq!(consumed.request_id.as_deref(), Some("qr-request-1"));
+        assert_eq!(consumed.signing_intent, "QrSignXrplTransaction");
+    }
+
+    #[tokio::test]
+    async fn clear_session_clears_signed_xrpl_registry() {
+        let state = AppState::new(AppConfig::default()).unwrap();
+        let mnemonic = SeedManager::generate_mnemonic(DEFAULT_MNEMONIC_WORDS).unwrap();
+        state
+            .init_vaulted_identity_from_mnemonic(&mnemonic, None)
+            .await
+            .unwrap();
+        let wallet_address = state
+            .get_xrpl_wallet()
+            .await
+            .unwrap()
+            .classic_address()
+            .unwrap();
+        state
+            .register_signed_xrpl_tx_blob(
+                "120019ABCD",
+                "MintVaultNft",
+                wallet_address,
+                chrono::Utc::now() + chrono::Duration::minutes(2),
+                None,
+            )
+            .await
+            .unwrap();
+
+        state.clear_session().await;
+
+        assert_eq!(state.signed_xrpl_registry_len().await, 0);
+    }
 }
 
 impl AppConfig {
@@ -126,10 +310,24 @@ pub struct AppState {
     vaulted_identity: RwLock<Option<VaultedIdentityKeys>>,
     /// Vaulted-owned XRPL wallet keys - stored only in memory after unlock.
     xrpl_wallet: RwLock<Option<VaultedXrplWallet>>,
+    /// Short-lived in-memory registry for signed XRPL blobs produced by this app session.
+    signed_xrpl_transactions: RwLock<HashMap<String, SignedXrplTransactionRecord>>,
     /// HTTP client
     http_client: reqwest::Client,
     /// Device fingerprint (unique per app instance, persisted)
     device_fingerprint: String,
+}
+
+/// In-memory submit authorization record for a signed XRPL transaction blob.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedXrplTransactionRecord {
+    pub tx_blob_hash: String,
+    pub signing_intent: String,
+    pub wallet_address: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+    pub request_id: Option<String>,
+    pub consumed: bool,
 }
 
 impl AppState {
@@ -148,6 +346,7 @@ impl AppState {
             keypair: RwLock::new(None),
             vaulted_identity: RwLock::new(None),
             xrpl_wallet: RwLock::new(None),
+            signed_xrpl_transactions: RwLock::new(HashMap::new()),
             http_client,
             device_fingerprint,
         }))
@@ -291,6 +490,8 @@ impl AppState {
         *identity_guard = None;
         let mut wallet_guard = self.xrpl_wallet.write().await;
         *wallet_guard = None;
+        let mut signed_xrpl_guard = self.signed_xrpl_transactions.write().await;
+        signed_xrpl_guard.clear();
         tracing::info!("Session, Vaulted identity, Vaulted XRPL wallet and legacy PRE keypair cleared from memory");
     }
 
@@ -393,6 +594,99 @@ impl AppState {
     /// Checks whether the Vaulted-owned XRPL wallet is loaded in memory.
     pub async fn has_xrpl_wallet(&self) -> bool {
         self.xrpl_wallet.read().await.is_some()
+    }
+
+    /// Registers a locally/mobile-approved signed XRPL blob for one later submit.
+    pub async fn register_signed_xrpl_tx_blob(
+        &self,
+        tx_blob: &str,
+        signing_intent: impl Into<String>,
+        wallet_address: impl Into<String>,
+        expires_at: chrono::DateTime<chrono::Utc>,
+        request_id: Option<String>,
+    ) -> Result<SignedXrplTransactionRecord> {
+        let wallet_address = wallet_address.into();
+        if wallet_address.trim().is_empty() {
+            return Err(ClientError::Validation(
+                "Signed XRPL transaction must be bound to a wallet address".to_string(),
+            ));
+        }
+        if expires_at <= chrono::Utc::now() {
+            return Err(ClientError::Validation(
+                "Signed XRPL transaction approval is already expired".to_string(),
+            ));
+        }
+
+        let record = SignedXrplTransactionRecord {
+            tx_blob_hash: hash_xrpl_tx_blob(tx_blob),
+            signing_intent: signing_intent.into(),
+            wallet_address,
+            created_at: chrono::Utc::now(),
+            expires_at,
+            request_id,
+            consumed: false,
+        };
+
+        let mut guard = self.signed_xrpl_transactions.write().await;
+        guard.retain(|_, existing| !existing.consumed && existing.expires_at > chrono::Utc::now());
+        guard.insert(record.tx_blob_hash.clone(), record.clone());
+        Ok(record)
+    }
+
+    /// Consumes a registered signed XRPL blob before submit.
+    pub async fn consume_signed_xrpl_tx_blob(
+        &self,
+        tx_blob: &str,
+    ) -> Result<SignedXrplTransactionRecord> {
+        let tx_blob_hash = hash_xrpl_tx_blob(tx_blob);
+        let wallet = self.get_xrpl_wallet().await?;
+        let current_wallet = wallet.classic_address()?;
+        let now = chrono::Utc::now();
+
+        let mut guard = self.signed_xrpl_transactions.write().await;
+        let record = guard.get_mut(&tx_blob_hash).ok_or_else(|| {
+            ClientError::Auth(
+                "XRPL transaction submit was rejected because this signed payload is not bound to the current Vaulted session".to_string(),
+            )
+        })?;
+
+        if record.consumed {
+            return Err(ClientError::Auth(
+                "XRPL transaction submit was rejected because this signed payload was already submitted".to_string(),
+            ));
+        }
+        if record.expires_at <= now {
+            return Err(ClientError::Auth(
+                "XRPL transaction submit was rejected because this signed payload approval expired"
+                    .to_string(),
+            ));
+        }
+        if !record.wallet_address.eq_ignore_ascii_case(&current_wallet) {
+            return Err(ClientError::Auth(
+                "XRPL transaction submit was rejected because this signed payload belongs to a different wallet session".to_string(),
+            ));
+        }
+
+        record.consumed = true;
+        Ok(record.clone())
+    }
+
+    #[cfg(test)]
+    pub async fn signed_xrpl_registry_len(&self) -> usize {
+        self.signed_xrpl_transactions.read().await.len()
+    }
+
+    #[cfg(test)]
+    pub async fn expire_signed_xrpl_tx_blob_for_test(&self, tx_blob: &str) {
+        let tx_blob_hash = hash_xrpl_tx_blob(tx_blob);
+        if let Some(record) = self
+            .signed_xrpl_transactions
+            .write()
+            .await
+            .get_mut(&tx_blob_hash)
+        {
+            record.expires_at = chrono::Utc::now() - chrono::Duration::seconds(1);
+        }
     }
 
     /// Checks whether a keypair is in memory
@@ -745,4 +1039,10 @@ impl AppState {
 
         Ok((access_token, new_refresh, expires_in, role))
     }
+}
+
+pub fn hash_xrpl_tx_blob(tx_blob: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(tx_blob.as_bytes());
+    hex::encode(hasher.finalize())
 }
