@@ -17,6 +17,10 @@ use uuid::Uuid;
 use xrpl_vault_crypto_core::VaultedQrPayloadBody;
 
 use crate::{
+    api::grant_signature::{
+        grant_context_hash as compute_grant_context_hash, GrantSignatureContext,
+        GRANT_CREATE_ACTION,
+    },
     auth::{create_token, Claims},
     error::{ApiError, Result},
     services::AppState,
@@ -994,7 +998,7 @@ pub async fn start_qr_file_grant_approval(
     }
 
     let owner_row = sqlx::query(
-        "SELECT owner_identity_id FROM vault_objects WHERE id = $1 AND status = 'active'",
+        "SELECT owner_identity_id, nft_token_id FROM vault_objects WHERE id = $1 AND status = 'active'",
     )
     .bind(&req.vault_object_id)
     .fetch_optional(&state.db)
@@ -1004,6 +1008,9 @@ pub async fn start_qr_file_grant_approval(
     let owner_identity_id: String = owner_row
         .try_get("owner_identity_id")
         .map_err(|e| ApiError::Database(format!("Malformed vault object owner: {e}")))?;
+    let nft_token_id: Option<String> = owner_row
+        .try_get("nft_token_id")
+        .map_err(|e| ApiError::Database(format!("Malformed vault object NFT link: {e}")))?;
     if owner_identity_id != req.identity_id {
         return Err(ApiError::Unauthorized(
             "Vault object is not owned by this identity".into(),
@@ -1043,14 +1050,18 @@ pub async fn start_qr_file_grant_approval(
         req.encrypted_file_key,
         &req.recipient_identity_id,
     )?;
-    let grant_context_hash = file_grant_context_hash(
-        &req.vault_object_id,
-        &grant_id.to_string(),
-        &req.recipient_identity_id,
-        &key_envelope,
-        &permissions_json,
-        req.grant_expires_at.as_ref(),
-    )?;
+    let grant_context = GrantSignatureContext {
+        action: GRANT_CREATE_ACTION,
+        grant_id: &grant_id,
+        vault_object_id: &req.vault_object_id,
+        nft_token_id: nft_token_id.as_deref(),
+        owner_identity_id: &req.identity_id,
+        recipient_identity_id: &req.recipient_identity_id,
+        permissions: &permissions_json,
+        expires_at: req.grant_expires_at.as_ref(),
+        key_envelope: &key_envelope,
+    };
+    let grant_context_hash = compute_grant_context_hash(&grant_context)?;
 
     sqlx::query(
         r#"INSERT INTO qr_file_grant_requests
@@ -1239,6 +1250,40 @@ pub async fn confirm_qr_file_grant_approval(
         return Err(ApiError::Unauthorized(
             "Signing public key does not match identity".into(),
         ));
+    }
+
+    let vault_object_row = sqlx::query(
+        "SELECT owner_identity_id, nft_token_id FROM vault_objects WHERE id = $1 AND status = 'active'",
+    )
+    .bind(&vault_object_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| ApiError::Database(format!("Failed to load vault object: {e}")))?
+    .ok_or_else(|| ApiError::NotFound("Vault object not found".into()))?;
+    let owner_identity_id: String = vault_object_row
+        .try_get("owner_identity_id")
+        .map_err(|e| ApiError::Database(format!("Malformed vault object owner: {e}")))?;
+    if owner_identity_id != identity_id {
+        return Err(ApiError::Unauthorized(
+            "Vault object owner changed before grant approval".into(),
+        ));
+    }
+    let nft_token_id: Option<String> = vault_object_row
+        .try_get("nft_token_id")
+        .map_err(|e| ApiError::Database(format!("Malformed vault object NFT link: {e}")))?;
+    let expected_grant_context_hash = compute_grant_context_hash(&GrantSignatureContext {
+        action: GRANT_CREATE_ACTION,
+        grant_id: &grant_id,
+        vault_object_id: &vault_object_id,
+        nft_token_id: nft_token_id.as_deref(),
+        owner_identity_id: &identity_id,
+        recipient_identity_id: &recipient_identity_id,
+        permissions: &permissions,
+        expires_at: grant_expires_at.as_ref(),
+        key_envelope: &key_envelope,
+    })?;
+    if expected_grant_context_hash != grant_context_hash {
+        return Err(ApiError::Unauthorized("File grant context mismatch".into()));
     }
 
     let oracle_url = state
@@ -1542,28 +1587,6 @@ fn validate_recipient_key_envelope(
     Ok(())
 }
 
-fn file_grant_context_hash(
-    vault_object_id: &str,
-    grant_id: &str,
-    recipient_identity_id: &str,
-    key_envelope: &serde_json::Value,
-    permissions: &serde_json::Value,
-    grant_expires_at: Option<&chrono::DateTime<Utc>>,
-) -> Result<String> {
-    let context = serde_json::json!({
-        "protocol": "vaulted-file-grant-context-v1",
-        "vaultObjectId": vault_object_id,
-        "grantId": grant_id,
-        "recipientIdentityId": recipient_identity_id,
-        "keyEnvelope": key_envelope,
-        "permissions": permissions,
-        "grantExpiresAt": grant_expires_at.map(|ts| ts.to_rfc3339()),
-    });
-    let bytes = serde_json::to_vec(&context)
-        .map_err(|e| ApiError::BadRequest(format!("Invalid file grant context: {e}")))?;
-    Ok(hex::encode(Sha256::digest(bytes)))
-}
-
 fn stable_json_sha256_hex(value: &serde_json::Value) -> Result<String> {
     let bytes = serde_json::to_vec(value)
         .map_err(|e| ApiError::BadRequest(format!("Invalid XRPL transaction JSON: {e}")))?;
@@ -1711,6 +1734,7 @@ mod pair_device_tests {
 
     #[test]
     fn file_grant_context_hash_is_deterministic_and_context_bound() {
+        let grant_id = Uuid::new_v4();
         let permissions = serde_json::json!(["read"]);
         let key_envelope = serde_json::json!({
             "protocol": "vaulted-key-envelope-v1",
@@ -1718,39 +1742,37 @@ mod pair_device_tests {
             "recipient_identity_id": "recipient-1",
             "encrypted_file_key": "encrypted-file-key"
         });
-        let first = file_grant_context_hash(
-            "vault-1",
-            "grant-1",
-            "recipient-1",
-            &key_envelope,
-            &permissions,
-            None,
-        )
-        .unwrap();
-        let second = file_grant_context_hash(
-            "vault-1",
-            "grant-1",
-            "recipient-1",
-            &key_envelope,
-            &permissions,
-            None,
-        )
-        .unwrap();
+        let context = GrantSignatureContext {
+            action: GRANT_CREATE_ACTION,
+            grant_id: &grant_id,
+            vault_object_id: "vault-1",
+            nft_token_id: Some("nft-1"),
+            owner_identity_id: "owner-1",
+            recipient_identity_id: "recipient-1",
+            permissions: &permissions,
+            expires_at: None,
+            key_envelope: &key_envelope,
+        };
+        let first = compute_grant_context_hash(&context).unwrap();
+        let second = compute_grant_context_hash(&context).unwrap();
         let changed_envelope = serde_json::json!({
             "protocol": "vaulted-key-envelope-v1",
             "alg": "X25519-HKDF-SHA256-XCHACHA20POLY1305",
             "recipient_identity_id": "recipient-2",
             "encrypted_file_key": "encrypted-file-key"
         });
-        let changed = file_grant_context_hash(
-            "vault-1",
-            "grant-1",
-            "recipient-2",
-            &changed_envelope,
-            &permissions,
-            None,
-        )
-        .unwrap();
+        let changed_context = GrantSignatureContext {
+            action: GRANT_CREATE_ACTION,
+            grant_id: &grant_id,
+            vault_object_id: "vault-1",
+            nft_token_id: Some("nft-1"),
+            owner_identity_id: "owner-1",
+            recipient_identity_id: "recipient-2",
+            permissions: &permissions,
+            expires_at: None,
+            key_envelope: &changed_envelope,
+        };
+        let changed = compute_grant_context_hash(&changed_context).unwrap();
         assert_eq!(first, second);
         assert_ne!(first, changed);
         assert_eq!(first.len(), 64);

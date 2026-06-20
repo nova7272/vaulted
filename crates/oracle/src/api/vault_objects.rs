@@ -10,6 +10,9 @@ use uuid::Uuid;
 use xrpl_vault_crypto_core::VaultedManifest;
 
 use crate::{
+    api::grant_signature::{
+        verify_grant_owner_signature, GrantSignatureContext, GRANT_CREATE_ACTION,
+    },
     auth::AuthenticatedUser,
     error::{ApiError, Result},
     models::{FileAccessResponse, FileFragmentDto, FileManifestDto, FragmentDownloadInfo},
@@ -228,7 +231,11 @@ pub async fn create_grant(
 ) -> Result<Json<GrantResponse>> {
     let caller_identity_id =
         authenticated_identity_for_request(&state, &auth, None, "identity_id").await?;
-    require_vault_object_owner(&state, &req.vault_object_id, &caller_identity_id).await?;
+    let vault_object =
+        load_active_vault_object_for_owner(&state, &req.vault_object_id, &caller_identity_id)
+            .await?;
+    let owner_signing_public_key =
+        load_identity_signing_public_key(&state, &caller_identity_id).await?;
 
     let id = req.grant_id.unwrap_or_else(Uuid::new_v4);
     let permissions = serde_json::to_value(&req.permissions)
@@ -245,6 +252,22 @@ pub async fn create_grant(
         req.key_envelope,
         req.encrypted_file_key,
         &req.recipient_identity_id,
+    )?;
+    let signature_context = GrantSignatureContext {
+        action: GRANT_CREATE_ACTION,
+        grant_id: &id,
+        vault_object_id: &req.vault_object_id,
+        nft_token_id: vault_object.nft_token_id.as_deref(),
+        owner_identity_id: &caller_identity_id,
+        recipient_identity_id: &req.recipient_identity_id,
+        permissions: &permissions,
+        expires_at: req.expires_at.as_ref(),
+        key_envelope: &key_envelope,
+    };
+    verify_grant_owner_signature(
+        &owner_signing_public_key,
+        &signature_context,
+        &req.owner_signature,
     )?;
 
     sqlx::query(
@@ -672,26 +695,44 @@ async fn authenticated_identity_for_request(
     }
 }
 
-async fn require_vault_object_owner(
+struct ActiveVaultObject {
+    nft_token_id: Option<String>,
+}
+
+async fn load_active_vault_object_for_owner(
     state: &AppState,
     vault_object_id: &str,
     caller_identity_id: &str,
-) -> Result<()> {
-    let owner_identity_id = sqlx::query_scalar::<_, String>(
-        "SELECT owner_identity_id FROM vault_objects WHERE id = $1 AND status = 'active'",
+) -> Result<ActiveVaultObject> {
+    let row = sqlx::query(
+        "SELECT owner_identity_id, nft_token_id FROM vault_objects WHERE id = $1 AND status = 'active'",
     )
     .bind(vault_object_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| ApiError::NotFound(format!("vault object not found: {vault_object_id}")))?;
 
+    let owner_identity_id: String = row.try_get("owner_identity_id")?;
     if owner_identity_id != caller_identity_id {
         return Err(ApiError::Forbidden(
             "vault object owner identity mismatch".into(),
         ));
     }
 
-    Ok(())
+    Ok(ActiveVaultObject {
+        nft_token_id: row.try_get("nft_token_id")?,
+    })
+}
+
+async fn load_identity_signing_public_key(state: &AppState, identity_id: &str) -> Result<String> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT signing_public_key FROM vaulted_identities WHERE id = $1 AND status = 'active'",
+    )
+    .bind(identity_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| ApiError::Database(format!("Failed to load owner identity: {e}")))?
+    .ok_or_else(|| ApiError::Unauthorized("Unknown Vaulted owner identity".into()))
 }
 
 async fn authorize_vault_object_access(

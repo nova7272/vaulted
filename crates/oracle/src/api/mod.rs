@@ -3,6 +3,7 @@
 mod auth;
 mod file_proxy;
 mod files;
+mod grant_signature;
 mod health;
 mod identity;
 mod nft_public;
