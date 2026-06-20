@@ -336,8 +336,10 @@ impl AppState {
     ) -> Result<VaultedIdentityKeys> {
         let identity = VaultedIdentityKeys::from_mnemonic(mnemonic, passphrase)?;
         let xrpl_wallet = VaultedXrplWallet::from_mnemonic(mnemonic, passphrase)?;
-        let legacy_seed = identity.legacy_pre_seed();
+        let mut legacy_seed = identity.legacy_pre_seed();
         let legacy_keypair = self.pre.generate_keypair_from_seed(&legacy_seed)?;
+        use zeroize::Zeroize;
+        legacy_seed.zeroize();
 
         {
             let mut guard = self.vaulted_identity.write().await;

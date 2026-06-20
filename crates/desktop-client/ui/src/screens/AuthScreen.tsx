@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import FingerprintBg from '../components/FingerprintBg'
 import { formatError } from '../utils/formatError'
@@ -43,6 +43,39 @@ const IcoTransfer = () => (
         <polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>
     </svg>
 )
+const IcoKey = () => (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="7.5" cy="15.5" r="4.5"/>
+        <path d="M11 12l8-8"/>
+        <path d="M15 8l2 2"/>
+        <path d="M17 6l2 2"/>
+    </svg>
+)
+const IcoPlusWallet = () => (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M20 12v6a2 2 0 0 1-2 2H5a3 3 0 0 1-3-3V7a3 3 0 0 1 3-3h12a2 2 0 0 1 2 2v2"/>
+        <path d="M16 12h6"/>
+        <path d="M19 9v6"/>
+        <path d="M2 8h17"/>
+        <path d="M16 16h.01"/>
+    </svg>
+)
+const IcoQr = () => (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="3" y="3" width="6" height="6" rx="1"/>
+        <rect x="15" y="3" width="6" height="6" rx="1"/>
+        <rect x="3" y="15" width="6" height="6" rx="1"/>
+        <path d="M15 15h2v2h-2z"/>
+        <path d="M19 15h2v6h-6v-2"/>
+        <path d="M13 13h2"/>
+        <path d="M13 17h2"/>
+    </svg>
+)
+const IcoChevronRight = () => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M9 18l6-6-6-6"/>
+    </svg>
+)
 
 export default function AuthScreen({ onLogin, lockedAfterRestart = true }: AuthScreenProps) {
     const [step, setStep] = useState<AuthStep>('initial')
@@ -51,13 +84,23 @@ export default function AuthScreen({ onLogin, lockedAfterRestart = true }: AuthS
     const [createdIdentity, setCreatedIdentity] = useState<VaultedIdentityResponse|null>(null)
     const [restorePhrase, setRestorePhrase] = useState('')
     const [seedSaved, setSeedSaved] = useState(false)
-    const [copyArmed, setCopyArmed] = useState(false)
-    const [copied, setCopied] = useState(false)
     const [showQrLogin, setShowQrLogin] = useState(false)
 
     const seedWords = useMemo(() => (createdIdentity?.mnemonic || '').split(' ').filter(Boolean), [createdIdentity])
 
-    const finishLogin = async () => onLogin(await invoke<UserInfo>('get_current_user'))
+    const clearSeedUiState = useCallback(() => {
+        setCreatedIdentity(null)
+        setRestorePhrase('')
+        setSeedSaved(false)
+    }, [])
+
+    useEffect(() => clearSeedUiState, [clearSeedUiState])
+
+    const finishLogin = async () => {
+        const user = await invoke<UserInfo>('get_current_user')
+        clearSeedUiState()
+        onLogin(user)
+    }
 
     const handleQrLoginSuccess = async (result: QrLoginPollResponse) => {
         if (result.localDecryptAvailable || result.localIdentityMatchesApproved) {
@@ -74,8 +117,7 @@ export default function AuthScreen({ onLogin, lockedAfterRestart = true }: AuthS
             setError(null)
             setStatus('Generating your Vaulted seed phrase…')
             setSeedSaved(false)
-            setCopied(false)
-            setCopyArmed(false)
+            setRestorePhrase('')
             const identity = await invoke<VaultedIdentityResponse>('create_vaulted_wallet', { wordCount: 12, passphrase: null })
             setCreatedIdentity(identity)
             setStep('backup')
@@ -91,22 +133,10 @@ export default function AuthScreen({ onLogin, lockedAfterRestart = true }: AuthS
             setError(null)
             setStatus('Restoring your Vaulted wallet…')
             await invoke<VaultedIdentityResponse>('restore_vaulted_wallet', { mnemonic: restorePhrase.trim(), passphrase: null })
+            setRestorePhrase('')
             setStatus('Vaulted wallet restored.')
             await finishLogin()
         } catch(e) { setError(formatError(e)) }
-    }
-
-    const copySeedPhrase = async () => {
-        if (!createdIdentity?.mnemonic) return
-        if (!copyArmed) {
-            setCopyArmed(true)
-            setStatus('Only copy this phrase in a private place. Clipboard history may be stored by your system.')
-            return
-        }
-        await navigator.clipboard.writeText(createdIdentity.mnemonic)
-        setCopied(true)
-        setStatus('Seed phrase copied. Paste it only into your offline backup, then clear the clipboard.')
-        setTimeout(() => setCopied(false), 2000)
     }
 
     return (
@@ -128,19 +158,34 @@ export default function AuthScreen({ onLogin, lockedAfterRestart = true }: AuthS
                         One wallet unlocks encryption, Oracle access, and XRPL vault ownership.
                         {lockedAfterRestart && ' After restart, Vaulted locks locally; restore with your 12-word phrase to unlock your existing wallet and files.'}
                     </p>
+                    <p className="v-auth-sub">
+                        Desktop seed login is intended for local/testnet MVP use. Production mainnet mode will use mobile QR approval.
+                    </p>
 
                     <div className="v-auth-choice-grid">
                         <button className="v-auth-choice primary" onClick={() => setStep('restore')}>
-                            <span className="v-auth-choice-title">Sign in with seed phrase</span>
-                            <span className="v-auth-choice-sub">Unlock Vaulted with your existing 12-word phrase.</span>
+                            <span className="v-auth-choice-icon"><IcoKey /></span>
+                            <span className="v-auth-choice-copy">
+                                <span className="v-auth-choice-title">Sign in with seed phrase</span>
+                                <span className="v-auth-choice-sub">Unlock Vaulted with your existing 12-word phrase.</span>
+                            </span>
+                            <span className="v-auth-choice-arrow"><IcoChevronRight /></span>
                         </button>
                         <button className="v-auth-choice" onClick={createVaultedWallet}>
-                            <span className="v-auth-choice-title">Create new wallet</span>
-                            <span className="v-auth-choice-sub">Generate a new seed phrase and back it up offline.</span>
+                            <span className="v-auth-choice-icon"><IcoPlusWallet /></span>
+                            <span className="v-auth-choice-copy">
+                                <span className="v-auth-choice-title">Create new wallet</span>
+                                <span className="v-auth-choice-sub">Generate a new seed phrase and back it up offline.</span>
+                            </span>
+                            <span className="v-auth-choice-arrow"><IcoChevronRight /></span>
                         </button>
                         <button className="v-auth-choice" onClick={() => setShowQrLogin(true)}>
-                            <span className="v-auth-choice-title">Sign in with QR code</span>
-                            <span className="v-auth-choice-sub">Approve an Oracle session from a trusted device. Restore your 12-word wallet here for local files, minting, transfers, and decrypt.</span>
+                            <span className="v-auth-choice-icon"><IcoQr /></span>
+                            <span className="v-auth-choice-copy">
+                                <span className="v-auth-choice-title">Sign in with QR code</span>
+                                <span className="v-auth-choice-sub">Approve an Oracle session from a trusted device.</span>
+                            </span>
+                            <span className="v-auth-choice-arrow"><IcoChevronRight /></span>
                         </button>
                     </div>
 
@@ -161,8 +206,7 @@ export default function AuthScreen({ onLogin, lockedAfterRestart = true }: AuthS
                     </div>
 
                     <div className="v-seed-actions">
-                        <button className="v-btn" onClick={copySeedPhrase}>{copied ? 'Copied' : copyArmed ? 'Copy anyway' : 'Copy seed phrase'}</button>
-                        <div className="v-seed-warning">Never share this phrase. It will not be shown again after onboarding.</div>
+                        <div className="v-seed-warning">Never share this phrase. Write it offline; Vaulted will not copy it to the clipboard.</div>
                     </div>
 
                     <label className="v-backup-confirm">
@@ -180,14 +224,21 @@ export default function AuthScreen({ onLogin, lockedAfterRestart = true }: AuthS
                 <div className="v-login-card v-auth-card-wide">
                     <h3>Restore Vaulted wallet</h3>
                     <p className="v-auth-sub">Enter your recovery phrase locally to unlock your existing Vaulted identity and XRPL wallet.</p>
+                    <p className="v-auth-sub">Desktop seed login is for local/testnet MVP use; production mainnet mode will use mobile QR approval.</p>
                     <textarea
                         className="v-restore-textarea"
                         value={restorePhrase}
                         onChange={e => setRestorePhrase(e.target.value)}
                         placeholder="Enter your 12-word Vaulted seed phrase"
+                        autoComplete="off"
+                        autoCapitalize="off"
+                        autoCorrect="off"
+                        spellCheck={false}
+                        inputMode="text"
+                        data-sensitive="seed-phrase"
                     />
                     <button className="v-btn-vaulted" onClick={restoreVaultedWallet} disabled={restorePhrase.trim().split(/\s+/).filter(Boolean).length !== 12}>Restore wallet</button>
-                    <button className="v-auth-link-button" onClick={() => { setStep('initial'); setError(null); setStatus('') }}>Back</button>
+                    <button className="v-auth-link-button" onClick={() => { setStep('initial'); setError(null); setStatus(''); clearSeedUiState() }}>Back</button>
                     {status && <div className="v-auth-status">{status}</div>}
                     {error && <div className="v-auth-error">{error}</div>}
                 </div>

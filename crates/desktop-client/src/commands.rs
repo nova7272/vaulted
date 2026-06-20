@@ -83,13 +83,20 @@ pub async fn create_vaulted_wallet(
 #[tauri::command(rename_all = "camelCase")]
 pub async fn restore_vaulted_wallet(
     state: State<'_, Arc<AppState>>,
-    mnemonic: String,
+    mut mnemonic: String,
     passphrase: Option<String>,
 ) -> Result<VaultedIdentityResponse> {
-    SeedManager::validate_mnemonic(&mnemonic)?;
-    let identity = state
+    use zeroize::Zeroize;
+
+    if let Err(err) = SeedManager::validate_mnemonic(&mnemonic) {
+        mnemonic.zeroize();
+        return Err(err.into());
+    }
+    let identity_result = state
         .init_vaulted_identity_from_mnemonic(&mnemonic, passphrase.as_deref())
-        .await?;
+        .await;
+    mnemonic.zeroize();
+    let identity = identity_result?;
 
     let response = VaultedIdentityResponse {
         vaulted_identity_id: identity.identity_id_hex(),

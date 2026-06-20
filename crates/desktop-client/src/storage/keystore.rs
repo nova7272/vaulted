@@ -1,11 +1,13 @@
 //! Keystore with encrypted file storage
 //!
-//! Seeds are encrypted at rest using AES-256-GCM with a key derived from
-//! a password via Argon2id. (CRIT-05)
+//! Compatibility-only storage for legacy PRE recovery material. Current desktop
+//! seed mode keeps Vaulted seed/XRPL wallet material in memory after unlock.
+//! Do not use this as a mainnet-grade seed custody backend.
 
 use directories::ProjectDirs;
 use std::fs;
 use std::path::PathBuf;
+use zeroize::Zeroize;
 
 use xrpl_vault_crypto_core::pre::{PreKeyPair, PrePublicKey, ProxyReEncryption};
 
@@ -13,8 +15,6 @@ use crate::error::{ClientError, Result};
 
 #[allow(dead_code)]
 const SERVICE_NAME: &str = "xrpl-vault";
-/// Default password used when user hasn't set one (better than plaintext)
-const DEFAULT_KEYSTORE_PASSWORD: &str = "xrpl-vault-local-keystore-v1";
 
 pub struct Keystore {
     data_dir: PathBuf,
@@ -55,7 +55,10 @@ impl Keystore {
         self.data_dir.join(format!("{}.salt", wallet_address))
     }
 
-    /// Derive encryption key from password using Argon2id
+    /// Derive encryption key from password.
+    ///
+    /// This is legacy compatibility code and is not mainnet-grade seed custody.
+    /// New production persistence should use an approved OS keychain or KDF design.
     fn derive_key(&self, password: &str, salt: &[u8; 16]) -> [u8; 32] {
         use sha2::{Digest, Sha256};
 
@@ -129,7 +132,10 @@ impl Keystore {
     }
 
     pub fn save_seed(&self, wallet_address: &str, seed: &[u8; 32]) -> Result<()> {
-        self.save_seed_with_password(wallet_address, seed, DEFAULT_KEYSTORE_PASSWORD)
+        let _ = (wallet_address, seed);
+        Err(ClientError::Keystore(
+            "Default-password local seed storage is disabled; use explicit password storage only in approved dev/test flows".to_string(),
+        ))
     }
 
     pub fn save_seed_with_password(
@@ -144,10 +150,12 @@ impl Keystore {
             .map_err(|e| ClientError::Keystore(format!("RNG error: {}", e)))?;
 
         // Derive encryption key
-        let enc_key = self.derive_key(password, &salt);
+        let mut enc_key = self.derive_key(password, &salt);
 
         // Encrypt seed
-        let encrypted = self.encrypt_data(&enc_key, seed)?;
+        let encrypted_result = self.encrypt_data(&enc_key, seed);
+        enc_key.zeroize();
+        let encrypted = encrypted_result?;
 
         // Save encrypted seed
         use base64::Engine;
@@ -177,7 +185,10 @@ impl Keystore {
     }
 
     pub fn load_keypair(&self, wallet_address: &str) -> Result<Option<PreKeyPair>> {
-        self.load_keypair_with_password(wallet_address, DEFAULT_KEYSTORE_PASSWORD)
+        let _ = wallet_address;
+        Err(ClientError::Keystore(
+            "Default-password local seed loading is disabled; use explicit password storage only in approved dev/test flows".to_string(),
+        ))
     }
 
     pub fn load_keypair_with_password(
@@ -234,16 +245,21 @@ impl Keystore {
             .map_err(|e| ClientError::Keystore(format!("Invalid encrypted seed: {}", e)))?;
 
         // Derive key and decrypt
-        let enc_key = self.derive_key(password, &salt);
-        let seed_bytes = self.decrypt_data(&enc_key, &encrypted)?;
+        let mut enc_key = self.derive_key(password, &salt);
+        let seed_bytes_result = self.decrypt_data(&enc_key, &encrypted);
+        enc_key.zeroize();
+        let mut seed_bytes = seed_bytes_result?;
 
         if seed_bytes.len() != 32 {
+            seed_bytes.zeroize();
             return Err(ClientError::Keystore("Invalid seed length".to_string()));
         }
 
         let mut seed = [0u8; 32];
         seed.copy_from_slice(&seed_bytes);
+        seed_bytes.zeroize();
         let keypair = self.pre.generate_keypair_from_seed(&seed)?;
+        seed.zeroize();
 
         tracing::info!("Encrypted keypair loaded for {}", wallet_address);
         Ok(Some(keypair))
@@ -258,16 +274,18 @@ impl Keystore {
         use base64::Engine;
 
         let seed_b64 = fs::read_to_string(legacy_path)?;
-        let seed_bytes = base64::engine::general_purpose::STANDARD
+        let mut seed_bytes = base64::engine::general_purpose::STANDARD
             .decode(seed_b64.trim())
             .map_err(|e| ClientError::Keystore(format!("Invalid legacy seed: {}", e)))?;
 
         if seed_bytes.len() != 32 {
+            seed_bytes.zeroize();
             return Err(ClientError::Keystore("Invalid seed length".to_string()));
         }
 
         let mut seed = [0u8; 32];
         seed.copy_from_slice(&seed_bytes);
+        seed_bytes.zeroize();
 
         // Save in encrypted format
         self.save_seed_with_password(wallet_address, &seed, password)?;
@@ -280,6 +298,7 @@ impl Keystore {
         );
 
         let keypair = self.pre.generate_keypair_from_seed(&seed)?;
+        seed.zeroize();
         Ok(Some(keypair))
     }
 
@@ -313,5 +332,19 @@ impl Keystore {
 impl Default for Keystore {
     fn default() -> Self {
         Self::new().expect("Failed to create keystore")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_password_seed_storage_helpers_fail_closed() {
+        let keystore = Keystore::new().unwrap();
+        let seed = [7u8; 32];
+
+        assert!(keystore.save_seed("rDevOnly", &seed).is_err());
+        assert!(keystore.load_keypair("rDevOnly").is_err());
     }
 }
