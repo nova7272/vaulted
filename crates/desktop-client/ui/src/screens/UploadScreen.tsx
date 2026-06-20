@@ -1,13 +1,13 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
-import { stat } from '@tauri-apps/plugin-fs'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { getNftColors } from '../utils/nft_image'
 import { formatError } from '../utils/formatError'
 
 interface FileEntry { path: string; name: string; size: number; oversized: boolean }
+interface SelectedFileMetadata { path: string; name: string; size: number; isFile: boolean; isDir: boolean }
 
 const MAX_FILE_SIZE = 100 * 1024 * 1024 // 100MB — matches backend AppConfig
 
@@ -134,19 +134,22 @@ export default function UploadScreen({ onNavigate }: { oracleConnected?: boolean
 
   // --- Load file info (sizes) after selection ---
   const loadFileInfo = useCallback(async (paths: string[]) => {
-    const entries: FileEntry[] = await Promise.all(
-        paths.map(async (p) => {
-          const name = p.split(/[\\/]/).pop() || 'file'
-          try {
-            const info = await stat(p)
-            const size = info.size ?? 0
-            return { path: p, name, size, oversized: size > MAX_FILE_SIZE }
-          } catch {
-            return { path: p, name, size: 0, oversized: false }
-          }
-        })
-    )
-    setFileEntries(entries)
+    try {
+      const metadata = await invoke<SelectedFileMetadata[]>('get_selected_file_metadata', { filePaths: paths })
+      setFileEntries(metadata.map((entry) => ({
+        path: entry.path,
+        name: entry.name,
+        size: entry.size,
+        oversized: entry.size > MAX_FILE_SIZE
+      })))
+    } catch {
+      setFileEntries(paths.map((p) => ({
+        path: p,
+        name: p.split(/[\\/]/).pop() || 'file',
+        size: 0,
+        oversized: false
+      })))
+    }
   }, [])
 
   // --- Cancel / Burn on oracle side ---

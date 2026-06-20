@@ -9,7 +9,7 @@
     "frontendDist": "./ui/dist"
   },
   "app": {
-    "withGlobalTauri": true,
+    "withGlobalTauri": false,
     "windows": [
       {
         "label": "main",
@@ -26,7 +26,8 @@
       }
     ],
     "security": {
-      "csp": null,
+      "csp": "default-src 'self' customprotocol: asset:; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: customprotocol: data: blob:; font-src 'self' asset: customprotocol: data:; connect-src 'self' http://localhost:3000 http://127.0.0.1:3000 http://localhost:9001 http://127.0.0.1:9001 wss://s.altnet.rippletest.net:51233 wss://xrplcluster.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'none'",
+      "devCsp": "default-src 'self' http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:* customprotocol: asset:; script-src 'self' 'unsafe-eval' http://localhost:* http://127.0.0.1:*; style-src 'self' 'unsafe-inline' http://localhost:* http://127.0.0.1:*; img-src 'self' asset: customprotocol: data: blob: http://localhost:* http://127.0.0.1:*; font-src 'self' asset: customprotocol: data: http://localhost:* http://127.0.0.1:*; connect-src 'self' http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:* wss://s.altnet.rippletest.net:51233 wss://xrplcluster.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'none'",
       "capabilities": ["default"]
     }
   },
@@ -40,10 +41,5 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
-  },
-  "plugins": {
-    "shell": {
-      "open": true
-    }
   }
 }

@@ -2076,6 +2076,57 @@ pub struct UploadProgress {
     pub message: String,
 }
 
+/// Minimal file metadata returned for user-selected upload paths.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectedFileMetadata {
+    pub path: String,
+    pub name: String,
+    pub size: u64,
+    pub is_file: bool,
+    pub is_dir: bool,
+}
+
+/// Returns metadata for selected upload paths without exposing the Tauri fs plugin to the WebView.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_selected_file_metadata(
+    state: State<'_, Arc<AppState>>,
+    file_paths: Vec<String>,
+) -> Result<Vec<SelectedFileMetadata>> {
+    state.get_session().await?;
+
+    if file_paths.len() > 100 {
+        return Err(ClientError::Validation(
+            "Too many file paths selected".to_string(),
+        ));
+    }
+
+    let mut entries = Vec::with_capacity(file_paths.len());
+    for file_path in file_paths {
+        let path = Path::new(&file_path);
+        let metadata = tokio::fs::metadata(path).await?;
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file")
+            .to_string();
+
+        entries.push(SelectedFileMetadata {
+            path: file_path,
+            name,
+            size: if metadata.is_file() {
+                metadata.len()
+            } else {
+                0
+            },
+            is_file: metadata.is_file(),
+            is_dir: metadata.is_dir(),
+        });
+    }
+
+    Ok(entries)
+}
+
 /// Uploads a file: encrypts it, sends it to storage, and mints an NFT
 #[tauri::command]
 pub async fn upload_file(

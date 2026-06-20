@@ -114,9 +114,7 @@ fn main() {
     // Start Tauri
     let builder = tauri::Builder::default()
         .manage(state)
-        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
         .setup(|app| {
             tracing::info!(
                 phase = "setup",
@@ -311,6 +309,7 @@ fn main() {
             cancel_transfer,
             get_transfer_history,
             // Vault/Files
+            get_selected_file_metadata,
             get_my_files,
             upload_file,
             upload_files,
