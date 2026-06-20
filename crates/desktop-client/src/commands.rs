@@ -14,9 +14,10 @@ use xrpl_vault_crypto_core::{
     build_nftoken_create_offer_tx, build_nftoken_mint_tx, build_xrp_payment_tx,
     encryption_public_key_fingerprint_hex, format_fingerprint_groups,
     generate_vaulted_nft_metadata_preview as build_vaulted_nft_metadata_preview,
-    is_valid_xrpl_classic_address, open_key_envelope, seal_key_for_recipient_hex, KeyEnvelope,
-    SeedManager, VaultedNftMetadataInput, VaultedNftMetadataPreview, VaultedQrSigningRequest,
-    VaultedSignedXrplTransaction, DEFAULT_MNEMONIC_WORDS,
+    is_valid_xrpl_classic_address, open_key_envelope, seal_key_for_recipient_hex,
+    validate_qr_xrpl_signing_request, KeyEnvelope, SeedManager, VaultedNftMetadataInput,
+    VaultedNftMetadataPreview, VaultedQrSigningRequest, VaultedSignedXrplTransaction,
+    XrplSigningIntent, DEFAULT_MNEMONIC_WORDS,
 };
 
 use crate::auth::{Session, VaultedSigningRequest};
@@ -536,7 +537,15 @@ async fn sign_vaulted_nft_mint_transaction_inner(
         last_ledger_sequence,
         "Prepared Vaulted NFTokenMint signing fields"
     );
-    wallet.sign_xrpl_transaction_json(&tx).map_err(Into::into)
+    let intent = XrplSigningIntent::MintVaultNft {
+        metadata_uri: request.metadata_uri,
+        nftoken_taxon: request.nftoken_taxon.unwrap_or(0),
+        flags: request.flags.unwrap_or(8),
+        transfer_fee: request.transfer_fee,
+    };
+    wallet
+        .sign_xrpl_transaction_for_intent(&intent, &tx)
+        .map_err(Into::into)
 }
 
 /// Builds, locally signs, and optionally submits an NFTokenMint transaction to XRPL.
@@ -1286,6 +1295,7 @@ pub async fn start_vaulted_xrpl_signing_request(
         Some(account) if !account.trim().is_empty() => account,
         _ => wallet.classic_address()?,
     };
+    validate_qr_xrpl_signing_request(&xrpl_tx_json, &resolved_account)?;
     let oracle = OracleClient::new(OracleConfig {
         base_url: state.config.oracle_url.clone(),
         timeout_secs: 30,
@@ -4069,7 +4079,11 @@ async fn create_transfer_offer_inner(
         account_info.sequence,
         last_ledger_sequence,
     );
-    let signed = wallet.sign_xrpl_transaction_json(&tx)?;
+    let intent = XrplSigningIntent::CreateNftTransferOffer {
+        nftoken_id: nft_token_id.clone(),
+        destination: to_address.clone(),
+    };
+    let signed = wallet.sign_xrpl_transaction_for_intent(&intent, &tx)?;
     let tx_blob = signed.tx_blob.ok_or_else(|| {
         ClientError::Xrpl(
             "Local signing did not produce a signed XRPL transaction payload".to_string(),
@@ -4264,7 +4278,10 @@ async fn claim_nft_inner(state: &Arc<AppState>, offer_index: String) -> Result<C
         account_info.sequence,
         last_ledger_sequence,
     );
-    let signed = wallet.sign_xrpl_transaction_json(&tx)?;
+    let intent = XrplSigningIntent::AcceptNftTransferOffer {
+        offer_index: offer_index.clone(),
+    };
+    let signed = wallet.sign_xrpl_transaction_for_intent(&intent, &tx)?;
     let tx_blob = signed.tx_blob.ok_or_else(|| {
         ClientError::Xrpl(
             "Local signing did not produce a signed XRPL transaction payload".to_string(),
@@ -4697,7 +4714,10 @@ pub async fn delete_vault(
         account_info.sequence,
         last_ledger_sequence,
     );
-    let signed = wallet.sign_xrpl_transaction_json(&burn_tx)?;
+    let intent = XrplSigningIntent::BurnVaultNft {
+        nftoken_id: nft_token_id.clone(),
+    };
+    let signed = wallet.sign_xrpl_transaction_for_intent(&intent, &burn_tx)?;
     let tx_blob = signed.tx_blob.clone().ok_or_else(|| {
         ClientError::Xrpl("Signed NFTokenBurn transaction is missing tx_blob".to_string())
     })?;
@@ -5821,7 +5841,12 @@ pub async fn send_xrp_payment(
         account_info.sequence,
         last_ledger_sequence,
     );
-    let signed = wallet.sign_xrpl_transaction_json(&tx)?;
+    let intent = XrplSigningIntent::SendXrp {
+        destination: destination.clone(),
+        amount_drops: amount_drops.to_string(),
+        destination_tag,
+    };
+    let signed = wallet.sign_xrpl_transaction_for_intent(&intent, &tx)?;
     let tx_blob = signed.tx_blob.ok_or_else(|| {
         ClientError::Xrpl(
             "Local signing did not produce a signed XRPL transaction payload".to_string(),

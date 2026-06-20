@@ -34,6 +34,55 @@ const SECP256K1_ORDER: [u8; 32] = [
     0xba, 0xae, 0xdc, 0xe6, 0xaf, 0x48, 0xa0, 0x3b, 0xbf, 0xd2, 0x5e, 0x8c, 0xd0, 0x36, 0x41, 0x41,
 ];
 const TF_TRANSFERABLE: u32 = 0x0000_0008;
+const TF_NFTOKEN_SELL_OFFER: u32 = 0x0000_0001;
+const MAX_SIGNING_FEE_DROPS: u64 = 100_000;
+const MAX_TRANSFER_FEE_BPS: u16 = 50_000;
+
+/// High-level user-approved XRPL signing intent.
+///
+/// Vaulted only signs a transaction when the JSON exactly matches one of these
+/// reviewed intents. This prevents hidden XRPL fields or unrelated transaction
+/// types from reaching the local signer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum XrplSigningIntent {
+    /// Send native XRP drops to a reviewed destination.
+    SendXrp {
+        /// Reviewed destination classic address.
+        destination: String,
+        /// Reviewed native XRP amount in drops.
+        amount_drops: String,
+        /// Reviewed destination tag, when supplied by the user.
+        destination_tag: Option<u32>,
+    },
+    /// Mint a Vaulted NFT with a Vaulted-generated metadata URI.
+    MintVaultNft {
+        /// Reviewed/generated metadata URI before XRPL hex encoding.
+        metadata_uri: String,
+        /// Reviewed NFT taxon.
+        nftoken_taxon: u32,
+        /// Reviewed NFT flags.
+        flags: u32,
+        /// Reviewed transfer fee, if any.
+        transfer_fee: Option<u16>,
+    },
+    /// Create a private zero-amount NFT transfer sell offer.
+    CreateNftTransferOffer {
+        /// Selected Vaulted NFT token id.
+        nftoken_id: String,
+        /// Reviewed recipient classic address.
+        destination: String,
+    },
+    /// Accept a verified NFT transfer sell offer.
+    AcceptNftTransferOffer {
+        /// Verified NFToken sell offer ledger index.
+        offer_index: String,
+    },
+    /// Burn the selected Vaulted NFT after explicit confirmation.
+    BurnVaultNft {
+        /// Selected Vaulted NFT token id.
+        nftoken_id: String,
+    },
+}
 
 /// Vaulted-derived XRPL wallet. Private key material is zeroized on drop.
 #[derive(Clone, Zeroize)]
@@ -97,6 +146,8 @@ impl VaultedXrplWallet {
         &self,
         tx_json: &serde_json::Value,
     ) -> Result<VaultedSignedXrplTransaction> {
+        let account = self.classic_address()?;
+        validate_qr_xrpl_signing_request(tx_json, &account)?;
         let canonical =
             serde_json::to_vec(tx_json).map_err(|e| CryptoError::Serialization(e.to_string()))?;
         let digest = sha512_half(&canonical);
@@ -120,18 +171,22 @@ impl VaultedXrplWallet {
     /// transaction types.
     pub fn sign_xrpl_transaction_json(
         &self,
+        _tx_json: &serde_json::Value,
+    ) -> Result<VaultedSignedXrplTransaction> {
+        Err(CryptoError::InvalidData(
+            "XRPL transaction signing requires an explicit Vaulted signing intent".to_string(),
+        ))
+    }
+
+    /// Locally signs a Vaulted-supported XRPL transaction after intent policy validation.
+    pub fn sign_xrpl_transaction_for_intent(
+        &self,
+        intent: &XrplSigningIntent,
         tx_json: &serde_json::Value,
     ) -> Result<VaultedSignedXrplTransaction> {
         let mut tx = tx_json.clone();
-        validate_supported_signable_tx(&tx)?;
-
-        let account = string_field(&tx, "Account")?;
         let wallet_address = self.classic_address()?;
-        if account != wallet_address {
-            return Err(CryptoError::InvalidData(
-                "XRPL transaction Account does not match Vaulted wallet".to_string(),
-            ));
-        }
+        validate_xrpl_transaction_for_intent(intent, &tx, &wallet_address)?;
 
         let signing_public_key = self.public_key_hex()?;
         tx["SigningPubKey"] = serde_json::Value::String(signing_public_key.clone());
@@ -336,6 +391,78 @@ pub fn add_xrpl_signing_fields(
     tx_json
 }
 
+/// Validates a signable XRPL transaction against a reviewed Vaulted intent.
+pub fn validate_xrpl_transaction_for_intent(
+    intent: &XrplSigningIntent,
+    tx: &serde_json::Value,
+    wallet_address: &str,
+) -> Result<()> {
+    validate_common_signing_fields(tx, wallet_address)?;
+    match intent {
+        XrplSigningIntent::SendXrp {
+            destination,
+            amount_drops,
+            destination_tag,
+        } => validate_xrp_payment_policy(tx, destination, amount_drops, *destination_tag),
+        XrplSigningIntent::MintVaultNft {
+            metadata_uri,
+            nftoken_taxon,
+            flags,
+            transfer_fee,
+        } => validate_nftoken_mint_policy(tx, metadata_uri, *nftoken_taxon, *flags, *transfer_fee),
+        XrplSigningIntent::CreateNftTransferOffer {
+            nftoken_id,
+            destination,
+        } => validate_nftoken_create_offer_policy(tx, nftoken_id, destination),
+        XrplSigningIntent::AcceptNftTransferOffer { offer_index } => {
+            validate_nftoken_accept_offer_policy(tx, offer_index)
+        },
+        XrplSigningIntent::BurnVaultNft { nftoken_id } => {
+            validate_nftoken_burn_policy(tx, nftoken_id)
+        },
+    }
+}
+
+/// Validates an unsigned QR XRPL signing request before the wallet signs its digest.
+///
+/// Current QR handoff support is intentionally limited to Vaulted NFTokenMint
+/// requests. It does not accept arbitrary transaction JSON.
+pub fn validate_qr_xrpl_signing_request(
+    tx: &serde_json::Value,
+    wallet_address: &str,
+) -> Result<()> {
+    require_exact_fields(
+        tx,
+        &[
+            "TransactionType",
+            "Account",
+            "URI",
+            "NFTokenTaxon",
+            "Flags",
+            "TransferFee",
+        ],
+    )?;
+    require_transaction_type(tx, "NFTokenMint")?;
+    require_account(tx, wallet_address)?;
+    let flags = u32_field(tx, "Flags")?;
+    if flags != TF_TRANSFERABLE {
+        return Err(CryptoError::InvalidData(
+            "QR NFTokenMint flags are not allowlisted".to_string(),
+        ));
+    }
+    let _ = string_field(tx, "URI")?;
+    let _ = u32_field(tx, "NFTokenTaxon")?;
+    if tx.get("TransferFee").is_some() {
+        let fee = u32_field(tx, "TransferFee")?;
+        if fee > MAX_TRANSFER_FEE_BPS as u32 {
+            return Err(CryptoError::InvalidData(
+                "QR NFTokenMint TransferFee exceeds Vaulted policy".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_supported_signable_tx(tx: &serde_json::Value) -> Result<()> {
     let transaction_type = string_field(tx, "TransactionType")?;
     match transaction_type.as_str() {
@@ -351,16 +478,306 @@ fn validate_supported_signable_tx(tx: &serde_json::Value) -> Result<()> {
             )));
         },
     }
-    validate_common_signing_fields(tx)?;
+    validate_common_shape_fields(tx)?;
     Ok(())
 }
 
-fn validate_common_signing_fields(tx: &serde_json::Value) -> Result<()> {
+fn validate_common_shape_fields(tx: &serde_json::Value) -> Result<()> {
     let _ = string_field(tx, "Account")?;
     let _ = string_field(tx, "Fee")?;
     let _ = u32_field(tx, "Sequence")?;
     let _ = u32_field(tx, "LastLedgerSequence")?;
     Ok(())
+}
+
+fn validate_common_signing_fields(tx: &serde_json::Value, wallet_address: &str) -> Result<()> {
+    reject_forbidden_fields(tx)?;
+    require_account(tx, wallet_address)?;
+    let fee = string_field(tx, "Fee")?;
+    let fee = parse_drops(&fee, "Fee")?;
+    if fee == 0 || fee > MAX_SIGNING_FEE_DROPS {
+        return Err(CryptoError::InvalidData(
+            "XRPL transaction Fee exceeds Vaulted policy".to_string(),
+        ));
+    }
+    let sequence = u32_field(tx, "Sequence")?;
+    if sequence == 0 {
+        return Err(CryptoError::InvalidData(
+            "XRPL transaction Sequence must be populated from account_info".to_string(),
+        ));
+    }
+    let last_ledger_sequence = u32_field(tx, "LastLedgerSequence")?;
+    if last_ledger_sequence == 0 {
+        return Err(CryptoError::InvalidData(
+            "XRPL transaction LastLedgerSequence is required".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn require_account(tx: &serde_json::Value, wallet_address: &str) -> Result<()> {
+    let account = string_field(tx, "Account")?;
+    if account != wallet_address {
+        return Err(CryptoError::InvalidData(
+            "XRPL transaction Account does not match Vaulted wallet".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_xrp_payment_policy(
+    tx: &serde_json::Value,
+    destination: &str,
+    amount_drops: &str,
+    destination_tag: Option<u32>,
+) -> Result<()> {
+    require_exact_fields(
+        tx,
+        &[
+            "TransactionType",
+            "Account",
+            "Destination",
+            "Amount",
+            "DestinationTag",
+            "Fee",
+            "Sequence",
+            "LastLedgerSequence",
+        ],
+    )?;
+    require_transaction_type(tx, "Payment")?;
+    require_string_equals(tx, "Destination", destination)?;
+    require_string_equals(tx, "Amount", amount_drops)?;
+    if parse_drops(amount_drops, "Amount")? == 0 {
+        return Err(CryptoError::InvalidData(
+            "XRP payment Amount must be greater than zero".to_string(),
+        ));
+    }
+    match (destination_tag, tx.get("DestinationTag")) {
+        (Some(expected), Some(_)) => {
+            let actual = u32_field(tx, "DestinationTag")?;
+            if actual != expected {
+                return Err(CryptoError::InvalidData(
+                    "XRP payment DestinationTag does not match intent".to_string(),
+                ));
+            }
+        },
+        (None, None) => {},
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(CryptoError::InvalidData(
+                "XRP payment DestinationTag does not match intent".to_string(),
+            ));
+        },
+    }
+    Ok(())
+}
+
+fn validate_nftoken_mint_policy(
+    tx: &serde_json::Value,
+    metadata_uri: &str,
+    nftoken_taxon: u32,
+    flags: u32,
+    transfer_fee: Option<u16>,
+) -> Result<()> {
+    require_exact_fields(
+        tx,
+        &[
+            "TransactionType",
+            "Account",
+            "URI",
+            "NFTokenTaxon",
+            "Flags",
+            "TransferFee",
+            "Fee",
+            "Sequence",
+            "LastLedgerSequence",
+        ],
+    )?;
+    require_transaction_type(tx, "NFTokenMint")?;
+    require_string_equals(tx, "URI", &hex::encode_upper(metadata_uri.as_bytes()))?;
+    require_u32_equals(tx, "NFTokenTaxon", nftoken_taxon)?;
+    require_u32_equals(tx, "Flags", flags)?;
+    if flags != TF_TRANSFERABLE {
+        return Err(CryptoError::InvalidData(
+            "NFTokenMint flags are not allowlisted".to_string(),
+        ));
+    }
+    match (transfer_fee, tx.get("TransferFee")) {
+        (Some(expected), Some(_)) => {
+            let actual = u32_field(tx, "TransferFee")?;
+            if actual != expected as u32 || actual > MAX_TRANSFER_FEE_BPS as u32 {
+                return Err(CryptoError::InvalidData(
+                    "NFTokenMint TransferFee does not match Vaulted policy".to_string(),
+                ));
+            }
+        },
+        (None, None) => {},
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(CryptoError::InvalidData(
+                "NFTokenMint TransferFee does not match intent".to_string(),
+            ));
+        },
+    }
+    Ok(())
+}
+
+fn validate_nftoken_create_offer_policy(
+    tx: &serde_json::Value,
+    nftoken_id: &str,
+    destination: &str,
+) -> Result<()> {
+    require_exact_fields(
+        tx,
+        &[
+            "TransactionType",
+            "Account",
+            "NFTokenID",
+            "Amount",
+            "Flags",
+            "Destination",
+            "Fee",
+            "Sequence",
+            "LastLedgerSequence",
+        ],
+    )?;
+    require_transaction_type(tx, "NFTokenCreateOffer")?;
+    require_string_equals(tx, "NFTokenID", nftoken_id)?;
+    require_string_equals(tx, "Amount", "0")?;
+    require_u32_equals(tx, "Flags", TF_NFTOKEN_SELL_OFFER)?;
+    require_string_equals(tx, "Destination", destination)?;
+    Ok(())
+}
+
+fn validate_nftoken_accept_offer_policy(tx: &serde_json::Value, offer_index: &str) -> Result<()> {
+    require_exact_fields(
+        tx,
+        &[
+            "TransactionType",
+            "Account",
+            "NFTokenSellOffer",
+            "Fee",
+            "Sequence",
+            "LastLedgerSequence",
+        ],
+    )?;
+    require_transaction_type(tx, "NFTokenAcceptOffer")?;
+    require_string_equals(tx, "NFTokenSellOffer", offer_index)?;
+    Ok(())
+}
+
+fn validate_nftoken_burn_policy(tx: &serde_json::Value, nftoken_id: &str) -> Result<()> {
+    require_exact_fields(
+        tx,
+        &[
+            "TransactionType",
+            "Account",
+            "NFTokenID",
+            "Fee",
+            "Sequence",
+            "LastLedgerSequence",
+        ],
+    )?;
+    require_transaction_type(tx, "NFTokenBurn")?;
+    require_string_equals(tx, "NFTokenID", nftoken_id)?;
+    Ok(())
+}
+
+fn require_transaction_type(tx: &serde_json::Value, expected: &str) -> Result<()> {
+    require_string_equals(tx, "TransactionType", expected)
+}
+
+fn require_string_equals(tx: &serde_json::Value, field: &str, expected: &str) -> Result<()> {
+    let actual = string_field(tx, field)?;
+    if actual != expected {
+        return Err(CryptoError::InvalidData(format!(
+            "XRPL field {field} does not match signing intent"
+        )));
+    }
+    Ok(())
+}
+
+fn require_u32_equals(tx: &serde_json::Value, field: &str, expected: u32) -> Result<()> {
+    let actual = u32_field(tx, field)?;
+    if actual != expected {
+        return Err(CryptoError::InvalidData(format!(
+            "XRPL field {field} does not match signing intent"
+        )));
+    }
+    Ok(())
+}
+
+fn require_exact_fields(tx: &serde_json::Value, allowed: &[&str]) -> Result<()> {
+    let obj = tx_object(tx)?;
+    for key in obj.keys() {
+        if !allowed.contains(&key.as_str()) {
+            return Err(CryptoError::InvalidData(format!(
+                "Unexpected XRPL transaction field: {key}"
+            )));
+        }
+    }
+    for field in allowed {
+        if matches!(
+            *field,
+            "DestinationTag" | "TransferFee" | "SigningPubKey" | "TxnSignature" | "hash"
+        ) {
+            continue;
+        }
+        if !obj.contains_key(*field) {
+            return Err(CryptoError::InvalidData(format!(
+                "Missing XRPL transaction field: {field}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn reject_forbidden_fields(tx: &serde_json::Value) -> Result<()> {
+    const FORBIDDEN: &[&str] = &[
+        "SigningPubKey",
+        "TxnSignature",
+        "hash",
+        "Memos",
+        "Memo",
+        "HookParameters",
+        "Delegate",
+        "Signers",
+        "SignerEntries",
+        "SignerQuorum",
+        "TicketSequence",
+        "SourceTag",
+        "AccountTxnID",
+        "NetworkID",
+        "Paths",
+        "SendMax",
+        "DeliverMin",
+        "DeliverMax",
+        "CredentialIDs",
+        "Authorize",
+        "Unauthorize",
+        "RegularKey",
+        "Domain",
+        "SetFlag",
+        "ClearFlag",
+    ];
+    let obj = tx_object(tx)?;
+    for field in FORBIDDEN {
+        if obj.contains_key(*field) {
+            return Err(CryptoError::InvalidData(format!(
+                "Forbidden XRPL transaction field: {field}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn parse_drops(value: &str, field: &str) -> Result<u64> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(CryptoError::InvalidData(format!(
+            "XRPL field {field} must be a native XRP drops string"
+        )));
+    }
+    value.parse::<u64>().map_err(|_| {
+        CryptoError::InvalidData(format!("XRPL field {field} is outside supported range"))
+    })
 }
 
 fn validate_nftoken_mint_tx(tx: &serde_json::Value) -> Result<()> {
@@ -657,7 +1074,9 @@ mod tests {
         let account = wallet.classic_address().unwrap();
         let tx = build_nftoken_mint_tx(&account, "ipfs://manifest", 0, None, None);
         let tx = add_xrpl_signing_fields(tx, "12", 1, 100);
-        let signed = wallet.sign_xrpl_transaction_json(&tx).unwrap();
+        let signed = wallet
+            .sign_xrpl_transaction_for_intent(&mint_intent("ipfs://manifest"), &tx)
+            .unwrap();
         let tx_blob = signed.tx_blob.as_ref().unwrap();
 
         assert_eq!(signed.protocol, "vaulted-xrpl-tx-blob-v1");
@@ -678,7 +1097,12 @@ mod tests {
             .unwrap();
         let tx = build_xrp_payment_tx(&account, &destination, "1000000", Some(123));
         let tx = add_xrpl_signing_fields(tx, "12", 1, 100);
-        let signed = wallet.sign_xrpl_transaction_json(&tx).unwrap();
+        let signed = wallet
+            .sign_xrpl_transaction_for_intent(
+                &payment_intent(&destination, "1000000", Some(123)),
+                &tx,
+            )
+            .unwrap();
         let tx_blob = signed.tx_blob.as_ref().unwrap();
 
         assert_eq!(signed.protocol, "vaulted-xrpl-tx-blob-v1");
@@ -705,7 +1129,15 @@ mod tests {
             "0",
         );
         let tx = add_xrpl_signing_fields(tx, "12", 1, 100);
-        let signed = wallet.sign_xrpl_transaction_json(&tx).unwrap();
+        let signed = wallet
+            .sign_xrpl_transaction_for_intent(
+                &create_offer_intent(
+                    "00080000DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4FAEB4C857010D42BC",
+                    &destination,
+                ),
+                &tx,
+            )
+            .unwrap();
         let tx_blob = signed.tx_blob.as_ref().unwrap();
 
         assert_eq!(signed.protocol, "vaulted-xrpl-tx-blob-v1");
@@ -726,7 +1158,14 @@ mod tests {
             "ABCD1234DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4FAEB4C857010D42BC",
         );
         let tx = add_xrpl_signing_fields(tx, "12", 1, 100);
-        let signed = wallet.sign_xrpl_transaction_json(&tx).unwrap();
+        let signed = wallet
+            .sign_xrpl_transaction_for_intent(
+                &accept_offer_intent(
+                    "ABCD1234DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4FAEB4C857010D42BC",
+                ),
+                &tx,
+            )
+            .unwrap();
         let tx_blob = signed.tx_blob.as_ref().unwrap();
 
         assert_eq!(signed.protocol, "vaulted-xrpl-tx-blob-v1");
@@ -756,7 +1195,12 @@ mod tests {
             "00080000DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4FAEB4C857010D42BC",
         );
         let tx = add_xrpl_signing_fields(tx, "12", 1, 100);
-        let signed = wallet.sign_xrpl_transaction_json(&tx).unwrap();
+        let signed = wallet
+            .sign_xrpl_transaction_for_intent(
+                &burn_intent("00080000DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4FAEB4C857010D42BC"),
+                &tx,
+            )
+            .unwrap();
         let tx_blob = signed.tx_blob.as_ref().unwrap();
 
         assert_eq!(signed.protocol, "vaulted-xrpl-tx-blob-v1");
@@ -778,7 +1222,9 @@ mod tests {
         let tx = build_xrp_payment_tx("rrrrrrrrrrrrrrrrrrrrrhoLvTp", &destination, "1000000", None);
         let tx = add_xrpl_signing_fields(tx, "12", 1, 100);
 
-        assert!(wallet.sign_xrpl_transaction_json(&tx).is_err());
+        assert!(wallet
+            .sign_xrpl_transaction_for_intent(&payment_intent(&destination, "1000000", None), &tx)
+            .is_err());
     }
 
     #[test]
@@ -796,7 +1242,15 @@ mod tests {
         );
         let tx = add_xrpl_signing_fields(tx, "12", 1, 100);
 
-        assert!(wallet.sign_xrpl_transaction_json(&tx).is_err());
+        assert!(wallet
+            .sign_xrpl_transaction_for_intent(
+                &create_offer_intent(
+                    "00080000DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4FAEB4C857010D42BC",
+                    &destination,
+                ),
+                &tx,
+            )
+            .is_err());
     }
 
     #[test]
@@ -808,7 +1262,14 @@ mod tests {
         );
         let tx = add_xrpl_signing_fields(tx, "12", 1, 100);
 
-        assert!(wallet.sign_xrpl_transaction_json(&tx).is_err());
+        assert!(wallet
+            .sign_xrpl_transaction_for_intent(
+                &accept_offer_intent(
+                    "ABCD1234DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4FAEB4C857010D42BC",
+                ),
+                &tx,
+            )
+            .is_err());
     }
 
     #[test]
@@ -830,7 +1291,15 @@ mod tests {
             tx.as_object_mut().unwrap().remove(missing_field);
             let tx = add_xrpl_signing_fields(tx, "12", 1, 100);
 
-            assert!(wallet.sign_xrpl_transaction_json(&tx).is_err());
+            assert!(wallet
+                .sign_xrpl_transaction_for_intent(
+                    &create_offer_intent(
+                        "00080000DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4FAEB4C857010D42BC",
+                        &destination,
+                    ),
+                    &tx,
+                )
+                .is_err());
         }
     }
 
@@ -845,7 +1314,14 @@ mod tests {
         tx.as_object_mut().unwrap().remove("NFTokenSellOffer");
         let tx = add_xrpl_signing_fields(tx, "12", 1, 100);
 
-        assert!(wallet.sign_xrpl_transaction_json(&tx).is_err());
+        assert!(wallet
+            .sign_xrpl_transaction_for_intent(
+                &accept_offer_intent(
+                    "ABCD1234DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4FAEB4C857010D42BC",
+                ),
+                &tx,
+            )
+            .is_err());
     }
 
     #[test]
@@ -866,7 +1342,9 @@ mod tests {
             1,
             100,
         );
-        let signed = wallet.sign_xrpl_transaction_json(&tx).unwrap();
+        let signed = wallet
+            .sign_xrpl_transaction_for_intent(&mint_intent("ipfs://manifest"), &tx)
+            .unwrap();
         let final_blob = serialize_supported_xrpl_tx(&signed.tx_json, true).unwrap();
 
         assert!(!final_blob.is_empty());
@@ -888,7 +1366,9 @@ mod tests {
         assert!(stored_uri_is_hex);
 
         let tx = add_xrpl_signing_fields(tx, "10", 1, 100);
-        let signed = wallet.sign_xrpl_transaction_json(&tx).unwrap();
+        let signed = wallet
+            .sign_xrpl_transaction_for_intent(&mint_intent(&metadata_uri), &tx)
+            .unwrap();
         let final_blob = serialize_supported_xrpl_tx(&signed.tx_json, true).unwrap();
 
         assert!(!final_blob.is_empty());
@@ -904,7 +1384,10 @@ mod tests {
             1,
             100,
         );
-        let signed = wallet.sign_xrpl_transaction_json(&tx).unwrap();
+        let metadata_uri = "u".repeat(111);
+        let signed = wallet
+            .sign_xrpl_transaction_for_intent(&mint_intent(&metadata_uri), &tx)
+            .unwrap();
         let signing_blob = serialize_supported_xrpl_tx(&signed.tx_json, false).unwrap();
         let final_blob = serialize_supported_xrpl_tx(&signed.tx_json, true).unwrap();
 
@@ -929,7 +1412,10 @@ mod tests {
             1,
             100,
         );
-        let signed = wallet.sign_xrpl_transaction_json(&tx).unwrap();
+        let metadata_uri = "u".repeat(111);
+        let signed = wallet
+            .sign_xrpl_transaction_for_intent(&mint_intent(&metadata_uri), &tx)
+            .unwrap();
         let signing_blob = serialize_supported_xrpl_tx(&signed.tx_json, false).unwrap();
         let final_blob = serialize_supported_xrpl_tx(&signed.tx_json, true).unwrap();
 
@@ -949,10 +1435,295 @@ mod tests {
             None,
         );
         let tx = add_xrpl_signing_fields(tx, "12", 1, 100);
+        assert!(wallet
+            .sign_xrpl_transaction_for_intent(&mint_intent("ipfs://manifest"), &tx)
+            .is_err());
+    }
+
+    #[test]
+    fn policy_rejects_send_xrp_partial_payment_flag() {
+        let wallet = deterministic_wallet();
+        let account = wallet.classic_address().unwrap();
+        let destination = other_wallet_address();
+        let mut tx = add_xrpl_signing_fields(
+            build_xrp_payment_tx(&account, &destination, "1000000", None),
+            "12",
+            1,
+            100,
+        );
+        tx["Flags"] = serde_json::json!(0x0002_0000_u32);
+
+        assert!(validate_xrpl_transaction_for_intent(
+            &payment_intent(&destination, "1000000", None),
+            &tx,
+            &account,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn policy_rejects_send_xrp_paths_and_sendmax() {
+        let wallet = deterministic_wallet();
+        let account = wallet.classic_address().unwrap();
+        let destination = other_wallet_address();
+        for field in ["Paths", "SendMax"] {
+            let mut tx = add_xrpl_signing_fields(
+                build_xrp_payment_tx(&account, &destination, "1000000", None),
+                "12",
+                1,
+                100,
+            );
+            tx[field] = serde_json::json!("unexpected");
+            assert!(
+                validate_xrpl_transaction_for_intent(
+                    &payment_intent(&destination, "1000000", None),
+                    &tx,
+                    &account,
+                )
+                .is_err(),
+                "{field} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn policy_rejects_send_xrp_destination_or_amount_substitution() {
+        let wallet = deterministic_wallet();
+        let account = wallet.classic_address().unwrap();
+        let destination = other_wallet_address();
+        let attacker = VaultedXrplWallet::from_bip39_seed(&[9u8; 64])
+            .unwrap()
+            .classic_address()
+            .unwrap();
+        let wrong_destination = add_xrpl_signing_fields(
+            build_xrp_payment_tx(&account, &attacker, "1000000", None),
+            "12",
+            1,
+            100,
+        );
+        let wrong_amount = add_xrpl_signing_fields(
+            build_xrp_payment_tx(&account, &destination, "2000000", None),
+            "12",
+            1,
+            100,
+        );
+        let intent = payment_intent(&destination, "1000000", None);
+
+        assert!(
+            validate_xrpl_transaction_for_intent(&intent, &wrong_destination, &account).is_err()
+        );
+        assert!(validate_xrpl_transaction_for_intent(&intent, &wrong_amount, &account).is_err());
+    }
+
+    #[test]
+    fn policy_rejects_nftoken_mint_unexpected_field() {
+        let wallet = deterministic_wallet();
+        let account = wallet.classic_address().unwrap();
+        let mut tx = add_xrpl_signing_fields(
+            build_nftoken_mint_tx(&account, "ipfs://manifest", 0, None, None),
+            "12",
+            1,
+            100,
+        );
+        tx["Memos"] = serde_json::json!([]);
+
+        assert!(validate_xrpl_transaction_for_intent(
+            &mint_intent("ipfs://manifest"),
+            &tx,
+            &account
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn policy_accepts_valid_nftoken_create_offer_and_rejects_unsafe_variants() {
+        let wallet = deterministic_wallet();
+        let account = wallet.classic_address().unwrap();
+        let destination = other_wallet_address();
+        let nftoken_id = "00080000DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4FAEB4C857010D42BC";
+        let intent = create_offer_intent(nftoken_id, &destination);
+        let valid = add_xrpl_signing_fields(
+            build_nftoken_create_offer_tx(&account, nftoken_id, &destination, "0"),
+            "12",
+            1,
+            100,
+        );
+        assert!(validate_xrpl_transaction_for_intent(&intent, &valid, &account).is_ok());
+
+        let mut without_destination = valid.clone();
+        without_destination
+            .as_object_mut()
+            .unwrap()
+            .remove("Destination");
+        assert!(
+            validate_xrpl_transaction_for_intent(&intent, &without_destination, &account).is_err()
+        );
+
+        let wrong_nft = add_xrpl_signing_fields(
+            build_nftoken_create_offer_tx(&account, "00080000OTHER", &destination, "0"),
+            "12",
+            1,
+            100,
+        );
+        assert!(validate_xrpl_transaction_for_intent(&intent, &wrong_nft, &account).is_err());
+
+        let paid = add_xrpl_signing_fields(
+            build_nftoken_create_offer_tx(&account, nftoken_id, &destination, "1"),
+            "12",
+            1,
+            100,
+        );
+        assert!(validate_xrpl_transaction_for_intent(&intent, &paid, &account).is_err());
+    }
+
+    #[test]
+    fn policy_rejects_wrong_accept_offer_index() {
+        let wallet = deterministic_wallet();
+        let account = wallet.classic_address().unwrap();
+        let tx = add_xrpl_signing_fields(
+            build_nftoken_accept_offer_tx(&account, "WRONGOFFER"),
+            "12",
+            1,
+            100,
+        );
+
+        assert!(validate_xrpl_transaction_for_intent(
+            &accept_offer_intent("EXPECTEDOFFER"),
+            &tx,
+            &account,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn policy_accepts_valid_burn_and_rejects_wrong_nftoken_id() {
+        let wallet = deterministic_wallet();
+        let account = wallet.classic_address().unwrap();
+        let nftoken_id = "00080000DB73821505A0B4F90B6DFF9CBAA1014B60FEDB4FAEB4C857010D42BC";
+        let intent = burn_intent(nftoken_id);
+        let valid =
+            add_xrpl_signing_fields(build_nftoken_burn_tx(&account, nftoken_id), "12", 1, 100);
+        assert!(validate_xrpl_transaction_for_intent(&intent, &valid, &account).is_ok());
+
+        let wrong = add_xrpl_signing_fields(
+            build_nftoken_burn_tx(&account, "00080000OTHER"),
+            "12",
+            1,
+            100,
+        );
+        assert!(validate_xrpl_transaction_for_intent(&intent, &wrong, &account).is_err());
+    }
+
+    #[test]
+    fn policy_rejects_unrelated_transaction_types() {
+        let wallet = deterministic_wallet();
+        let account = wallet.classic_address().unwrap();
+        for tx_type in ["AccountSet", "TrustSet", "OfferCreate", "AMMCreate"] {
+            let tx = serde_json::json!({
+                "TransactionType": tx_type,
+                "Account": account,
+                "Fee": "12",
+                "Sequence": 1,
+                "LastLedgerSequence": 100
+            });
+            assert!(
+                validate_xrpl_transaction_for_intent(
+                    &mint_intent("ipfs://manifest"),
+                    &tx,
+                    &account,
+                )
+                .is_err(),
+                "{tx_type} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn policy_rejects_memo_and_unknown_top_level_field() {
+        let wallet = deterministic_wallet();
+        let account = wallet.classic_address().unwrap();
+        for field in ["Memos", "UnexpectedField"] {
+            let mut tx = add_xrpl_signing_fields(
+                build_nftoken_mint_tx(&account, "ipfs://manifest", 0, None, None),
+                "12",
+                1,
+                100,
+            );
+            tx[field] = serde_json::json!("hidden");
+            assert!(
+                validate_xrpl_transaction_for_intent(
+                    &mint_intent("ipfs://manifest"),
+                    &tx,
+                    &account,
+                )
+                .is_err(),
+                "{field} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn generic_xrpl_blob_signing_requires_intent() {
+        let wallet = deterministic_wallet();
+        let account = wallet.classic_address().unwrap();
+        let tx = add_xrpl_signing_fields(
+            build_xrp_payment_tx(&account, &other_wallet_address(), "1000000", None),
+            "12",
+            1,
+            100,
+        );
+
         assert!(wallet.sign_xrpl_transaction_json(&tx).is_err());
     }
 
     fn deterministic_wallet() -> VaultedXrplWallet {
         VaultedXrplWallet::from_bip39_seed(&[7u8; 64]).unwrap()
+    }
+
+    fn other_wallet_address() -> String {
+        VaultedXrplWallet::from_bip39_seed(&[8u8; 64])
+            .unwrap()
+            .classic_address()
+            .unwrap()
+    }
+
+    fn mint_intent(metadata_uri: &str) -> XrplSigningIntent {
+        XrplSigningIntent::MintVaultNft {
+            metadata_uri: metadata_uri.to_string(),
+            nftoken_taxon: 0,
+            flags: TF_TRANSFERABLE,
+            transfer_fee: None,
+        }
+    }
+
+    fn payment_intent(
+        destination: &str,
+        amount_drops: &str,
+        destination_tag: Option<u32>,
+    ) -> XrplSigningIntent {
+        XrplSigningIntent::SendXrp {
+            destination: destination.to_string(),
+            amount_drops: amount_drops.to_string(),
+            destination_tag,
+        }
+    }
+
+    fn create_offer_intent(nftoken_id: &str, destination: &str) -> XrplSigningIntent {
+        XrplSigningIntent::CreateNftTransferOffer {
+            nftoken_id: nftoken_id.to_string(),
+            destination: destination.to_string(),
+        }
+    }
+
+    fn accept_offer_intent(offer_index: &str) -> XrplSigningIntent {
+        XrplSigningIntent::AcceptNftTransferOffer {
+            offer_index: offer_index.to_string(),
+        }
+    }
+
+    fn burn_intent(nftoken_id: &str) -> XrplSigningIntent {
+        XrplSigningIntent::BurnVaultNft {
+            nftoken_id: nftoken_id.to_string(),
+        }
     }
 }

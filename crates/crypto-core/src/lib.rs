@@ -59,6 +59,7 @@ pub use types::*;
 pub use xrpl_wallet::{
     add_xrpl_signing_fields, build_nftoken_accept_offer_tx, build_nftoken_burn_tx,
     build_nftoken_create_offer_tx, build_nftoken_mint_tx, build_xrp_payment_tx,
-    is_valid_xrpl_classic_address, VaultedQrSigningRequest, VaultedSignedXrplTransaction,
-    VaultedXrplWallet, VaultedXrplWalletPublic,
+    is_valid_xrpl_classic_address, validate_qr_xrpl_signing_request,
+    validate_xrpl_transaction_for_intent, VaultedQrSigningRequest, VaultedSignedXrplTransaction,
+    VaultedXrplWallet, VaultedXrplWalletPublic, XrplSigningIntent,
 };
