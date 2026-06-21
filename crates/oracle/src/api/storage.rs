@@ -42,6 +42,17 @@ fn is_private_url(url: &str) -> bool {
     false
 }
 
+fn safe_endpoint_label(endpoint_url: &str) -> String {
+    match url::Url::parse(endpoint_url) {
+        Ok(mut parsed) => {
+            parsed.set_query(None);
+            parsed.set_fragment(None);
+            parsed.to_string()
+        },
+        Err(_) => "[invalid-url]".to_string(),
+    }
+}
+
 // ==================== Types ====================
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -130,14 +141,18 @@ pub async fn register_node(
     Json(request): Json<RegisterNodeRequest>,
 ) -> Result<Json<RegisterNodeResponse>, (StatusCode, String)> {
     tracing::info!(
-        "Registering storage node: {} at {}",
-        request.node_id,
-        request.endpoint_url
+        node_id = %request.node_id,
+        endpoint = %safe_endpoint_label(&request.endpoint_url),
+        "Registering storage node"
     );
 
     // SSRF protection: block private/internal URLs (HIGH-07)
     if is_private_url(&request.endpoint_url) && state.config.is_production() {
-        tracing::warn!("Blocked SSRF attempt: {}", request.endpoint_url);
+        tracing::warn!(
+            node_id = %request.node_id,
+            endpoint = %safe_endpoint_label(&request.endpoint_url),
+            "Blocked SSRF attempt"
+        );
         return Err((
             StatusCode::BAD_REQUEST,
             "Invalid endpoint URL: private/internal addresses not allowed".to_string(),
@@ -564,3 +579,17 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for StorageNodeInfo {
     }
 }
 // END GENERATED MANUAL SQLX FROMROW IMPLS
+
+#[cfg(test)]
+mod tests {
+    use super::safe_endpoint_label;
+
+    #[test]
+    fn safe_endpoint_label_strips_query_and_fragment() {
+        let safe = safe_endpoint_label("https://storage.example/fragments?token=secret#frag");
+
+        assert_eq!(safe, "https://storage.example/fragments");
+        assert!(!safe.contains("token="));
+        assert!(!safe.contains("secret"));
+    }
+}

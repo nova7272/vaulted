@@ -159,7 +159,16 @@ async fn main() -> anyhow::Result<()> {
                     (config.max_file_size + 1_048_576) as usize,
                 ))
                 // Tracing
-                .layer(TraceLayer::new_for_http())
+                .layer(TraceLayer::new_for_http().make_span_with(
+                    |request: &axum::http::Request<_>| {
+                        tracing::debug_span!(
+                            "request",
+                            method = %request.method(),
+                            path = %middleware::safe_request_path(request.uri()),
+                            version = ?request.version()
+                        )
+                    },
+                ))
                 // CORS
                 .layer(cors),
         )

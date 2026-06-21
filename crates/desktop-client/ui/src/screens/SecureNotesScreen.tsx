@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
@@ -6,6 +6,7 @@ interface SecureNoteResult { vaultId: string; nftTokenId: string; offerIndex: st
 interface SigningRequestPayload { uuid: string; qrPng: string; qrUri: string; websocketUrl: string; expiresAt: string | null; }
 interface ProgressEvent { filename: string; stage: string; progress: number; totalProgress: number; message: string; bytesProcessed: number; bytesTotal: number; }
 interface NftInfo { nftTokenId: string; uri: string; filename: string | null; createdAt: string | null; fileStatus: string; preKeyMismatch?: boolean; }
+interface SecureNoteInfo { nftTokenId: string; title: string; noteType: string; size: number; createdAt: string; status: string; }
 interface SecureNoteContent { nftTokenId: string; content: string; noteType: string; mimeType: string; }
 
 import { toast } from '../components/Toast';
@@ -18,6 +19,8 @@ const IcoTransfer = (s=14) => <svg width={s} height={s} viewBox="0 0 24 24" fill
 const IcoBurn = (s=14) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/></svg>
 const IcoPlus = () => <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
 const IcoRefresh = () => <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
+
+const NOTE_PLAINTEXT_IDLE_MS = 5 * 60 * 1000;
 
 export function SecureNotesScreen({ oracleConnected }: { oracleConnected?: boolean }) {
     void oracleConnected
@@ -38,7 +41,7 @@ export function SecureNotesScreen({ oracleConnected }: { oracleConnected?: boole
     const [noteContent, setNoteContent] = useState<SecureNoteContent | null>(null);
     const [loadingNote, setLoadingNote] = useState(false);
     const [showContent, setShowContent] = useState(false);
-    const [copiedContent, setCopiedContent] = useState(false);
+    const viewerRequestRef = useRef(0);
 
     const [transferNote, setTransferNote] = useState<NftInfo | null>(null);
     const [transferTo, setTransferTo] = useState('');
@@ -50,8 +53,95 @@ export function SecureNotesScreen({ oracleConnected }: { oracleConnected?: boole
     const [burnQr, setBurnQr] = useState<string | null>(null);
     const [burnConfirm, setBurnConfirm] = useState('');
 
+    const clearCreatePlaintext = useCallback(() => {
+        setTitle('');
+        setContent('');
+        setTag('');
+        setHideContent(true);
+        setError(null);
+        setResult(null);
+        setStage('idle');
+        setProgress(0);
+    }, []);
+
+    const closeNoteViewer = useCallback(() => {
+        viewerRequestRef.current += 1;
+        setViewingNote(null);
+        setNoteContent(null);
+        setShowContent(false);
+        setLoadingNote(false);
+    }, []);
+
+    const clearStoredNoteTitles = useCallback(() => {
+        setStoredNotes(notes => notes.map(note => (
+            note.filename ? { ...note, filename: null } : note
+        )));
+    }, []);
+
+    const closeCreate = useCallback(() => {
+        if (stage === 'idle' || stage === 'complete' || stage === 'cancelled') {
+            clearCreatePlaintext();
+            setShowCreate(false);
+        }
+    }, [clearCreatePlaintext, stage]);
+
     useEffect(() => { const u = listen<ProgressEvent>('upload-progress', (e) => { setProgress(e.payload.totalProgress); }); return () => { u.then(f => f()); }; }, []);
     useEffect(() => { loadNotes(); }, []);
+
+    useEffect(() => {
+        return () => {
+            closeNoteViewer();
+            clearCreatePlaintext();
+            clearStoredNoteTitles();
+        };
+    }, [clearCreatePlaintext, clearStoredNoteTitles, closeNoteViewer]);
+
+    useEffect(() => {
+        const clearPlaintext = () => {
+            closeNoteViewer();
+            clearStoredNoteTitles();
+            if (showCreate) {
+                clearCreatePlaintext();
+                setShowCreate(false);
+            }
+        };
+        const clearOnVisibilityChange = () => {
+            if (document.visibilityState !== 'visible') clearPlaintext();
+        };
+
+        window.addEventListener('blur', clearPlaintext);
+        document.addEventListener('visibilitychange', clearOnVisibilityChange);
+        return () => {
+            window.removeEventListener('blur', clearPlaintext);
+            document.removeEventListener('visibilitychange', clearOnVisibilityChange);
+        };
+    }, [clearCreatePlaintext, clearStoredNoteTitles, closeNoteViewer, showCreate]);
+
+    useEffect(() => {
+        const hasPlaintext = !!noteContent || storedNotes.some(note => !!note.filename) || (showCreate && (!!title || !!content));
+        if (!hasPlaintext) return;
+
+        let timer: ReturnType<typeof setTimeout>;
+        const reset = () => {
+            clearTimeout(timer);
+            timer = setTimeout(() => {
+                closeNoteViewer();
+                clearStoredNoteTitles();
+                if (showCreate) {
+                    clearCreatePlaintext();
+                    setShowCreate(false);
+                }
+            }, NOTE_PLAINTEXT_IDLE_MS);
+        };
+
+        const events: Array<keyof WindowEventMap> = ['mousemove', 'mousedown', 'keydown', 'touchstart'];
+        reset();
+        events.forEach(event => window.addEventListener(event, reset, { passive: true }));
+        return () => {
+            clearTimeout(timer);
+            events.forEach(event => window.removeEventListener(event, reset));
+        };
+    }, [clearCreatePlaintext, clearStoredNoteTitles, closeNoteViewer, content, noteContent, showCreate, storedNotes, title]);
 
     // Escape key closes modals
     useEffect(() => {
@@ -69,30 +159,31 @@ export function SecureNotesScreen({ oracleConnected }: { oracleConnected?: boole
     const loadNotes = async () => {
         try {
             setLoadingNotes(true);
-            const nfts = await invoke<NftInfo[]>('list_my_nfts');
-            setStoredNotes(nfts.filter(n => n.filename?.toLowerCase().endsWith('.secure') && n.fileStatus !== 'deleted'));
+            const notes = await invoke<SecureNoteInfo[]>('list_secure_notes');
+            setStoredNotes(notes.map(n => ({
+                nftTokenId: n.nftTokenId,
+                uri: '',
+                filename: n.title.trim() || null,
+                createdAt: n.createdAt,
+                fileStatus: n.status,
+            })));
         } catch {
             // Secure notes list refresh is best-effort; existing state remains visible.
         } finally { setLoadingNotes(false); }
     };
 
     const viewNote = async (nft: NftInfo) => {
+        const requestId = viewerRequestRef.current + 1;
+        viewerRequestRef.current = requestId;
         try {
             setViewingNote(nft); setLoadingNote(true); setShowContent(false); setNoteContent(null);
             const c = await invoke<SecureNoteContent>('decrypt_secure_note', { nftTokenId: nft.nftTokenId });
+            if (viewerRequestRef.current !== requestId) return;
             setNoteContent(c);
         } catch (e) {
             toast({ type: 'error', title: 'Failed to decrypt', sub: String(e) });
-            setViewingNote(null);
+            closeNoteViewer();
         } finally { setLoadingNote(false); }
-    };
-    const closeNoteViewer = () => { setViewingNote(null); setNoteContent(null); setShowContent(false); setCopiedContent(false); };
-    const copyNoteContent = async () => {
-        if (!noteContent?.content) return;
-        await navigator.clipboard.writeText(noteContent.content);
-        setCopiedContent(true); toast({ type: 'success', title: 'Copied!' });
-        setTimeout(() => setCopiedContent(false), 2000);
-        setTimeout(() => navigator.clipboard.writeText(''), 30000);
     };
 
     const startTransfer = async () => {
@@ -124,14 +215,17 @@ export function SecureNotesScreen({ oracleConnected }: { oracleConnected?: boole
         try {
             const finalTitle = tag ? `${title.trim()}[${tag}]` : title.trim();
             const res = await invoke<SecureNoteResult>('encrypt_secure_note', { title: finalTitle, content, noteType: 'password' });
+            setTitle('');
+            setContent('');
+            setTag('');
+            setHideContent(true);
             setResult(res);
             setStage('complete');
             loadNotes();
         } catch (e) { setError(String(e)); setStage('idle'); }
     };
 
-    const handleReset = () => { setStage('idle'); setProgress(0); setResult(null); setError(null); };
-    const closeCreate = () => { if (stage === 'idle' || stage === 'complete' || stage === 'cancelled') { handleReset(); setTitle(''); setContent(''); setTag(''); setShowCreate(false); } };
+    const handleReset = () => { clearCreatePlaintext(); };
 
     return (
         <div style={{ maxWidth: 1200, margin: '0 auto' }}>
@@ -152,37 +246,40 @@ export function SecureNotesScreen({ oracleConnected }: { oracleConnected?: boole
                 <div style={{ textAlign: 'center', padding: '80px 24px', borderRadius: 'var(--radius-lg)', border: '1px dashed var(--bg-4)', background: 'var(--bg-1)' }}>
                     <div style={{ width: 72, height: 72, borderRadius: 18, background: 'var(--bg-3)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', marginBottom: 20 }}>{IcoLock(32)}</div>
                     <p style={{ fontSize: 18, fontWeight: 600, margin: '0 0 8px' }}>No secure notes yet</p>
-                    <p style={{ fontSize: 15, color: 'var(--fg-2)', margin: '0 0 24px' }}>Store passwords, seed phrases, and secrets encrypted on XRPL</p>
+                    <p style={{ fontSize: 15, color: 'var(--fg-2)', margin: '0 0 24px' }}>Store passwords, seed phrases, and secrets in encrypted vaults</p>
                     <button onClick={() => setShowCreate(true)} className="v-btn v-btn-primary" style={{ height: 48, fontSize: 16, padding: '0 28px' }}><IcoPlus /> Create your first note</button>
                 </div>
             ) : (
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gridAutoRows: '1fr', gap: 14 }}>
                     {storedNotes.map(n => {
-                        const cleanName = (n.filename || 'Note').replace('.secure', '').replace(/\[[^\]]+\]/g, '').trim();
-                        const tagMatch = n.filename?.match(/\[([^\]]+)\]/);
-                        const noteTag = tagMatch ? tagMatch[1].toUpperCase() : null;
                         const date = n.createdAt ? new Date(n.createdAt).toLocaleDateString('en-US', { day: 'numeric', month: 'short', year: 'numeric' }) : null;
                         const nftColor = getNftColors(n.nftTokenId, '#a855f7');
                         const idLabel = `${n.nftTokenId.slice(0,6)}…${n.nftTokenId.slice(-4)}`;
+                        const isOnChain = n.fileStatus === 'active';
+                        const statusLabel = isOnChain ? 'Encrypted · On-chain owner' : 'Encrypted vault saved · NFT mint pending';
+                        const idPrefix = isOnChain ? 'NFT' : 'Vault';
 
                         return (
                             <div key={n.nftTokenId} style={{ display: 'flex', background: 'var(--bg-2)', border: '1px solid var(--line)', borderRadius: 'var(--radius-lg)', transition: 'border-color .15s' }}
                                  onMouseEnter={e => (e.currentTarget.style.borderColor = 'var(--line-2)')} onMouseLeave={e => (e.currentTarget.style.borderColor = 'var(--line)')}>
                                 <div style={{ width: 140, minWidth: 140, backgroundImage: getNftImageUrl(n.nftTokenId, '#a855f7'), backgroundSize: 'cover', backgroundPosition: 'center', backgroundColor: '#060608' }} />
                                 <div style={{ width: 34, minWidth: 34, background: `color-mix(in srgb, ${nftColor.stroke} 20%, #0a0c14)`, borderLeft: `1px solid color-mix(in srgb, ${nftColor.stroke} 50%, transparent)`, borderRight: `1px solid color-mix(in srgb, ${nftColor.stroke} 30%, transparent)`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                                    <div style={{ writingMode: 'vertical-rl', textOrientation: 'mixed', transform: 'rotate(180deg)', fontSize: 13, fontFamily: 'var(--font-mono)', fontWeight: 700, color: 'rgba(255,255,255,0.85)', letterSpacing: '0.05em', whiteSpace: 'nowrap', userSelect: 'none' }}>NFT {idLabel}</div>
+                                    <div style={{ writingMode: 'vertical-rl', textOrientation: 'mixed', transform: 'rotate(180deg)', fontSize: 13, fontFamily: 'var(--font-mono)', fontWeight: 700, color: 'rgba(255,255,255,0.85)', letterSpacing: '0.05em', whiteSpace: 'nowrap', userSelect: 'none' }}>{idPrefix} {idLabel}</div>
                                 </div>
                                 <div style={{ flex: 1, padding: '22px 24px', display: 'flex', flexDirection: 'column', justifyContent: 'space-between', minWidth: 0, minHeight: 160, position: 'relative' }}>
-                                    {noteTag && <span style={{ position: 'absolute', top: 14, right: 16, padding: '4px 12px', fontSize: 13, fontFamily: 'var(--font-mono)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', borderRadius: 6, background: 'rgba(106,160,255,0.12)', color: '#7ba3e0' }}>{noteTag}</span>}
                                     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                                        <div style={{ fontSize: 19, fontWeight: 600, color: 'var(--fg-0)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', paddingRight: noteTag ? 80 : 0 }}>{cleanName}</div>
+                                        <div style={{ fontSize: 19, fontWeight: 600, color: 'var(--fg-0)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{n.filename || 'Secure note'}</div>
                                         {date && <div style={{ fontSize: 15, color: 'var(--fg-2)' }}>{date}</div>}
-                                        <div style={{ fontSize: 15, color: 'var(--fg-2)', display: 'flex', alignItems: 'center', gap: 6 }}><span style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--ok)', display: 'inline-block' }} />Encrypted · Owner</div>
+                                        <div style={{ fontSize: 15, color: 'var(--fg-2)', display: 'flex', alignItems: 'center', gap: 6 }}><span style={{ width: 7, height: 7, borderRadius: '50%', background: isOnChain ? 'var(--ok)' : 'var(--warn)', display: 'inline-block' }} />{statusLabel}</div>
                                     </div>
                                     <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
                                         <button className="v-btn" style={{ flex: 1, height: 50, justifyContent: 'center', fontSize: 15, gap: 7 }} onClick={() => viewNote(n)}>{IcoEye(17)} View</button>
-                                        <button className="v-btn" style={{ flex: 1, height: 50, justifyContent: 'center', fontSize: 15, gap: 7 }} onClick={() => { setTransferNote(n); setTransferTo(''); }}>{IcoTransfer(17)} Transfer</button>
-                                        <button className="v-btn v-btn-danger" style={{ flex: 1, height: 50, justifyContent: 'center', fontSize: 15, gap: 7 }} onClick={() => { setBurnNote(n); setBurnConfirm(''); }}>{IcoBurn(17)} Burn</button>
+                                        {isOnChain ? (<>
+                                            <button className="v-btn" style={{ flex: 1, height: 50, justifyContent: 'center', fontSize: 15, gap: 7 }} onClick={() => { setTransferNote(n); setTransferTo(''); }}>{IcoTransfer(17)} Transfer</button>
+                                            <button className="v-btn v-btn-danger" style={{ flex: 1, height: 50, justifyContent: 'center', fontSize: 15, gap: 7 }} onClick={() => { setBurnNote(n); setBurnConfirm(''); }}>{IcoBurn(17)} Burn</button>
+                                        </>) : (
+                                            <button className="v-btn" style={{ flex: 1, height: 50, justifyContent: 'center', fontSize: 15, gap: 7 }} disabled>NFT actions unavailable</button>
+                                        )}
                                     </div>
                                 </div>
                             </div>
@@ -196,7 +293,7 @@ export function SecureNotesScreen({ oracleConnected }: { oracleConnected?: boole
                 <div className="v-modal-backdrop" role="presentation" onClick={() => { if (stage === 'idle') closeCreate(); }}>
                     <div className="v-modal" role="dialog" aria-modal="true" aria-label="Create secure note" style={{ width: 500 }} onClick={e => e.stopPropagation()}>
                         <div className="v-row" style={{ justifyContent: 'space-between', marginBottom: 16 }}>
-                            <div><h3>New Secure Note</h3><div className="sub" style={{ margin: 0 }}>Encrypted with AES-256 · stored as NFT</div></div>
+                            <div><h3>New Secure Note</h3><div className="sub" style={{ margin: 0 }}>Encrypted with AES-256 · stored in your vault</div></div>
                             {(stage === 'idle' || stage === 'complete' || stage === 'cancelled') && (
                                 <button className="v-iconbtn" aria-label="Close create dialog" onClick={closeCreate}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
                             )}
@@ -221,16 +318,16 @@ export function SecureNotesScreen({ oracleConnected }: { oracleConnected?: boole
                         {(stage === 'encrypting' || stage === 'creating_payload') && (() => {
                             const steps = [
                                 { key: 'encrypting', label: 'Encrypting', sub: 'AES-256 encryption', order: 1 },
-                                { key: 'minting', label: 'Minting NFT on XRPL', sub: 'Recording ownership', order: 2 },
+                                { key: 'vault', label: 'Preparing vault', sub: 'Saving encrypted metadata', order: 2 },
                                                             ];
                             const currentOrder = stage === 'encrypting' ? 1 : 2;
                             const totalProgress = stage === 'encrypting' ? 25 : 75;
-                            const statusMsg = stage === 'encrypting' ? 'Encrypting data...' : stage === 'creating_payload' ? 'Minting NFT on XRPL...' : 'Registering secure note...';
+                            const statusMsg = stage === 'encrypting' ? 'Encrypting data...' : stage === 'creating_payload' ? 'Preparing vault...' : 'Saving secure note...';
 
                             return (<div>
                                 {/* Title */}
                                 <div style={{ textAlign: 'center', marginBottom: 20 }}>
-                                    <div style={{ fontSize: 18, fontWeight: 600, color: 'var(--fg-0)' }}>Minting NFT for <span className="v-mono" style={{ color: 'var(--accent)' }}>{title.trim() || 'note'}</span></div>
+                                    <div style={{ fontSize: 18, fontWeight: 600, color: 'var(--fg-0)' }}>Saving secure note</div>
                                     <div style={{ fontSize: 14, color: 'var(--fg-2)', marginTop: 4 }}>Keep this window open</div>
                                 </div>
 
@@ -291,7 +388,7 @@ export function SecureNotesScreen({ oracleConnected }: { oracleConnected?: boole
                                             backgroundImage: getNftImageUrl(result.nftTokenId, '#a855f7'),
                                             backgroundSize:'cover',backgroundPosition:'center',
                                         }}/>
-                                        {/* NFT ID strip */}
+                                        {/* Vault ID strip */}
                                         <div style={{
                                             padding:'10px 16px',
                                             background:`color-mix(in srgb, ${nftColor.stroke} 20%, #0a0c14)`,
@@ -302,7 +399,7 @@ export function SecureNotesScreen({ oracleConnected }: { oracleConnected?: boole
                                             fontSize:13,fontFamily:'var(--font-mono)',fontWeight:700,
                                             color:'rgba(255,255,255,0.85)',letterSpacing:'0.05em',
                                             userSelect:'none',
-                                        }}>NFT {idShort}</span>
+                                        }}>Vault {idShort}</span>
                                         </div>
                                     </div>
 
@@ -312,10 +409,10 @@ export function SecureNotesScreen({ oracleConnected }: { oracleConnected?: boole
                                             <div style={{width:22,height:22,borderRadius:'50%',background:'var(--ok-soft)',display:'flex',alignItems:'center',justifyContent:'center',color:'var(--ok)'}}>
                                                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12"/></svg>
                                             </div>
-                                            <span style={{fontSize:16,fontWeight:600,color:'var(--fg-1)'}}>Secure note registered</span>
+                                            <span style={{fontSize:16,fontWeight:600,color:'var(--fg-1)'}}>Secure note saved</span>
                                         </div>
                                         <div className="v-mono" style={{fontSize:13,color:'var(--fg-3)'}}>
-                                            {result.title} · {fmtSize(result.size)}
+                                            {fmtSize(result.size)}
                                         </div>
                                     </div>
 
@@ -348,7 +445,7 @@ export function SecureNotesScreen({ oracleConnected }: { oracleConnected?: boole
                 <div className="v-modal-backdrop" role="presentation">
                     <div className="v-modal" role="dialog" aria-modal="true" aria-label="View secure note" style={{ width: 500 }}>
                         <div className="v-row" style={{ justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 14 }}>
-                            <div><h3>{viewingNote.filename?.replace('.secure', '').replace(/\[[^\]]+\]/g, '').trim() || 'Secure Note'}</h3><div className="sub" style={{ margin: 0 }}>Decrypted locally · auto-clears on close</div></div>
+                            <div><h3>Secure Note</h3><div className="sub" style={{ margin: 0 }}>Decrypted locally · auto-clears on close</div></div>
                             <button className="v-iconbtn" aria-label="Close note viewer" onClick={closeNoteViewer}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
                         </div>
                         {loadingNote ? (
@@ -359,10 +456,8 @@ export function SecureNotesScreen({ oracleConnected }: { oracleConnected?: boole
                                 <div className="v-row" style={{ justifyContent: 'space-between' }}><div className="v-label">Content</div><button onClick={() => setShowContent(!showContent)} style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'none', border: 'none', cursor: 'pointer', color: 'var(--accent)', fontSize: 13, fontWeight: 500 }}>{IcoEye(15)} {showContent ? 'Hide' : 'Show'}</button></div>
                                 <textarea className="v-textarea" rows={6} readOnly value={showContent ? noteContent.content : '•'.repeat(Math.min(noteContent.content.length, 50))} style={{ fontSize: 14, fontFamily: 'var(--font-mono)' }} />
                             </div>
-                            <div className="v-row" style={{ justifyContent: 'space-between', fontSize: 13, color: 'var(--fg-2)' }}>
-                                <span>Clipboard auto-clears after 30s.</span>
+                            <div className="v-row" style={{ justifyContent: 'flex-end', fontSize: 13, color: 'var(--fg-2)' }}>
                                 <div className="v-row" style={{ gap: 8 }}>
-                                    <button className="v-btn" onClick={copyNoteContent}><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>{copiedContent ? 'Copied!' : 'Copy'}</button>
                                     <button className="v-btn v-btn-primary" onClick={closeNoteViewer}>Done</button>
                                 </div>
                             </div>
@@ -379,7 +474,7 @@ export function SecureNotesScreen({ oracleConnected }: { oracleConnected?: boole
                         {transferQr ? (
                             <div style={{ textAlign: 'center' }}><div className="v-qr-wrap" style={{ margin: '0 auto 16px' }}><img src={transferQr} alt="QR" style={{ width: 180, height: 180, display: 'block' }} /></div><div className="v-row" style={{ justifyContent: 'center', gap: 8, color: 'var(--accent)', fontSize: 14 }}><div className="v-spin" /> Waiting for signature…</div></div>
                         ) : (<>
-                            <div className="sub">Transfer <strong>{transferNote.filename?.replace('.secure', '') || 'note'}</strong> to another wallet</div>
+                            <div className="sub">Transfer this encrypted note to another wallet</div>
                             <div className="v-field" style={{ marginBottom: 16 }}><div className="v-label">Recipient address</div><input className="v-input" placeholder="r..." value={transferTo} onChange={e => setTransferTo(e.target.value)} style={{ fontFamily: 'var(--font-mono)' }} /></div>
                             <div className="v-row" style={{ justifyContent: 'flex-end' }}><button className="v-btn" onClick={() => setTransferNote(null)}>Cancel</button><button className="v-btn v-btn-primary" onClick={startTransfer} disabled={!transferTo.trim() || transferring}>{IcoTransfer(15)} {transferring ? '...' : 'Transfer'}</button></div>
                         </>)}
@@ -396,7 +491,7 @@ export function SecureNotesScreen({ oracleConnected }: { oracleConnected?: boole
                         ) : (<>
                             <div style={{ textAlign: 'center', marginBottom: 16 }}>
                                 <div style={{ width: 56, height: 56, borderRadius: 14, background: 'var(--danger-soft)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', marginBottom: 12, color: 'var(--danger)' }}>{IcoBurn(26)}</div>
-                                <h3>Burn Note?</h3><div className="sub">This will permanently delete <strong>{burnNote.filename?.replace('.secure', '') || 'this note'}</strong></div>
+                                <h3>Burn Note?</h3><div className="sub">This will permanently delete this encrypted note</div>
                             </div>
                             <div style={{ background: 'var(--danger-soft)', borderRadius: 'var(--radius-md)', padding: 14, marginBottom: 16, textAlign: 'center' }}><p style={{ fontSize: 13, color: 'var(--danger)', margin: 0 }}>This action cannot be undone. The NFT will be burned on XRPL.</p></div>
                             <div className="v-field" style={{ marginBottom: 16 }}><div className="v-label">Type DELETE to confirm</div><input className="v-input" value={burnConfirm} onChange={e => setBurnConfirm(e.target.value)} placeholder="DELETE" autoFocus style={{ fontFamily: 'var(--font-mono)' }} /></div>

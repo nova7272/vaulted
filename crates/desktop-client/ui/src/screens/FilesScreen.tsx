@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { save } from '@tauri-apps/plugin-dialog'
 
@@ -71,11 +71,11 @@ const toDatetimeLocalValue = (date: Date): string => {
 import { FilesScreenSkeleton } from '../components/SkeletonLoader'
 
 const isSecureNote = (filename: string | null): boolean => filename?.toLowerCase().endsWith('.secure') ?? false
+const NOTE_PLAINTEXT_IDLE_MS = 5 * 60 * 1000
 
 // Contour-based NFT image — same algorithm as Oracle nft_image.rs
 import { getNftColors, getNftImageUrl } from '../utils/nft_image'
 
-const IcoCopy=()=>(<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>)
 const IcoRefresh=()=>(<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>)
 const IcoClose=()=>(<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12"/></svg>)
 const IcoEye=()=>(<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>)
@@ -129,10 +129,52 @@ export default function FilesScreen({onNavigate,searchQuery='',localWalletAvaila
   const [noteContent,setNoteContent]=useState<SecureNoteContent|null>(null)
   const [loadingNote,setLoadingNote]=useState(false)
   const [showContent,setShowContent]=useState(false)
-  const [copiedContent,setCopiedContent]=useState(false)
+  const viewerRequestRef=useRef(0)
 
 
   useEffect(()=>{load()},[])
+
+  const closeNoteViewer = useCallback(() => {
+    viewerRequestRef.current += 1
+    setViewingNote(null)
+    setNoteContent(null)
+    setShowContent(false)
+    setLoadingNote(false)
+  }, [])
+
+  useEffect(() => {
+    return () => closeNoteViewer()
+  }, [closeNoteViewer])
+
+  useEffect(() => {
+    const clearOnVisibilityChange = () => {
+      if (document.visibilityState !== 'visible') closeNoteViewer()
+    }
+    window.addEventListener('blur', closeNoteViewer)
+    document.addEventListener('visibilitychange', clearOnVisibilityChange)
+    return () => {
+      window.removeEventListener('blur', closeNoteViewer)
+      document.removeEventListener('visibilitychange', clearOnVisibilityChange)
+    }
+  }, [closeNoteViewer])
+
+  useEffect(() => {
+    if (!noteContent) return
+
+    let timer: ReturnType<typeof setTimeout>
+    const reset = () => {
+      clearTimeout(timer)
+      timer = setTimeout(closeNoteViewer, NOTE_PLAINTEXT_IDLE_MS)
+    }
+    const events: Array<keyof WindowEventMap> = ['mousemove', 'mousedown', 'keydown', 'touchstart']
+
+    reset()
+    events.forEach(event => window.addEventListener(event, reset, { passive: true }))
+    return () => {
+      clearTimeout(timer)
+      events.forEach(event => window.removeEventListener(event, reset))
+    }
+  }, [closeNoteViewer, noteContent])
 
   // Escape key closes modals
   useEffect(()=>{
@@ -195,7 +237,7 @@ export default function FilesScreen({onNavigate,searchQuery='',localWalletAvaila
         invoke<IncomingGrantInfo[]>('list_incoming_vaulted_grants').catch(()=>[]),
         invoke<OutgoingGrantInfo[]>('list_outgoing_vaulted_grants').catch(()=>[])
       ])
-      setNfts(list)
+      setNfts(list.filter(n => !isSecureNote(n.filename)))
       setIncomingOffers(offers)
       setIncomingGrants(grants)
       setOutgoingGrants(outgoing)
@@ -223,39 +265,21 @@ export default function FilesScreen({onNavigate,searchQuery='',localWalletAvaila
 
   // View Secure Note in RAM
   const viewNote = async (nft: NftInfo) => {
+    const requestId = viewerRequestRef.current + 1
+    viewerRequestRef.current = requestId
     try {
       setViewingNote(nft)
       setLoadingNote(true)
       setShowContent(false)
       setNoteContent(null)
       const content = await invoke<SecureNoteContent>('decrypt_secure_note', { nftTokenId: nft.nftTokenId })
+      if (viewerRequestRef.current !== requestId) return
       setNoteContent(content)
     } catch (e) {
       toast({ type: 'error', title: 'Failed to decrypt', sub: String(e) })
       closeNoteViewer()
     } finally {
       setLoadingNote(false)
-    }
-  }
-
-  // Close viewer and clear content from RAM
-  const closeNoteViewer = () => {
-    setViewingNote(null)
-    setNoteContent(null)
-    setShowContent(false)
-    setCopiedContent(false)
-  }
-
-  // Copy content to clipboard
-  const copyNoteContent = async () => {
-    if (!noteContent?.content) return
-    try {
-      await navigator.clipboard.writeText(noteContent.content)
-      setCopiedContent(true)
-      toast({ type: 'success', title: 'Copied!', sub: 'Content copied to clipboard' })
-      setTimeout(() => setCopiedContent(false), 2000)
-    } catch (e) {
-      toast({ type: 'error', title: 'Copy failed', sub: String(e) })
     }
   }
 
@@ -1110,7 +1134,7 @@ export default function FilesScreen({onNavigate,searchQuery='',localWalletAvaila
                       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 11-7.778 7.778 5.5 5.5 0 017.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
                     </div>
                     <div>
-                      <h3>{viewingNote.filename?.replace('.secure', '') || 'Secure Note'}</h3>
+                      <h3>Secure Note</h3>
                       {noteContent && <div className="sub" style={{margin:0}}>{getNoteTypeLabel(noteContent.noteType)}</div>}
                     </div>
                   </div>
@@ -1160,9 +1184,6 @@ export default function FilesScreen({onNavigate,searchQuery='',localWalletAvaila
                       <div style={{display:'flex',gap:10}}>
                         <button onClick={closeNoteViewer} style={{flex:1,padding:'12px',borderRadius:10,border:'none',background:'#1f2430',color:'#868b98',fontSize:14,fontWeight:500,cursor:'pointer'}}>
                           Close
-                        </button>
-                        <button onClick={copyNoteContent} style={{flex:1,padding:'12px',borderRadius:10,border:'none',background:copiedContent?'#6ac79a':'#6366f1',color:'#fff',fontSize:14,fontWeight:500,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',gap:8}}>
-                          <IcoCopy/>{copiedContent ? 'Copied!' : 'Copy'}
                         </button>
                       </div>
                     </>

@@ -46,10 +46,14 @@ pub async fn create_payload(
         .map_err(|e| ApiError::Internal(format!("Xaman create payload response read failed: {}", e)))?;
 
     if !status.is_success() {
-        tracing::warn!("Xaman create payload failed: status={}, body={}", status, text);
+        tracing::warn!(
+            endpoint_status = status.as_u16(),
+            upstream_error_class = %classify_xaman_error_body(&text),
+            "Xaman create payload failed"
+        );
         return Err(ApiError::BadRequest(format!(
-            "Xaman failed to create payload: {}",
-            text
+            "Xaman failed to create payload: status {}",
+            status
         )));
     }
 
@@ -98,10 +102,14 @@ pub async fn get_payload(
         .map_err(|e| ApiError::Internal(format!("Xaman get payload response read failed: {}", e)))?;
 
     if !status.is_success() {
-        tracing::warn!("Xaman get payload failed: status={}, body={}", status, text);
+        tracing::warn!(
+            endpoint_status = status.as_u16(),
+            upstream_error_class = %classify_xaman_error_body(&text),
+            "Xaman get payload failed"
+        );
         return Err(ApiError::BadRequest(format!(
-            "Xaman failed to get payload: {}",
-            text
+            "Xaman failed to get payload: status {}",
+            status
         )));
     }
 
@@ -127,6 +135,24 @@ fn require_xaman_api_secret(state: &AppState) -> Result<&str> {
         .as_deref()
         .filter(|v| !v.trim().is_empty())
         .ok_or_else(|| ApiError::Internal("XAMAN_API_SECRET is not configured on Oracle".to_string()))
+}
+
+fn classify_xaman_error_body(body: &str) -> &'static str {
+    let lower = body.to_ascii_lowercase();
+
+    if lower.contains("unauthorized") || lower.contains("forbidden") {
+        "auth"
+    } else if lower.contains("rate") || lower.contains("too many") {
+        "rate_limit"
+    } else if lower.contains("not found") {
+        "not_found"
+    } else if lower.contains("invalid") || lower.contains("bad request") {
+        "bad_request"
+    } else if lower.trim().is_empty() {
+        "empty"
+    } else {
+        "upstream"
+    }
 }
 
 fn apply_forced_network(state: &AppState, request: &mut Value) -> Result<()> {
@@ -188,4 +214,19 @@ fn validate_payload_request(request: &Value) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::classify_xaman_error_body;
+
+    #[test]
+    fn xaman_error_classification_does_not_echo_body() {
+        let body = r#"{"error":"unauthorized","token":"secret-token-value"}"#;
+        let class = classify_xaman_error_body(body);
+
+        assert_eq!(class, "auth");
+        assert!(!class.contains("secret-token-value"));
+        assert!(!class.contains("token"));
+    }
 }

@@ -10,12 +10,42 @@ use crate::{
     auth::AuthenticatedUser,
     error::{ApiError, Result},
     models::{
-        ConfirmUploadRequest, FileAccessResponse, FileFragmentDto, FileManifestDto,
-        FragmentDownloadInfo, FragmentUploadRequest, FragmentUploadResponse, RegisterFileRequest,
-        RegisterFileResponse,
+        ConfirmUploadRequest, FileAccessResponse, FileFragmentDto, FileListItemDto,
+        FileListManifestDto, FileListResponse, FileManifestDto, FragmentDownloadInfo,
+        FragmentUploadRequest, FragmentUploadResponse, RegisterFileRequest, RegisterFileResponse,
     },
     services::AppState,
 };
+
+const LIST_MY_FILES_ENCRYPTED_SQL: &str = r#"
+            SELECT nm.nft_token_id,
+                   nm.encrypted_aes_key,
+                   COALESCE(nm.is_re_encrypted, false),
+                   nm.status,
+                   vault_decrypt(nm.encrypted_manifest, $2),
+                   nm.manifest,
+                   nm.created_at
+            FROM nft_metadata nm
+            JOIN users u ON nm.owner_id = u.id
+            WHERE lower(u.wallet_address) = lower($1)
+              AND nm.status IN ('active', 'pending_claim')
+            ORDER BY nm.created_at DESC
+            "#;
+
+const LIST_MY_FILES_PLAIN_SQL: &str = r#"
+            SELECT nm.nft_token_id,
+                   nm.encrypted_aes_key,
+                   COALESCE(nm.is_re_encrypted, false),
+                   nm.status,
+                   NULL::text,
+                   nm.manifest,
+                   nm.created_at
+            FROM nft_metadata nm
+            JOIN users u ON nm.owner_id = u.id
+            WHERE lower(u.wallet_address) = lower($1)
+              AND nm.status IN ('active', 'pending_claim')
+            ORDER BY nm.created_at DESC
+            "#;
 
 /// POST /api/v1/files/register - register a file
 /// **Requires authentication**
@@ -123,6 +153,81 @@ pub async fn register_file(
         nft_token_id: request.nft_token_id,
         fragments_count: request.manifest.fragments.len() as u32,
     }))
+}
+
+/// GET /api/v1/files - list encrypted files owned by the authenticated user
+/// **Requires authentication**
+pub async fn list_my_files(
+    auth: AuthenticatedUser,
+    State(state): State<AppState>,
+) -> Result<Json<FileListResponse>> {
+    let rows = if let Some(ref enc_key) = state.config.db_encryption_key {
+        sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                bool,
+                String,
+                Option<String>,
+                Option<serde_json::Value>,
+                chrono::DateTime<chrono::Utc>,
+            ),
+        >(LIST_MY_FILES_ENCRYPTED_SQL)
+        .bind(&auth.wallet_address)
+        .bind(enc_key)
+        .fetch_all(&state.db)
+        .await?
+    } else {
+        sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                bool,
+                String,
+                Option<String>,
+                Option<serde_json::Value>,
+                chrono::DateTime<chrono::Utc>,
+            ),
+        >(LIST_MY_FILES_PLAIN_SQL)
+        .bind(&auth.wallet_address)
+        .fetch_all(&state.db)
+        .await?
+    };
+
+    let files = rows
+        .into_iter()
+        .map(
+            |(
+                nft_token_id,
+                encrypted_aes_key,
+                is_re_encrypted,
+                status,
+                encrypted_manifest,
+                plain_manifest,
+                created_at,
+            )| {
+                let manifest_json = manifest_json_from_parts(encrypted_manifest, plain_manifest)?;
+
+                Ok(FileListItemDto {
+                    nft_token_id,
+                    encrypted_aes_key,
+                    is_re_encrypted,
+                    status,
+                    manifest: file_list_manifest_from_json(&manifest_json),
+                    created_at: created_at.to_rfc3339(),
+                })
+            },
+        )
+        .collect::<Result<Vec<_>>>()?;
+
+    tracing::debug!(
+        files_count = files.len(),
+        "Listed owned encrypted file metadata"
+    );
+
+    Ok(Json(FileListResponse { files }))
 }
 
 /// GET /api/v1/files/:nft_token_id/access - request file access
@@ -400,6 +505,33 @@ pub async fn request_access(
     }))
 }
 
+fn manifest_json_from_parts(
+    encrypted_manifest: Option<String>,
+    plain_manifest: Option<serde_json::Value>,
+) -> Result<serde_json::Value> {
+    if let Some(manifest) = encrypted_manifest {
+        serde_json::from_str(&manifest)
+            .map_err(|e| ApiError::Internal(format!("Failed to parse encrypted manifest: {e}")))
+    } else {
+        Ok(plain_manifest.unwrap_or_else(|| serde_json::json!({})))
+    }
+}
+
+fn file_list_manifest_from_json(manifest: &serde_json::Value) -> FileListManifestDto {
+    FileListManifestDto {
+        encrypted_filename: manifest["encrypted_filename"]
+            .as_str()
+            .unwrap_or("unknown")
+            .to_string(),
+        original_size: manifest["original_size"].as_u64().unwrap_or(0),
+        mime_type: manifest["mime_type"]
+            .as_str()
+            .unwrap_or("application/octet-stream")
+            .to_string(),
+        original_hash: manifest["original_hash"].as_str().unwrap_or("").to_string(),
+    }
+}
+
 pub async fn get_upload_url(
     _auth: AuthenticatedUser,
     State(state): State<AppState>,
@@ -485,4 +617,54 @@ pub async fn confirm_upload(
     );
 
     Ok(Json(()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_list_manifest_projects_only_safe_list_fields() {
+        let manifest = serde_json::json!({
+            "encrypted_filename": "ciphertext-name",
+            "original_size": 42,
+            "mime_type": "application/x-password",
+            "original_hash": "hash",
+            "fragments": [
+                {
+                    "storage_key": "storage/path",
+                    "encrypted_hash": "fragment-hash",
+                    "size": 100
+                }
+            ]
+        });
+
+        let projected = file_list_manifest_from_json(&manifest);
+
+        assert_eq!(projected.encrypted_filename, "ciphertext-name");
+        assert_eq!(projected.original_size, 42);
+        assert_eq!(projected.mime_type, "application/x-password");
+        assert_eq!(projected.original_hash, "hash");
+    }
+
+    #[test]
+    fn encrypted_manifest_takes_precedence_for_list_projection() {
+        let manifest = manifest_json_from_parts(
+            Some(r#"{"encrypted_filename":"enc","original_size":7}"#.to_string()),
+            Some(serde_json::json!({"encrypted_filename":"plain","original_size":1})),
+        )
+        .expect("encrypted manifest JSON should parse");
+
+        assert_eq!(manifest["encrypted_filename"], "enc");
+        assert_eq!(manifest["original_size"], 7);
+    }
+
+    #[test]
+    fn file_list_query_filters_to_authenticated_owner_and_pending_or_active() {
+        for sql in [LIST_MY_FILES_ENCRYPTED_SQL, LIST_MY_FILES_PLAIN_SQL] {
+            assert!(sql.contains("JOIN users u ON nm.owner_id = u.id"));
+            assert!(sql.contains("lower(u.wallet_address) = lower($1)"));
+            assert!(sql.contains("nm.status IN ('active', 'pending_claim')"));
+        }
+    }
 }

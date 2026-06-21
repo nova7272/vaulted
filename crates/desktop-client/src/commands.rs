@@ -2870,11 +2870,12 @@ fn file_access_status_from_http_status(status: reqwest::StatusCode) -> Option<&'
 mod tests {
     use super::{
         build_auth_lifecycle_status, ensure_recoverable_mint_status,
-        file_access_status_from_http_status, generate_create_wallet_mnemonic,
+        file_access_status_from_http_status, generate_create_wallet_mnemonic, is_secure_note_file,
         local_identity_matches_approved, owner_download_error_for_status, parse_destination_tag,
         parse_wallet_transaction_history, parse_xrp_amount_to_drops,
-        resolve_pre_submit_offer_lookup, set_vaulted_session, validate_create_wallet_word_count,
-        validate_spendable_balance, PreSubmitOfferLookupOutcome,
+        resolve_pre_submit_offer_lookup, safe_secure_note_label, safe_vault_label,
+        secure_note_from_file_info, set_vaulted_session, validate_create_wallet_word_count,
+        validate_spendable_balance, FileInfo, PreSubmitOfferLookupOutcome,
     };
     use crate::error::{ClientError, Result};
     use crate::state::{AppConfig, AppState};
@@ -2907,6 +2908,95 @@ mod tests {
             file_access_status_from_http_status(reqwest::StatusCode::NOT_FOUND),
             Some("deleted")
         );
+    }
+
+    #[test]
+    fn secure_note_label_does_not_echo_private_title() {
+        let label = safe_secure_note_label();
+
+        assert_eq!(label, "Secure note");
+        assert!(!label.contains("seed"));
+        assert!(!label.contains("private-title"));
+    }
+
+    #[test]
+    fn pending_secure_note_file_info_is_listed() {
+        let file = FileInfo {
+            nft_token_id: "0123456789abcdef".to_string(),
+            filename: "encrypted-title.secure".to_string(),
+            size: 26,
+            mime_type: "application/x-password".to_string(),
+            uploaded_at: "2026-06-21T00:00:00Z".to_string(),
+            status: "pending_claim".to_string(),
+        };
+
+        assert!(is_secure_note_file(&file));
+    }
+
+    #[test]
+    fn secure_note_from_file_info_uses_decrypted_filename_title() {
+        let note = secure_note_from_file_info(FileInfo {
+            nft_token_id: "0123456789abcdef".to_string(),
+            filename: "Unique Manual Test Title.secure".to_string(),
+            size: 26,
+            mime_type: "application/x-password".to_string(),
+            uploaded_at: "2026-06-21T00:00:00Z".to_string(),
+            status: "pending_claim".to_string(),
+        })
+        .expect("secure note should map from decrypted filename");
+
+        assert_eq!(note.title, "Unique Manual Test Title");
+        assert_eq!(note.note_type, "password");
+        assert_eq!(note.status, "pending_claim");
+    }
+
+    #[test]
+    fn secure_note_from_file_info_uses_safe_title_when_decrypt_fails() {
+        let note = secure_note_from_file_info(FileInfo {
+            nft_token_id: "0123456789abcdef".to_string(),
+            filename: "Vault #01234567".to_string(),
+            size: 26,
+            mime_type: "application/x-password".to_string(),
+            uploaded_at: "2026-06-21T00:00:00Z".to_string(),
+            status: "pending_claim".to_string(),
+        })
+        .expect("secure note should remain listed by secure-note MIME type");
+
+        assert_eq!(note.title, "Secure note");
+    }
+
+    #[test]
+    fn secure_note_from_file_info_uses_safe_title_when_title_is_empty() {
+        let note = secure_note_from_file_info(FileInfo {
+            nft_token_id: "0123456789abcdef".to_string(),
+            filename: ".secure".to_string(),
+            size: 26,
+            mime_type: "application/x-password".to_string(),
+            uploaded_at: "2026-06-21T00:00:00Z".to_string(),
+            status: "pending_claim".to_string(),
+        })
+        .expect("secure note should map with fallback title");
+
+        assert_eq!(note.title, "Secure note");
+    }
+
+    #[test]
+    fn deleted_secure_note_file_info_is_hidden() {
+        let file = FileInfo {
+            nft_token_id: "0123456789abcdef".to_string(),
+            filename: "encrypted-title.secure".to_string(),
+            size: 26,
+            mime_type: "application/x-password".to_string(),
+            uploaded_at: "2026-06-21T00:00:00Z".to_string(),
+            status: "deleted".to_string(),
+        };
+
+        assert!(!is_secure_note_file(&file));
+    }
+
+    #[test]
+    fn safe_vault_label_handles_short_pending_ids() {
+        assert_eq!(safe_vault_label("abc"), "Vault #abc");
     }
 
     #[test]
@@ -3208,7 +3298,32 @@ pub async fn get_my_nfts(state: State<'_, Arc<AppState>>) -> Result<Vec<NftInfo>
 #[tauri::command]
 pub async fn get_my_files(state: State<'_, Arc<AppState>>) -> Result<Vec<FileInfo>> {
     let _session = state.get_session().await?;
-    Ok(vec![])
+    let oracle = state.get_oracle_client_with_timeout(30).await?;
+    let response = oracle.list_my_files().await?;
+
+    let mut files = Vec::with_capacity(response.files.len());
+    for file in response.files {
+        let filename = decrypt_filename(
+            &state,
+            &file.encrypted_aes_key,
+            &file.manifest.encrypted_filename,
+            file.is_re_encrypted,
+        )
+        .await
+        .unwrap_or_else(|_| safe_vault_label(&file.nft_token_id));
+
+        files.push(FileInfo {
+            nft_token_id: file.nft_token_id,
+            filename,
+            size: file.manifest.original_size,
+            mime_type: file.manifest.mime_type,
+            uploaded_at: file.created_at,
+            status: file.status,
+        });
+    }
+
+    tracing::info!("Found {} owned encrypted files", files.len());
+    Ok(files)
 }
 
 #[derive(Debug, Serialize)]
@@ -3218,6 +3333,12 @@ pub struct FileInfo {
     pub size: u64,
     pub mime_type: String,
     pub uploaded_at: String,
+    pub status: String,
+}
+
+fn safe_vault_label(nft_token_id: &str) -> String {
+    let prefix_len = nft_token_id.len().min(8);
+    format!("Vault #{}", &nft_token_id[..prefix_len])
 }
 
 #[tauri::command]
@@ -4979,6 +5100,7 @@ pub struct SecureNote {
     pub note_type: String, // "password", "seed", "key", "note"
     pub size: u64,
     pub created_at: String,
+    pub status: String,
 }
 
 /// Secure note creation result
@@ -5003,7 +5125,9 @@ pub async fn encrypt_secure_note(
     content: String,
     note_type: String,
 ) -> Result<SecureNoteResult> {
-    use zeroize::Zeroize;
+    use zeroize::{Zeroize, Zeroizing};
+
+    let title = Zeroizing::new(title);
 
     let session = state.get_session().await?;
     let wallet_address = session.wallet_address.clone();
@@ -5019,14 +5143,13 @@ pub async fn encrypt_secure_note(
     let content_size = content.len() as u64;
 
     tracing::info!(
-        "Creating secure note '{}' ({} bytes, type: {})",
-        title,
         content_size,
-        note_type
+        note_type = %note_type,
+        "Creating secure note"
     );
 
     // Progress
-    let mut progress = ProgressEvent::new(&title, "upload");
+    let mut progress = ProgressEvent::new("secure-note", "upload");
     progress.bytes_total = content_size;
     progress.stage = "encrypting".to_string();
     progress.message = "Encrypting secure note...".to_string();
@@ -5046,15 +5169,13 @@ pub async fn encrypt_secure_note(
 
     // Encrypt
     let encryptor = FileEncryptor::new(state.config.fragment_size);
-    let encrypted = encryptor.encrypt_bytes(
-        &content_bytes,
-        &format!("{}.secure", title),
-        mime_type,
-        &public_key,
-    )?;
+    let mut note_filename = format!("{}.secure", title.as_str());
+    let encrypted =
+        encryptor.encrypt_bytes(&content_bytes, &note_filename, mime_type, &public_key)?;
 
     // IMPORTANT: Clear plaintext from memory
     content_bytes.zeroize();
+    note_filename.zeroize();
 
     let encrypted_bytes = encrypted.encrypted_data.to_bytes()?;
 
@@ -5064,8 +5185,8 @@ pub async fn encrypt_secure_note(
 
     tracing::info!("Secure note encrypted: {} bytes", encrypted_bytes.len());
 
-    // Create a vault (mint NFT)
-    progress.stage = "minting".to_string();
+    // Create the Oracle vault row. XRPL mint/finalize is a separate path.
+    progress.stage = "creating_payload".to_string();
     progress.message = "Creating secure vault...".to_string();
     progress.total_progress = 40;
     progress.emit(&app);
@@ -5093,17 +5214,17 @@ pub async fn encrypt_secure_note(
     };
 
     progress.total_progress = 50;
-    progress.message = "Minting NFT...".to_string();
+    progress.message = "Preparing vault...".to_string();
     progress.emit(&app);
 
     let vault_response = oracle.create_vault(&vault_request).await?;
 
     progress.total_progress = 70;
-    progress.message = "NFT created!".to_string();
+    progress.message = "Vault prepared".to_string();
     progress.emit(&app);
 
     tracing::info!(
-        "Secure note vault created: NFT {}",
+        "Secure note vault prepared: {}",
         vault_response.nft_token_id
     );
 
@@ -5129,10 +5250,14 @@ pub async fn encrypt_secure_note(
 
     if !response.status().is_success() {
         let status = response.status();
-        let error_text = response.text().await.unwrap_or_default();
+        let _ = response.text().await;
+        tracing::warn!(
+            endpoint_status = status.as_u16(),
+            "Secure note encrypted payload upload failed"
+        );
         return Err(ClientError::Oracle(format!(
-            "Failed to upload note: {} - {}",
-            status, error_text
+            "Failed to upload encrypted note: {}",
+            status
         )));
     }
 
@@ -5148,7 +5273,7 @@ pub async fn encrypt_secure_note(
         nft_token_id: vault_response.nft_token_id,
         offer_index: vault_response.offer_index,
         signing_request_uri: vault_response.signing_request_uri,
-        title,
+        title: "Secure note".to_string(),
         size: content_size,
     })
 }
@@ -5195,20 +5320,21 @@ pub async fn decrypt_secure_note(
     if !response.status().is_success() {
         let status = response.status();
         let error_body = response.text().await.unwrap_or_default();
-        tracing::error!(
-            "Failed to download note {}: {} - {}",
-            nft_token_id,
-            status,
-            error_body
+        let missing = error_body.contains("missing from all storage nodes");
+        tracing::warn!(
+            nft_token_id = %nft_token_id,
+            endpoint_status = status.as_u16(),
+            missing_from_storage = missing,
+            "Failed to download encrypted secure note payload"
         );
         return Err(ClientError::Oracle(format!(
             "Failed to download note ({}): {}",
             status,
-            if error_body.contains("missing from all storage nodes") {
+            if missing {
                 "Encrypted data is missing from storage. The note may need to be re-created."
                     .to_string()
             } else {
-                error_body
+                "Oracle or storage node returned an error".to_string()
             }
         )));
     }
@@ -5282,36 +5408,58 @@ pub async fn list_secure_notes(state: State<'_, Arc<AppState>>) -> Result<Vec<Se
 
     let secure_notes: Vec<SecureNote> = files
         .into_iter()
-        .filter(|f| f.mime_type.starts_with("application/x-") || f.mime_type == "text/plain")
-        .filter(|f| f.filename.ends_with(".secure"))
-        .map(|f| {
-            let note_type = match f.mime_type.as_str() {
-                "application/x-password" => "password",
-                "application/x-seed-phrase" => "seed",
-                "application/x-api-key" => "key",
-                _ => "note",
-            }
-            .to_string();
-
-            let title = f
-                .filename
-                .strip_suffix(".secure")
-                .unwrap_or(&f.filename)
-                .to_string();
-
-            SecureNote {
-                nft_token_id: f.nft_token_id,
-                title,
-                note_type,
-                size: f.size,
-                created_at: f.uploaded_at,
-            }
-        })
+        .filter_map(secure_note_from_file_info)
         .collect();
 
     tracing::info!("Found {} secure notes", secure_notes.len());
 
     Ok(secure_notes)
+}
+
+fn safe_secure_note_label() -> String {
+    "Secure note".to_string()
+}
+
+fn is_secure_note_file(file: &FileInfo) -> bool {
+    let secure_note_mime =
+        file.mime_type.starts_with("application/x-") || file.mime_type == "text/plain";
+    let filename_marks_secure_note = file.filename.ends_with(".secure");
+
+    file.status != "deleted"
+        && secure_note_mime
+        && (filename_marks_secure_note || file.mime_type.starts_with("application/x-"))
+}
+
+fn secure_note_from_file_info(file: FileInfo) -> Option<SecureNote> {
+    if !is_secure_note_file(&file) {
+        return None;
+    }
+
+    let note_type = match file.mime_type.as_str() {
+        "application/x-password" => "password",
+        "application/x-seed-phrase" => "seed",
+        "application/x-api-key" => "key",
+        _ => "note",
+    }
+    .to_string();
+
+    Some(SecureNote {
+        nft_token_id: file.nft_token_id,
+        title: secure_note_title_from_filename(&file.filename),
+        note_type,
+        size: file.size,
+        created_at: file.uploaded_at,
+        status: file.status,
+    })
+}
+
+fn secure_note_title_from_filename(filename: &str) -> String {
+    filename
+        .strip_suffix(".secure")
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(safe_secure_note_label)
 }
 
 /// NFT claim status

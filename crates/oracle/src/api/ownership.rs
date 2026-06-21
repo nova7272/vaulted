@@ -12,9 +12,9 @@ pub async fn require_verified_nft_owner(
     wallet_address: &str,
     forbidden_message: &str,
 ) -> Result<String> {
-    let db_owner_wallet = sqlx::query_scalar::<_, String>(
+    let (db_owner_wallet, status) = sqlx::query_as::<_, (String, String)>(
         r#"
-        SELECT u.wallet_address
+        SELECT u.wallet_address, nm.status
         FROM nft_metadata nm
         JOIN users u ON nm.owner_id = u.id
         WHERE nm.nft_token_id = $1 AND nm.status IN ('active', 'pending_claim')
@@ -29,6 +29,11 @@ pub async fn require_verified_nft_owner(
         return Err(ApiError::Forbidden(forbidden_message.to_string()));
     }
 
+    if !requires_xrpl_ownership_verification(&status) {
+        tracing::debug!("Pending vault ownership verified from Oracle metadata");
+        return Ok(db_owner_wallet);
+    }
+
     let verification = state
         .xrpl
         .verify_nft_owner(nft_token_id, wallet_address)
@@ -37,6 +42,10 @@ pub async fn require_verified_nft_owner(
     require_owner_from_verification(nft_token_id, wallet_address, verification)?;
 
     Ok(db_owner_wallet)
+}
+
+fn requires_xrpl_ownership_verification(status: &str) -> bool {
+    status != "pending_claim"
 }
 
 fn require_owner_from_verification(
@@ -134,5 +143,15 @@ mod tests {
         .expect_err("verifier errors must not fall back to DB ownership");
 
         assert!(matches!(err, ApiError::OwnershipVerificationUnavailable(_)));
+    }
+
+    #[test]
+    fn pending_claim_rows_use_oracle_owner_until_mint_finalizes() {
+        assert!(!requires_xrpl_ownership_verification("pending_claim"));
+    }
+
+    #[test]
+    fn active_rows_still_require_xrpl_owner_verification() {
+        assert!(requires_xrpl_ownership_verification("active"));
     }
 }

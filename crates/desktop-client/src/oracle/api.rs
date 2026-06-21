@@ -485,6 +485,11 @@ impl OracleClient {
             .await
     }
 
+    /// Lists encrypted files owned by the authenticated user.
+    pub async fn list_my_files(&self) -> Result<FileListResponse> {
+        self.get("/api/v1/files").await
+    }
+
     /// Gets a fragment upload URL
     pub async fn get_fragment_upload_url(
         &self,
@@ -1080,6 +1085,32 @@ pub struct FileAccessResponse {
     pub is_re_encrypted: bool,
     pub manifest: FileManifest,
     pub fragment_urls: Vec<FragmentDownloadInfo>,
+}
+
+/// Owned encrypted file list response.
+#[derive(Debug, Deserialize)]
+pub struct FileListResponse {
+    pub files: Vec<FileListItem>,
+}
+
+/// Owned encrypted file list item.
+#[derive(Debug, Deserialize)]
+pub struct FileListItem {
+    pub nft_token_id: String,
+    pub encrypted_aes_key: String,
+    pub is_re_encrypted: bool,
+    pub status: String,
+    pub manifest: FileListManifest,
+    pub created_at: String,
+}
+
+/// Manifest fields needed for client-side list display and local filename decrypt.
+#[derive(Debug, Deserialize)]
+pub struct FileListManifest {
+    pub encrypted_filename: String,
+    pub original_size: u64,
+    pub mime_type: String,
+    pub original_hash: String,
 }
 
 /// Fragment download information

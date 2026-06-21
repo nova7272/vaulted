@@ -234,6 +234,32 @@ pub struct FileAccessResponse {
     pub onchain_owner: Option<String>,
 }
 
+/// Minimal manifest metadata for listing owned encrypted files.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileListManifestDto {
+    pub encrypted_filename: String,
+    pub original_size: u64,
+    pub mime_type: String,
+    pub original_hash: String,
+}
+
+/// Owned encrypted file list item.
+#[derive(Debug, Serialize)]
+pub struct FileListItemDto {
+    pub nft_token_id: String,
+    pub encrypted_aes_key: String,
+    pub is_re_encrypted: bool,
+    pub status: String,
+    pub manifest: FileListManifestDto,
+    pub created_at: String,
+}
+
+/// Owned encrypted file list response.
+#[derive(Debug, Serialize)]
+pub struct FileListResponse {
+    pub files: Vec<FileListItemDto>,
+}
+
 /// Fragment download information
 #[derive(Debug, Serialize)]
 pub struct FragmentDownloadInfo {

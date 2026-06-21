@@ -278,6 +278,7 @@ pub async fn logging_middleware(
 ) -> Response {
     let method = request.method().clone();
     let uri = request.uri().clone();
+    let safe_path = safe_request_path(&uri).to_string();
     let peer_ip = connect_info.map(|ci| ci.0.ip().to_string());
     let client_ip = extract_client_ip_safe(&headers, peer_ip.as_deref(), &[]);
 
@@ -289,12 +290,16 @@ pub async fn logging_middleware(
         "{} {} {} -> {} ({:?})",
         client_ip,
         method,
-        uri,
+        safe_path,
         response.status(),
         duration
     );
 
     response
+}
+
+pub fn safe_request_path(uri: &axum::http::Uri) -> &str {
+    uri.path()
 }
 
 /// Security headers middleware
@@ -364,6 +369,19 @@ mod tests {
         // Different IP should still be allowed
         let (allowed, _, _) = limiter.check("other_ip").await;
         assert!(allowed, "Different IP should be allowed");
+    }
+
+    #[test]
+    fn request_logging_path_omits_query_strings() {
+        let uri: axum::http::Uri = "/fragments/file?token=secret&Authorization=Bearer%20abc"
+            .parse()
+            .unwrap();
+        let safe = safe_request_path(&uri);
+
+        assert_eq!(safe, "/fragments/file");
+        assert!(!safe.contains("token="));
+        assert!(!safe.contains("secret"));
+        assert!(!safe.contains("Authorization"));
     }
 
     #[test]

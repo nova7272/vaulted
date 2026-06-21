@@ -194,6 +194,7 @@ fn api_v1_routes(auth_rate_limiter: RateLimiter) -> Router<AppState> {
             get(transfers::get_transfer_by_offer),
         )
         // Files - protected (CRIT-03: access/download now require auth + NFT ownership)
+        .route("/files", get(files::list_my_files))
         .route("/files/:nft_token_id/access", get(files::request_access))
         .route(
             "/files/:nft_token_id/download",

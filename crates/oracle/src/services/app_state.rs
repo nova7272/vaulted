@@ -11,6 +11,10 @@ use uuid::Uuid;
 use crate::config::{Config, DEFAULT_XRPL_RPC_URL};
 use crate::xrpl::{XrplConfig, XrplService};
 
+fn redis_error_kind(error: &redis::RedisError) -> String {
+    format!("{:?}", error.kind())
+}
+
 /// Stored challenge with expiry
 #[derive(Clone)]
 pub struct StoredChallenge {
@@ -75,15 +79,24 @@ impl AppState {
         match redis::Client::open(redis_url) {
             Ok(client) => match redis::aio::ConnectionManager::new(client).await {
                 Ok(mgr) => {
-                    tracing::info!("Redis connected at {}", redis_url);
+                    tracing::info!(
+                        redis_configured = true,
+                        "Redis connected for Oracle state cache"
+                    );
                     self.redis = Some(mgr);
                 },
                 Err(e) => {
-                    tracing::warn!("Redis connection failed: {} — using in-memory fallback", e);
+                    tracing::warn!(
+                        error_kind = %redis_error_kind(&e),
+                        "Redis connection failed; using in-memory fallback"
+                    );
                 },
             },
             Err(e) => {
-                tracing::warn!("Redis client error: {} — using in-memory fallback", e);
+                tracing::warn!(
+                    error_kind = %redis_error_kind(&e),
+                    "Redis client setup failed; using in-memory fallback"
+                );
             },
         }
         self
@@ -397,5 +410,20 @@ impl AppState {
         if let Err(e) = result {
             tracing::warn!("Failed to write audit log: {}", e);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redis_error_kind;
+
+    #[test]
+    fn redis_error_kind_does_not_echo_url_or_secret() {
+        let err = redis::Client::open("redis://:secret-token-value@")
+            .expect_err("invalid Redis URL should produce an error");
+        let label = redis_error_kind(&err);
+
+        assert!(!label.contains("secret-token-value"));
+        assert!(!label.contains("redis://"));
     }
 }
